@@ -1,0 +1,22 @@
+# 运行期数据与凭据（绝不入库）
+data/
+.env
+*.env
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 历史快照（体积大，另有备份）
+releases/
+
+# 本机临时素材
+big.jpg
+scratch/
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db

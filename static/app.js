@@ -1,0 +1,2741 @@
+'use strict';
+/* 百格分析 — 前端
+   坐标：canvas 屏幕坐标 <-> 分析图像素坐标（图像像素 = 服务端 work 图，长边 res 指定）
+   所有像素级算法在服务端（复用 crosscut.py 纯函数），前端只负责交互与显示。 */
+
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+
+const S = {
+  id: null, name: '', ow: 0, oh: 0, w: 0, h: 0, res: 'full', rot: 0,
+  img: null,
+  fit: 1, zoom: 1, zoomMode: 'fit', panX: 0, panY: 0, cw: 1, ch: 1, dpr: 1,
+  mode: 'rect',
+  rois: [], sel: -1,
+  samples: [], selSample: -1,
+  tol: 25, purity: 0.5, line: 1, exmode: 'width', widthTouched: false, suggRetry: false,
+  autoTol: true, semi: true, detail: false, showOverlay: true, softOn: false, soft: null, kneeWarn: '',
+  curRid: (() => { try { return localStorage.getItem('baige.curRid') || null; } catch (_) { return null; } })(),
+  roiNative: true, analysis: null,
+  overlayUrl: null, overlayImg: null, contourUrl: null, contourImg: null,
+  rows: null, total: null, lines: [], suggest: null, suggestSrc: '',
+  span: null,
+  rulerHist: [], rulerFull: [], rulerLast: null, rulerSeg: null, rulerDone: null, rulerFadeT: null,
+  suggestHold: null,
+  drag: null, busy: false, seq: 0, autoAbort: null,
+  annot: { tool: 1, r: 15, strokes: [], cur: null, res: null },
+  blocks: null, blocksOn: true, blocksTimer: null, ants: 0,
+  blocksSeq: 0,
+};
+
+/* ------------------------------------------------------------------ 工具 */
+function post(path, body, method, signal) {
+  const opt = { method: method || 'POST', headers: { 'Content-Type': 'application/json' } };
+  if (body !== undefined) opt.body = JSON.stringify(body);
+  if (signal) opt.signal = signal;
+  return fetch(path, opt).then(async r => {
+    if (r.status === 404) throw new Error('图片已过期（分析缓存被换出），请重新「打开图片」上传一次');
+    if (!r.ok) throw new Error((await r.text()).slice(0, 200) || ('HTTP ' + r.status));
+    return r.json();
+  });
+}
+function fmt(n, d = 2) { return (Math.round(n * Math.pow(10, d)) / Math.pow(10, d)).toFixed(d); }
+function debounce(fn, ms) {
+  let t;
+  const f = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  f.cancel = () => clearTimeout(t);          // 双指缩放时要把待发的重算掐掉
+  return f;
+}
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+/* ------------------------------------------------------------------ 画布几何 */
+const cv = $('#cv'), ctx = cv.getContext('2d');
+const wrap = $('#wrap');
+
+function scale() { return S.fit * S.zoom; }
+function toImg(ex, ey) { const s = scale(); return { x: (ex - S.panX) / s, y: (ey - S.panY) / s }; }
+function toScreen(x, y) { const s = scale(); return { x: S.panX + x * s, y: S.panY + y * s }; }
+
+/* 指针 → 画布逻辑坐标：用实时 rect 并按 CSS/位图比例换算，
+   这样侧栏变化导致画布尺寸变动时坐标也不会跳 */
+function evPos(e) {
+  const r = cv.getBoundingClientRect();
+  const kx = S.cw / (r.width || 1), ky = S.ch / (r.height || 1);
+  return { x: (e.clientX - r.left) * kx, y: (e.clientY - r.top) * ky };
+}
+
+let resizePending = null;
+/* 尺寸变化入口：必须【同步】处理。
+   若推迟到 rAF，会有一帧「CSS 尺寸已变、canvas 位图还是旧尺寸」，
+   浏览器把旧位图拉伸铺满 → 就是看到的跳动/重影。 */
+function scheduleResize() {
+  resizeCanvas();
+}
+
+function resizeCanvas() {
+  if (S.drag) { resizePending = true; return; }   // 拖拽中不改几何，避免画布突然缩放
+  const r = wrap.getBoundingClientRect();
+  const nw = Math.max(80, Math.ceil(r.width));
+  const nh = Math.max(80, Math.ceil(r.height));
+  if (nw === S.cw && nh === S.ch && cv.width) return;   // 尺寸没变：不动位图、不重算，避免无谓闪烁
+  const anchor = S.img ? toImg(S.cw / 2, S.ch / 2) : null;
+  const zoomed = S.zoom > 1.001;
+  S.dpr = Math.min(2, window.devicePixelRatio || 1);
+  S.cw = nw; S.ch = nh;
+  cv.width = Math.round(S.cw * S.dpr);
+  cv.height = Math.round(S.ch * S.dpr);
+  /* 显式像素尺寸：CSS 盒宽高与位图逻辑宽高严格相等。用 100% 时窗口宽度出现小数
+     （如 1048.6px）会让浏览器每次重采样，看起来发虚、像有重影 */
+  cv.style.width = S.cw + 'px';
+  cv.style.height = S.ch + 'px';
+  if (S.img) {
+    S.fit = Math.min(S.cw / S.w, S.ch / S.h);
+    if (S.zoomMode === 'px1') S.zoom = 1 / S.fit;      // 1:1 永远是 1 图像像素 = 1 屏幕像素
+    else if (S.zoomMode === 'fit') S.zoom = 1;
+    if (zoomed && anchor) {                // 缩放状态：保持"画布中心那个像素"不动，视觉上不跳
+      const s = S.fit * S.zoom;
+      S.panX = S.cw / 2 - anchor.x * s;
+      S.panY = S.ch / 2 - anchor.y * s;
+    }
+  }
+  clampPan();
+  draw();
+}
+
+
+function fitView() {
+  if (!S.img) return;
+  S.fit = Math.min(S.cw / S.w, S.ch / S.h);
+  S.zoom = 1; S.zoomMode = 'fit';
+  S.panX = (S.cw - S.w * S.fit) / 2;
+  S.panY = (S.ch - S.h * S.fit) / 2;
+  draw();
+}
+function zoomOne() {
+  if (!S.img) return;
+  const c = toImg(S.cw / 2, S.ch / 2);
+  S.zoom = 1 / S.fit; S.zoomMode = 'px1';
+  S.panX = S.cw / 2 - c.x * scale();
+  S.panY = S.ch / 2 - c.y * scale();
+  clampPan(); draw();
+}
+function zoomAt(factor, ax, ay) {
+  if (!S.img) return;
+  const p = toImg(ax, ay);
+  S.zoom = clamp(S.zoom * factor, 0.05, 40); S.zoomMode = 'free';
+  const s = scale();
+  S.panX = ax - p.x * s;
+  S.panY = ay - p.y * s;
+  clampPan(); draw();
+}
+function clampPan() {
+  if (!S.img) return;
+  const s = scale(), dw = S.w * s, dh = S.h * s, m = 60;
+  if (dw <= S.cw) S.panX = (S.cw - dw) / 2; else S.panX = clamp(S.panX, S.cw - dw - m, m);
+  if (dh <= S.ch) S.panY = (S.ch - dh) / 2; else S.panY = clamp(S.panY, S.ch - dh - m, m);
+}
+
+/* ------------------------------------------------------------------ 旋转与手柄 */
+function boxCenter(r) { return { x: (r.box[0] + r.box[2]) / 2, y: (r.box[1] + r.box[3]) / 2 }; }
+function rot(p, c, deg) {
+  const t = deg * Math.PI / 180, dx = p.x - c.x, dy = p.y - c.y;
+  return { x: c.x + dx * Math.cos(t) - dy * Math.sin(t), y: c.y + dx * Math.sin(t) + dy * Math.cos(t) };
+}
+function unrot(p, c, deg) {
+  const t = deg * Math.PI / 180, dx = p.x - c.x, dy = p.y - c.y;
+  return { x: c.x + dx * Math.cos(t) + dy * Math.sin(t), y: c.y - dx * Math.sin(t) + dy * Math.cos(t) };
+}
+function cornersOf(r) {
+  const c = boxCenter(r), hw = (r.box[2] - r.box[0]) / 2, hh = (r.box[3] - r.box[1]) / 2;
+  const local = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]];
+  return local.map(([dx, dy]) => rot({ x: c.x + dx, y: c.y + dy }, c, r.ang || 0));
+}
+/* 8 个缩放手柄（sx,sy ∈ {-1,0,1}） */
+function handleDefs(r) {
+  const c = boxCenter(r), hw = (r.box[2] - r.box[0]) / 2, hh = (r.box[3] - r.box[1]) / 2;
+  const defs = [];
+  for (const sx of [-1, 0, 1]) for (const sy of [-1, 0, 1]) {
+    if (!sx && !sy) continue;
+    defs.push({ sx, sy, p: rot({ x: c.x + sx * hw, y: c.y + sy * hh }, c, r.ang || 0) });
+  }
+  return defs;
+}
+function rotateHandlePoint(r) {
+  const c = boxCenter(r), hh = (r.box[3] - r.box[1]) / 2;
+  const top = rot({ x: c.x, y: c.y - hh }, c, r.ang || 0);
+  const cs = toScreen(c.x, c.y), ts = toScreen(top.x, top.y);
+  let dx = ts.x - cs.x, dy = ts.y - cs.y;
+  const d = Math.hypot(dx, dy) || 1;
+  return { x: ts.x + dx / d * 24, y: ts.y + dy / d * 24 };
+}
+
+/* ------------------------------------------------------------------ 绘制 */
+let lastZoomLabel = '', drawQueued = false;
+/* 拖动过程里用这个：一帧最多重绘一次。直接每次 pointermove 都全量重绘，
+   高刷新率鼠标会把主线程塞满，画面反而落后指针、一顿一顿地追 */
+function drawSoon() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(() => { drawQueued = false; draw(); });
+}
+
+function draw() {
+  ctx.setTransform(S.dpr, 0, 0, S.dpr, 0, 0);
+  ctx.clearRect(0, 0, S.cw, S.ch);
+  if (!S.img) return;
+  const s = scale(), dw = S.w * s, dh = S.h * s;
+  ctx.imageSmoothingEnabled = s < 2;
+  ctx.drawImage(S.img, S.panX, S.panY, dw, dh);
+  if (S.showOverlay && S.overlayImg) {
+    ctx.globalAlpha = 0.96;
+    ctx.drawImage(S.overlayImg, S.panX, S.panY, dw, dh);
+    ctx.globalAlpha = 1;
+  }
+
+  drawAnnotations();
+  drawBlockAnts();
+  drawBlocks();
+  drawRois();
+  drawRuler();
+  if (S.drag && S.drag.kind === 'new') {
+    const { a, b } = S.drag;
+    const p0 = toScreen(a.x, a.y), p1 = toScreen(b.x, b.y);
+    ctx.save();
+    const rw = Math.abs(p1.x - p0.x), rh = Math.abs(p1.y - p0.y);
+    const rx = Math.min(p0.x, p1.x), ry = Math.min(p0.y, p1.y);
+    ctx.setLineDash([]);                       // 深色底：任何底色上都看得见
+    ctx.strokeStyle = 'rgba(0,0,0,.6)';
+    ctx.lineWidth = 4.5;
+    ctx.strokeRect(rx, ry, rw, rh);
+    ctx.setLineDash([8, 5]);
+    ctx.strokeStyle = '#ffe14d';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rx, ry, rw, rh);
+    ctx.restore();
+  }
+  const zl = Math.round(s * 100) + '%';
+  if (zl !== lastZoomLabel) { lastZoomLabel = zl; $('#zoomLabel').textContent = zl; }
+}
+
+/* --- 手绘三色笔：红=确认脱落，蓝=确认刀缝，黄=无法判断 --- */
+const ANNOT_COLOR = { 1: 'rgba(255,70,70,.42)', 2: 'rgba(58,168,255,.42)', 3: 'rgba(255,205,60,.42)' };
+const ANNOT_NAME = { 1: '确认脱落', 2: '确认刀缝', 3: '无法判断' };
+
+function drawAnnotations() {
+  const list = S.annot.strokes.length ? (S.annot.cur ? S.annot.strokes.concat([S.annot.cur]) : S.annot.strokes) : (S.annot.cur ? [S.annot.cur] : []);
+  if (!list.length) return;
+  const s = scale();
+  ctx.save();
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const k of list) {
+    const col = ANNOT_COLOR[k.t] || 'rgba(255,255,255,.35)';
+    const w = Math.max(1, k.r * 2 * s);
+    const strokes = () => {
+      ctx.beginPath();
+      if (k.pts.length === 1) {
+        const p = toScreen(k.pts[0][0], k.pts[0][1]);
+        ctx.arc(p.x, p.y, Math.max(1, k.r * s), 0, Math.PI * 2);
+      } else {
+        for (let i = 0; i < k.pts.length; i++) {
+          const p = toScreen(k.pts[i][0], k.pts[i][1]);
+          if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+        }
+      }
+      ctx.stroke();
+    };
+    // 先描一道浅白边，笔迹压在红/黄漆面上才不会糊成一片
+    ctx.strokeStyle = 'rgba(255,255,255,.5)';
+    ctx.lineWidth = w + 2.5;
+    strokes();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = w;
+    strokes();
+  }
+  ctx.restore();
+}
+
+/* 逐块确认：在每块露底的中心画编号圆点，点一下就排除 */
+
+/* 块轮廓：1 px 蚂蚁线（和 PS 选框一个意思）。
+   用矢量路径描边，线宽永远是 1 屏幕像素——位图轮廓一放大就变成和像素一样粗，细不下去。 */
+function drawBlockAnts() {
+  const B = S.blocks;
+  if (!B || !B.rois || !S.blocksOn) return;
+  ctx.save();
+  ctx.globalAlpha = (B.sig === blocksSig()) ? 1 : 0.32;   // 参数刚改、新块还没回来：淡一点，别让它看着像结果
+  ctx.lineWidth = 1;
+  ctx.lineJoin = 'round';
+  ctx.setLineDash([4, 4]);
+  B.rois.forEach((r, ri) => {
+    r.blocks.forEach(b => {
+      const ol = b.outline;
+      if (!ol || ol.length < 2) return;
+      const ex = B.excluded[ri].has(b.i);
+      const sp = ol.map(p => toScreen(p[0], p[1]));
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const q of sp) { x0 = Math.min(x0, q.x); y0 = Math.min(y0, q.y); x1 = Math.max(x1, q.x); y1 = Math.max(y1, q.y); }
+      ctx.beginPath();
+      if (x1 - x0 < 9 || y1 - y0 < 9) {
+        // 小块/细条在屏幕上只有几个像素：4-4 的虚线根本画不出来，看着就像“没有蚂蚁线”。
+        // 这种情况至少给一个 9 屏幕像素的方框，保证眼睛能看到它在哪。
+        const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+        const hw = Math.max(9, x1 - x0) / 2, hh = Math.max(9, y1 - y0) / 2;
+        ctx.rect(cx - hw, cy - hh, hw * 2, hh * 2);
+      } else {
+        sp.forEach((q, k) => { if (k) ctx.lineTo(q.x, q.y); else ctx.moveTo(q.x, q.y); });
+        ctx.closePath();
+      }
+      // 黑一段 + 白一段交替：任何底色上都读得出，还能看出“在动”
+      ctx.strokeStyle = ex ? 'rgba(120,120,128,.85)' : 'rgba(0,0,0,.88)';
+      ctx.lineDashOffset = -S.ants;
+      ctx.stroke();
+      ctx.strokeStyle = ex ? 'rgba(200,200,206,.55)' : 'rgba(255,255,255,.95)';
+      ctx.lineDashOffset = -S.ants + 4;
+      ctx.stroke();
+    });
+  });
+  ctx.restore();
+}
+
+let antsTimer = null;
+function startAnts() {
+  if (antsTimer) return;
+  let last = 0;
+  const tick = (t) => {
+    if (t - last > 70) {                       // ~14 fps 足够，别把主线程占满
+      last = t;
+      if (S.blocks && S.blocks.rois && S.blocksOn) { S.ants = (S.ants + 1) % 8; draw(); }
+    }
+    antsTimer = requestAnimationFrame(tick);
+  };
+  antsTimer = requestAnimationFrame(tick);
+}
+
+function drawBlocks() {
+  const B = S.blocks;
+  if (!B || !B.rois || !S.blocksOn) return;   // 换判法/换图时会置空，别当成有块
+  ctx.save();
+  ctx.globalAlpha = (B.sig === blocksSig()) ? 1 : 0.32;
+  ctx.font = '600 10px ui-monospace,Menlo,Consolas,monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  // 轮廓由服务端的 contour 层画（细线只描边），这里只标块号：
+  // 黑描边 + 白字，任何底色都读得出，又不遮住块内的像素。
+  B.rois.forEach((r, ri) => {
+    r.blocks.forEach(b => {
+      const ex = B.excluded[ri].has(b.i);
+      const p = toScreen(b.cx, b.cy);
+      if (p.x < -24 || p.y < -24 || p.x > S.cw + 24 || p.y > S.ch + 24) return;
+      const s = String(b.i + 1);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,.72)';
+      ctx.strokeText(s, p.x, p.y + 0.5);
+      ctx.fillStyle = ex ? 'rgba(215,215,220,.95)' : '#fff';
+      ctx.fillText(s, p.x, p.y + 0.5);
+      if (ex) {
+        ctx.beginPath();
+        ctx.moveTo(p.x - 8, p.y - 8); ctx.lineTo(p.x + 8, p.y + 8);
+        ctx.moveTo(p.x + 8, p.y - 8); ctx.lineTo(p.x - 8, p.y + 8);
+        ctx.lineWidth = 1.4;
+        ctx.strokeStyle = 'rgba(215,215,220,.85)';
+        ctx.stroke();
+      }
+    });
+  });
+  ctx.restore();
+}
+
+function blockHit(ex, ey) {
+  const B = S.blocks;
+  if (!B) return null;
+  let best = null, bd = 16;
+  B.rois.forEach((r, ri) => {
+    r.blocks.forEach(b => {
+      const p = toScreen(b.cx, b.cy);
+      const d = Math.hypot(p.x - ex, p.y - ey);
+      if (d < bd) { bd = d; best = { ri, i: b.i }; }
+    });
+  });
+  return best;
+}
+
+function drawRois() {
+  const boxes = [], texts = [];
+  S.rois.forEach((r, i) => {
+    const cps = cornersOf(r).map(p => toScreen(p.x, p.y));
+    const sel = i === S.sel;
+    ctx.beginPath();
+    ctx.moveTo(cps[0].x, cps[0].y);
+    for (let k = 1; k < 4; k++) ctx.lineTo(cps[k].x, cps[k].y);
+    ctx.closePath();
+    // 先粗黑底、再亮线：黄漆膜、蓝漆膜、白纸上都能看清
+    ctx.save();
+    ctx.setLineDash([]);
+    ctx.lineWidth = sel ? 6.5 : 5;
+    ctx.strokeStyle = 'rgba(0,0,0,.62)';
+    ctx.stroke();
+    ctx.setLineDash(sel ? [] : [8, 5]);        // 选中=实线，未选中=虚线（不靠颜色区分）
+    ctx.lineWidth = sel ? 2.8 : 2;
+    ctx.strokeStyle = sel ? '#ffd400' : '#ffffff';
+    ctx.stroke();
+    ctx.restore();
+    if (sel) {
+      const sq = (x, y, s) => {
+        ctx.fillStyle = 'rgba(0,0,0,.75)'; ctx.fillRect(x - s - 1.5, y - s - 1.5, (s + 1.5) * 2, (s + 1.5) * 2);
+        ctx.fillStyle = '#ffd400'; ctx.fillRect(x - s, y - s, s * 2, s * 2);
+      };
+      for (const p of cps) sq(p.x, p.y, 3.5);
+      const defs = handleDefs(r);
+      for (const d of defs) {
+        if (d.sx && d.sy) continue;            // 四角已画
+        const p = toScreen(d.p.x, d.p.y);
+        sq(p.x, p.y, 3);
+      }
+      const rp = rotateHandlePoint(r);
+      ctx.beginPath(); ctx.arc(rp.x, rp.y, 7.5, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0,0,0,.65)'; ctx.lineWidth = 3.5; ctx.stroke();
+      ctx.beginPath(); ctx.arc(rp.x, rp.y, 6, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ffd400'; ctx.lineWidth = 1.8; ctx.stroke();
+      ctx.beginPath(); ctx.arc(rp.x, rp.y, 2.2, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd400'; ctx.fill();
+    }
+    const xs = cps.map(p => p.x), ys = cps.map(p => p.y);
+    const bb = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    boxes.push(bb);
+    let t = 'R' + (i + 1);
+    if (S.rows && S.rows.length === S.rois.length) {
+      t += '  ' + fmt(S.rows[i].pct, 1) + '%  ' + S.rows[i].astm;
+      if (Math.abs(r.ang) > 0.5) t += '  ' + (r.ang > 0 ? '+' : '') + Math.round(r.ang) + '°';
+    }
+    texts.push(t);
+  });
+  if (!boxes.length) return;
+  const placed = placeLabels(boxes, texts);
+  ctx.font = '600 12px ui-monospace,Menlo,Consolas,monospace';
+  ctx.textBaseline = 'middle';
+  placed.forEach((p, i) => {
+    ctx.fillStyle = 'rgba(12,13,16,.88)';
+    ctx.strokeStyle = '#7a7a7a';
+    ctx.lineWidth = 1;
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.strokeRect(p.x + .5, p.y + .5, p.w - 1, p.h - 1);
+    ctx.fillStyle = '#ffd54a';
+    ctx.fillText(texts[i], p.x + 6, p.y + p.h / 2);
+  });
+}
+
+function placeLabels(boxes, texts) {
+  ctx.font = '600 12px ui-monospace,Menlo,Consolas,monospace';
+  const placed = [], out = [];
+  const h = 18, pad = 4;
+  boxes.forEach((b, i) => {
+    const w = ctx.measureText(texts[i]).width + 12;
+    const cands = [
+      [b[0], b[1] - h - pad], [b[2] - w, b[1] - h - pad],
+      [b[0], b[3] + pad], [b[2] - w, b[3] + pad],
+      [b[2] + pad, b[1]], [b[0] - w - pad, b[1]],
+      [b[2] + pad, b[3] - h], [b[0] - w - pad, b[3] - h],
+    ];
+    let best = null;
+    for (let [x, y] of cands) {
+      x = clamp(x, 1, S.cw - w - 1); y = clamp(y, 1, S.ch - h - 1);
+      const r = [x, y, x + w, y + h];
+      const hit = placed.some(q => !(r[2] < q[0] || r[0] > q[2] || r[3] < q[1] || r[1] > q[3]));
+      if (!hit) { best = r; break; }
+    }
+    if (!best) {
+      let [x, y] = cands[0];
+      x = clamp(x, 1, S.cw - w - 1); y = clamp(y, 1, S.ch - h - 1);
+      best = [x, y, x + w, y + h];
+    }
+    placed.push(best);
+    out.push({ x: best[0], y: best[1], w, h });
+  });
+  return out;
+}
+
+/* 量完的线放 6 秒就自己隐去（数值、均值、用测量值都还在） */
+function rulerFadeSoon() {
+  clearTimeout(S.rulerFadeT);
+  S.rulerFadeT = setTimeout(() => {
+    S.rulerDone = null; S.rulerSeg = null;     // 不管当前在哪个页签，到点就收线（数值仍保留）
+    draw();
+  }, 6000);
+}
+
+function drawRuler() {
+  for (const [seg, color] of [[S.rulerDone, '#ff66ff'], [S.rulerSeg, '#ffffff']]) {
+    if (!seg) continue;
+    const a = toScreen(seg[0], seg[1]), b = toScreen(seg[2], seg[3]);
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(a.x - 4, a.y); ctx.lineTo(a.x + 4, a.y);
+    ctx.moveTo(b.x - 4, b.y); ctx.lineTo(b.x + 4, b.y);
+    ctx.stroke();
+  }
+  if (S.rulerDone && S.rulerLast) {
+    const a = toScreen(S.rulerDone[0], S.rulerDone[1]);
+    const b = toScreen(S.rulerDone[2], S.rulerDone[3]);
+    const txt = fmt(S.rulerLast.width_full, 1) + ' px 原图';
+    ctx.font = '600 12px ui-monospace,Menlo,Consolas,monospace';
+    const w = ctx.measureText(txt).width + 10;
+    const x = (a.x + b.x) / 2 + 8, y = (a.y + b.y) / 2 - 22;
+    ctx.fillStyle = 'rgba(12,13,16,.88)'; ctx.fillRect(x, y, w, 18);
+    ctx.fillStyle = '#ff9cff'; ctx.textBaseline = 'middle';
+    ctx.fillText(txt, x + 5, y + 9);
+  }
+}
+
+/* ------------------------------------------------------------------ 命中测试 */
+function poi(r, x, y) {
+  // 图像坐标 x,y 是否在（可旋转的）框内
+  const c = boxCenter(r);
+  const l = unrot({ x, y }, c, r.ang || 0);
+  const hw = (r.box[2] - r.box[0]) / 2, hh = (r.box[3] - r.box[1]) / 2;
+  return Math.abs(l.x - c.x) <= hw && Math.abs(l.y - c.y) <= hh;
+}
+
+function hitAt(ex, ey) {
+  const p = toImg(ex, ey);
+  // 1) 选中框的旋转手柄 / 缩放手柄（屏幕坐标，容差 8px）
+  if (S.sel >= 0 && S.rois[S.sel]) {
+    const r = S.rois[S.sel];
+    const rp = rotateHandlePoint(r);
+    if (Math.hypot(rp.x - ex, rp.y - ey) <= 9) return { i: S.sel, part: 'rotate' };
+    for (const d of handleDefs(r)) {
+      const q = toScreen(d.p.x, d.p.y);
+      if (Math.abs(q.x - ex) <= 7 && Math.abs(q.y - ey) <= 7) {
+        return { i: S.sel, part: 'resize', sx: d.sx, sy: d.sy };
+      }
+    }
+  }
+  // 2) 内部 → 平移（从上层往下找）
+  for (let i = S.rois.length - 1; i >= 0; i--) {
+    if (poi(S.rois[i], p.x, p.y)) return { i, part: 'move' };
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ 指针交互 */
+let spaceDown = false;
+
+/* 双指缩放/平移：Pointer Events 在 iOS/Android 都是一套，不需要额外手势库 */
+const ptrs = new Map();
+let pinch = null;
+/* 单指“点”的候选：手指落下时先不执行动作，等抬手确认这是点、不是双指缩放或拖动。
+   手机上双指缩放时第一根手指已经落在图上，立刻响应就等于把“缩放”当成“点了块/取了色”。 */
+let tapPending = null;
+let pinchSeen = false;      // 这次手势里出现过双指
+const TAP_SLOP = 8;         // 抬手时位移超过这么多像素就不算“点”
+
+function pinchStart() {
+  pinchSeen = true;
+  tapPending = null;                                   // 双指了，任何“点”都作废
+  if (S.dragSnap) {                                    // 第一根手指可能已经把选区挪了一点，退回去
+    S.rois = S.dragSnap; S.dragSnap = null;
+    refreshRoiList(); syncRoiAngle(); draw();
+  }
+  S.annot.cur = null;                                  // 注释笔画也别留在半途
+  if (S.rulerSeg) { S.rulerSeg = null; draw(); }
+  if (debouncedAnalyze && debouncedAnalyze.cancel) debouncedAnalyze.cancel();
+  const p = [...ptrs.values()];
+  if (p.length < 2) return;
+  const mid = { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 };
+  pinch = {
+    d0: Math.max(1, Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y)),
+    zoom0: S.zoom,
+    anchor: toImg(mid.x, mid.y),
+  };
+  S.drag = null; pinch._seen = true;
+}
+function pinchMove() {
+  const p = [...ptrs.values()];
+  if (p.length < 2 || !pinch) return;
+  const mid = { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 };
+  const d = Math.max(1, Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y));
+  S.zoom = clamp(pinch.zoom0 * (d / pinch.d0), 0.05, 40);
+  S.zoomMode = 'free';
+  const s = scale();
+  S.panX = mid.x - pinch.anchor.x * s;
+  S.panY = mid.y - pinch.anchor.y * s;
+  clampPan();
+  drawSoon();
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (!S.img) return;
+  e.preventDefault();                       // 关键：阻止浏览器默认的文本选择/图片拖拽
+  document.body.classList.add('dragging');
+  cv.setPointerCapture(e.pointerId);
+  const { x: ex, y: ey } = evPos(e);
+  ptrs.set(e.pointerId, { x: ex, y: ey });
+  if (ptrs.size === 2) { pinchStart(); return; }
+  if (e.button === 1 || spaceDown || (e.button === 0 && e.altKey)) {
+    S.drag = { kind: 'pan', ex, ey, px: S.panX, py: S.panY };
+    cv.style.cursor = 'grabbing';
+    return;
+  }
+  if (e.button !== 0) return;
+
+  if (S.mode === 'blocks') {
+    const hit = blockHit(ex, ey);
+    if (hit) tapPending = { kind: 'block', ri: hit.ri, i: hit.i, x: ex, y: ey };
+    return;                        // 点在空白处什么都不做，免得误拖出选区
+  }
+  if (S.mode === 'annot') {
+    const p = toImg(ex, ey);
+    if (p.x < 0 || p.y < 0 || p.x >= S.w || p.y >= S.h) return;
+    S.annot.cur = { t: S.annot.tool, r: S.annot.r, pts: [[p.x, p.y]] };
+    S.drag = { kind: 'annot' };
+    draw();
+    return;
+  }
+  if (S.mode === 'pick') { tapPending = { kind: 'pick', x: ex, y: ey }; return; }
+  if (S.mode === 'ruler') {
+    const p = toImg(ex, ey);
+    S.drag = { kind: 'ruler', a: p, b: p };
+    clearTimeout(S.rulerFadeT);
+    S.rulerSeg = [p.x, p.y, p.x, p.y];
+    return;
+  }
+  // rect 模式
+  const hit = hitAt(ex, ey);
+  const p = toImg(ex, ey);
+  if (hit && hit.part === 'rotate') {
+    S.dragSnap = JSON.parse(JSON.stringify(S.rois));
+    const r = S.rois[hit.i], c = boxCenter(r);
+    const cs = toScreen(c.x, c.y);
+    S.drag = {
+      kind: 'rotate', i: hit.i, p0: p,
+      startPointer: Math.atan2(ey - cs.y, ex - cs.x) * 180 / Math.PI,
+      startAng: r.ang || 0,
+    };
+    return;
+  }
+  if (hit && hit.part === 'resize') {
+    S.dragSnap = JSON.parse(JSON.stringify(S.rois));
+    const r = S.rois[hit.i];
+    S.drag = {
+      kind: 'resize', i: hit.i, sx: hit.sx, sy: hit.sy,
+      p0: p, c0: boxCenter(r), ang: r.ang || 0,
+      hw0: (r.box[2] - r.box[0]) / 2, hh0: (r.box[3] - r.box[1]) / 2, moved: false,
+    };
+    return;
+  }
+  if (hit && hit.part === 'move') {
+    S.dragSnap = JSON.parse(JSON.stringify(S.rois));
+    S.sel = hit.i;
+    S.drag = { kind: 'move', i: hit.i, p0: p, box0: S.rois[hit.i].box.slice(), moved: false };
+    refreshRoiList(); syncRoiAngle(); draw();
+    return;
+  }
+  S.drag = { kind: 'new', a: p, b: p };
+  S.sel = -1;
+  draw();
+});
+
+cv.addEventListener('pointermove', e => {
+  if (!S.img) return;
+  const { x: ex, y: ey } = evPos(e);
+  if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, { x: ex, y: ey });
+  if (pinch && ptrs.size >= 2) { e.preventDefault(); pinchMove(); return; }
+  if (tapPending && Math.hypot(ex - tapPending.x, ey - tapPending.y) > TAP_SLOP) tapPending = null;
+  if (!S.drag) {
+    if (S.mode === 'pan' || spaceDown) cv.style.cursor = 'grab';
+    else if (S.mode === 'pick') cv.style.cursor = 'crosshair';
+    else if (S.mode === 'ruler') cv.style.cursor = 'cell';
+    else if (S.mode === 'annot') cv.style.cursor = 'crosshair';
+    else if (S.mode === 'blocks') cv.style.cursor = blockHit(ex, ey) ? 'pointer' : 'default';
+    else {
+      const hit = hitAt(ex, ey);
+      cv.style.cursor = !hit ? 'crosshair'
+        : hit.part === 'move' ? 'move'
+          : hit.part === 'rotate' ? 'alias' : 'nwse-resize';
+    }
+    return;
+  }
+  const d = S.drag;
+  if (d.kind === 'pan') { S.panX = d.px + (ex - d.ex); S.panY = d.py + (ey - d.ey); clampPan(); drawSoon(); return; }
+  const p = toImg(ex, ey);
+
+  if (d.kind === 'annot') {
+    const c = S.annot.cur;
+    if (!c) { S.drag = null; return; }
+    const last = c.pts[c.pts.length - 1];
+    if (Math.hypot(p.x - last[0], p.y - last[1]) >= Math.max(1, c.r * 0.3)) {
+      c.pts.push([Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10]);
+      drawSoon();
+    }
+    return;
+  }
+
+  if (d.kind === 'new') { d.b = p; drawSoon(); return; }
+
+  if (d.kind === 'ruler') {
+    d.b = p;
+    S.rulerSeg = [d.a.x, d.a.y, p.x, p.y];
+    drawSoon(); return;
+  }
+
+  if (d.kind === 'move') {
+    const r = S.rois[d.i];
+    if (!r) { S.drag = null; return; }
+    /* 位移一律相对“按下那一刻”算，并且先过 4 屏幕像素的死区：
+       手指轻点选区的抖动（1~3 px）不该被当成拖动，否则一碰框就重算。 */
+    const dx = p.x - d.p0.x, dy = p.y - d.p0.y;
+    if (!d.moved && Math.hypot(dx, dy) * scale() < 4) return;
+    d.moved = true;
+    const bw = d.box0[2] - d.box0[0], bh = d.box0[3] - d.box0[1];
+    const x0 = clamp(d.box0[0] + dx, 0, S.w - bw), y0 = clamp(d.box0[1] + dy, 0, S.h - bh);
+    r.box = [x0, y0, x0 + bw, y0 + bh];
+    drawSoon(); return;
+  }
+
+  if (d.kind === 'rotate') {
+    const r = S.rois[d.i];
+    if (!r) { S.drag = null; return; }
+    if (!d.moved && Math.hypot((p.x - d.p0.x) * scale(), (p.y - d.p0.y) * scale()) < 4) return;
+    const c = boxCenter(r), cs = toScreen(c.x, c.y);
+    const cur = Math.atan2(ey - cs.y, ex - cs.x) * 180 / Math.PI;
+    let ang = d.startAng + (cur - d.startPointer);
+    if (e.shiftKey) ang = Math.round(ang / 5) * 5;
+    r.ang = Math.round(ang * 10) / 10;
+    d.moved = true;
+    syncRoiAngle(); drawSoon(); return;      // 侧栏等松手后统一刷新，避免每帧重排
+  }
+
+  if (d.kind === 'resize') {
+    const r = S.rois[d.i];
+    if (!r) { S.drag = null; return; }
+    if (!d.moved && Math.hypot((p.x - d.p0.x) * scale(), (p.y - d.p0.y) * scale()) < 4) return;
+    const ang = d.ang;
+    /* 指针位移换算到框的局部坐标系（相对按下那一刻），永远从初始状态重算：
+       ① 抓住手柄时不会把边缘“吸附”到指点处（不再有起步一跳）
+       ② 不会累积误差、不会来回振荡 */
+    const lp = unrot(p, d.c0, ang), lp0 = unrot(d.p0, d.c0, ang);
+    const dlx = lp.x - lp0.x, dly = lp.y - lp0.y;
+    /* 关键：拖动的是「一条边」，而半宽 = (另一条边到这条边的距离)/2，
+       所以半宽只增加位移的一半、中心也只移一半；否则边会以两倍速度跑开（看起来就是跳） */
+    const hw = d.sx ? Math.max(3, d.hw0 + d.sx * dlx / 2) : d.hw0;
+    const hh = d.sy ? Math.max(3, d.hh0 + d.sy * dly / 2) : d.hh0;
+    const t = ang * Math.PI / 180, cs = Math.cos(t), sn = Math.sin(t);
+    const mvx = d.sx ? (hw - d.hw0) * d.sx : 0, mvy = d.sy ? (hh - d.hh0) * d.sy : 0;
+    const c1 = { x: d.c0.x + mvx * cs - mvy * sn, y: d.c0.y + mvx * sn + mvy * cs };
+    r.box = [c1.x - hw, c1.y - hh, c1.x + hw, c1.y + hh];
+    d.moved = true;
+    drawSoon(); return;
+  }
+});
+
+cv.addEventListener('pointerup', e => {
+  ptrs.delete(e.pointerId);
+  if (ptrs.size < 2) pinch = null;
+  const wasPinch = pinchSeen;
+  if (ptrs.size === 0) pinchSeen = false;
+  S.dragSnap = null;
+  /* 抬手才落地“点”：双指缩放结束后第一根手指也会走这里，所以必须看 wasPinch */
+  if (tapPending) {
+    const t = tapPending; tapPending = null;
+    if (!wasPinch) {
+      if (t.kind === 'block') toggleBlock(t.ri, t.i);
+      else if (t.kind === 'pick') { pickAt(t.x, t.y); return; }
+    }
+  }
+  const d = S.drag;
+  S.drag = null;
+  document.body.classList.remove('dragging');
+  if (resizePending) { resizePending = null; resizeCanvas(); }
+  cv.style.cursor = 'crosshair';
+  if (!d) { draw(); return; }
+  if (d.kind === 'pan') { draw(); return; }
+  if (d.kind === 'annot') {
+    const c = S.annot.cur;
+    S.annot.cur = null;
+    if (c && c.pts.length) { S.annot.strokes.push(c); debouncedAnnot(); }
+    draw();
+    return;
+  }
+  if (d.kind === 'new') {
+    const a = d.a, b = d.b;
+    const x0 = Math.min(a.x, b.x), y0 = Math.min(a.y, b.y);
+    const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
+    if (x1 - x0 < 6 || y1 - y0 < 6) {
+      const q = evPos(e);
+      const hit = hitAt(q.x, q.y);
+      S.sel = hit ? hit.i : -1;
+      refreshRoiList(); syncRoiAngle(); draw();
+      return;
+    }
+    S.rois.push({ box: [x0, y0, x1, y1], ang: 0 });
+    S.sel = S.rois.length - 1;
+    dropOverlay();                              // 旧覆盖层是按上一组选区算的
+    refreshRoiList(); syncRoiAngle(); draw();
+    if (S.semi) scheduleSemi(); else analyze();     // 连续拖框时合并成一次计算
+    return;
+  }
+  if (d.kind === 'ruler') {
+    const a = d.a, b = d.b;
+    S.rulerSeg = null;
+    if (Math.hypot(b.x - a.x, b.y - a.y) >= 4) measureGroove(a, b);
+    draw(); return;
+  }
+  if (d.moved) { refreshRoiList(); analyze(); }
+  draw();
+});
+
+cv.addEventListener('dblclick', () => fitView());
+cv.addEventListener('pointercancel', e => {
+  if (e && e.pointerId != null) ptrs.delete(e.pointerId);
+  if (ptrs.size < 2) pinch = null;
+  if (ptrs.size === 0) pinchSeen = false;
+  tapPending = null; S.dragSnap = null;
+  S.drag = null; document.body.classList.remove('dragging');
+  if (resizePending) { resizePending = null; resizeCanvas(); }
+});
+cv.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (!S.img) return;
+  const q = evPos(e), p = toImg(q.x, q.y);
+  for (let i = S.rois.length - 1; i >= 0; i--) {
+    if (poi(S.rois[i], p.x, p.y)) { deleteRoi(i); return; }
+  }
+});
+cv.addEventListener('wheel', e => {
+  if (!S.img) return;
+  e.preventDefault();
+  const q = evPos(e);
+  zoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, q.x, q.y);
+}, { passive: false });
+
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space') { spaceDown = true; }
+  if (e.target.matches('input,select,textarea')) return;
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (S.sel >= 0) { e.preventDefault(); deleteRoi(S.sel); }
+  } else if (e.key.startsWith('Arrow')) {
+    if (S.sel < 0) return;
+    e.preventDefault();
+    const step = e.shiftKey ? 10 : 1;
+    const r = S.rois[S.sel];
+    const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+    const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+    const bw = r.box[2] - r.box[0], bh = r.box[3] - r.box[1];
+    const x0 = clamp(r.box[0] + dx, 0, S.w - bw), y0 = clamp(r.box[1] + dy, 0, S.h - bh);
+    r.box = [x0, y0, x0 + bw, y0 + bh];
+    dropOverlay();
+    draw();
+    debouncedAnalyze();
+  } else if ((e.ctrlKey || e.metaKey) && e.key === '0') { e.preventDefault(); fitView(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key === '1') { e.preventDefault(); zoomOne(); }
+});
+window.addEventListener('keyup', e => { if (e.code === 'Space') spaceDown = false; });
+
+/* 画布尺寸跟着容器走：侧栏内容变化（列表变长、滚动条出现）时位图不会和 CSS 尺寸脱节，
+   否则“画布逻辑像素 ≠ 屏幕像素”，拖动就会一格一格地跳 */
+if (window.ResizeObserver) {
+  const ro = new ResizeObserver(() => {
+    const r = wrap.getBoundingClientRect();
+    if (Math.abs(Math.round(r.width) - S.cw) > 0.5 || Math.abs(Math.round(r.height) - S.ch) > 0.5) {
+      if (S.drag) resizePending = true; else scheduleResize();
+    }
+  });
+  ro.observe(wrap);
+}
+window.addEventListener('resize', scheduleResize);
+
+/* ------------------------------------------------------------------ 图片装载 */
+function loadImage(url) {
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => { S.img = im; res(im); };
+    im.onerror = () => rej(new Error('图片加载失败'));
+    im.src = url;
+  });
+}
+
+/* 带字节进度的图片加载（打开记录时用：WAN 上要几秒，得让人看见在动） */
+async function loadImageProgress(url, onProg, signal) {
+  const resp = await fetch(url, { signal, cache: 'force-cache' });
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  const total = +(resp.headers.get('content-length') || 0);
+  const ct = resp.headers.get('content-type') || 'image/jpeg';
+  if (!resp.body || !resp.body.getReader) {
+    const b = await resp.blob();
+    return await loadImage(URL.createObjectURL(b));
+  }
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); got += value.length;
+    if (onProg) onProg(got, total);
+  }
+  return await loadImage(URL.createObjectURL(new Blob(chunks, { type: ct })));
+}
+
+/* ---------------- 上传进度 ---------------- */
+function upShow(title) {
+  const w = $('#upWrap');
+  if (!w) return;
+  $('#upTitle').textContent = title;
+  upSet(0, '准备中…');
+  w.classList.remove('hide');
+}
+function upHide() { const w = $('#upWrap'); if (w) w.classList.add('hide'); }
+
+/* 不知道还要多久的阶段，让进度条慢慢爬，别停在原地像卡死 */
+function creepStart(from, to, sub, ms) {
+  let v = from;
+  upSet(v, sub);
+  const t = setInterval(() => { v = Math.min(to, v + 1.2); upSet(v, sub); }, ms || 400);
+  return () => clearInterval(t);
+}
+function upSet(pct, sub) {
+  const f = $('#upFill');
+  if (f) f.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  const s = $('#upSub');
+  if (s) s.textContent = sub;
+}
+
+let upXhr = null;          // 当前上传请求，供右上角 × 取消
+document.addEventListener('DOMContentLoaded', () => {
+  startAnts();
+  const x = $('#upCancel');
+  if (x) x.onclick = e => {
+    e.preventDefault(); e.stopPropagation();
+    if (upXhr) { setStatus('取消中…'); upXhr.abort(); }
+    else if (S.openAbort) { try { S.openAbort.abort(); } catch (_) {} S.openAbort = null; upHide(); setStatus('已取消'); }
+  };
+});
+
+function uploadXHR(fd, onProg) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    upXhr = xhr;
+    const t0 = performance.now();
+    xhr.open('POST', 'api/upload');
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch (e) { reject(new Error('响应解析失败')); }
+      } else {
+        reject(new Error((xhr.responseText || ('HTTP ' + xhr.status)).slice(0, 200)));
+      }
+    };
+    xhr.onerror = () => reject(new Error('网络中断（检查网络或代理）'));
+    xhr.onabort = () => reject(new Error('已取消'));
+    xhr.onloadend = () => { if (upXhr === xhr) upXhr = null; };
+    if (xhr.upload) {
+      xhr.upload.onprogress = e => {
+        if (!e.lengthComputable) return;
+        onProg(e.loaded, e.total, performance.now() - t0);
+      };
+    }
+    xhr.send(fd);
+  });
+}
+
+/* 外层反代对 >1 MB 的请求体直接 500（nginx+oauth2 那层），所以大图走分片：
+   切成 400 KB 小块逐个 POST，服务端拼回同一份字节（sha1 不变，判重口径不受影响）。 */
+const CHUNK_BYTES = 400 * 1024;
+const CHUNK_OVER = 900 * 1024;          // 超过这个大小就改走分片
+
+function chunkXHR(url, body, isJSON) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    upXhr = xhr;
+    xhr.open('POST', url);
+    if (isJSON) xhr.setRequestHeader('Content-Type', 'application/json');
+    else xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText || '{}')); }
+        catch (e) { reject(new Error('响应解析失败')); }
+      } else {
+        reject(new Error((xhr.responseText || ('HTTP ' + xhr.status)).slice(0, 200)));
+      }
+    };
+    xhr.onerror = () => reject(new Error('网络中断（检查网络或代理）'));
+    xhr.onabort = () => reject(new Error('已取消'));
+    xhr.onloadend = () => { if (upXhr === xhr) upXhr = null; };
+    xhr.send(body);
+  });
+}
+
+async function uploadChunked(file, onProg) {
+  const uid = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const n = Math.max(1, Math.ceil(file.size / CHUNK_BYTES));
+  const t0 = performance.now();
+  let sent = 0;
+  for (let i = 0; i < n; i++) {
+    const blob = file.slice(i * CHUNK_BYTES, Math.min(file.size, (i + 1) * CHUNK_BYTES));
+    await chunkXHR(`api/upload/chunk?uid=${encodeURIComponent(uid)}&idx=${i}&total=${n}`
+                   + `&name=${encodeURIComponent(file.name || '')}`, blob, false);
+    sent += blob.size;
+    onProg(sent, file.size, performance.now() - t0, i + 1, n);
+  }
+  return chunkXHR('api/upload/finish', JSON.stringify({ uid, name: file.name || '' }), true);
+}
+
+async function upload(file) {
+  if (!file) return;
+  setStatus('上传中…');
+  const fd = new FormData();
+  fd.append('file', file);
+  const mb = (file.size || 0) / 1e6;
+  upShow(`上传 ${file.name || '图片'}（${mb.toFixed(1)} MB）`);
+  try {
+    const onProg = (loaded, total, ms, part, parts) => {
+      const pct = total ? 100 * loaded / total : 0;
+      const secs = ms / 1000;
+      const spd = secs > 0.35 ? (loaded / 1e6) / secs : 0;
+      const tag = parts ? `　分片 ${part}/${parts}` : '';
+      if (loaded >= total) {
+        upSet(100, `上传完成 ${mb.toFixed(1)} MB${tag}　服务器解码中…`);
+      } else {
+        upSet(pct, `${pct.toFixed(0)}%　${(loaded / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`
+          + (spd ? `　${spd.toFixed(1)} MB/s` : '') + tag);
+      }
+    };
+    let meta;
+    try {
+      meta = await uploadXHR(fd, onProg);          // 正常就一次整传
+    } catch (err) {
+      // 外层反代的 body 上限（曾把 >1 MB 回成 500）偶尔复发：大图自动退到分片再试一次
+      if (file.size > CHUNK_OVER && !/已取消/.test(err.message || '')) {
+        upSet(0, '整传被反代拦下，改用分片重传…');
+        meta = await uploadChunked(file, onProg);
+      } else {
+        throw err;
+      }
+    }
+    S.id = meta.id; S.name = meta.name; S.ow = meta.ow; S.oh = meta.oh;
+    S.shrunkNote = meta.shrunk_note || ''; S.origW = meta.orig_w || meta.ow; S.origH = meta.orig_h || meta.oh;
+    S.res = meta.default_res || 'full'; S.rot = 0;
+    await refetchImage();
+    S.rois = []; S.sel = -1; S.samples = []; S.selSample = -1;
+    S.overlayUrl = null; S.overlayImg = null; S.contourUrl = null; S.contourImg = null;
+    S.annot.strokes = []; S.annot.cur = null; S.annot.res = null;
+    S.tol = 25; S.purity = 0.5;              // 容差/纯度跟着图走，重置
+    S.widthTouched = false; S.suggRetry = false;
+    // 刀缝宽度不重置：它更像“你手上这把刀”的参数，直接沿用上一张（打开记录时会被记录值覆盖）
+    clearImageState();                      // 结果卡/胶囊/建议阈值/诊断全部清空
+    $('#chkAutoTol').checked = true; S.autoTol = true;
+    syncParams(); syncSampleUI(); refreshRoiList();
+    $('#fileName').textContent = meta.name || '未命名';
+    $('#drop').classList.add('hide');
+    fitView();
+    const resTxt = (meta.default_res === 'full') ? '全画质' : ('长边 ' + meta.default_res);
+    setResult(`已打开：${meta.name}\n原图 ${meta.ow}×${meta.oh} → 分析 ${meta.w}×${meta.h}（${resTxt}）\n` +
+      (meta.dng ? `DNG：${meta.dng}\n` : '') +
+      `\n下一步：切到「吸色」页 → 在完好漆膜上点一下，在露底基材上点一下 → 回「框选」页框出划格区。`);
+    updateFileInfo();
+    setStatus('');
+    upHide();
+  } catch (err) {
+    upHide();
+    setStatus('');
+    if (err.message === '已取消') setResult('已取消这次上传，可以重新拖一张进来。');
+    else setResult('打开失败：' + err.message);
+  }
+}
+
+async function refetchImage(onProg, signal) {
+  const meta = await post('api/load', { id: S.id, res: S.res }, 'POST', signal);
+  S.w = meta.w; S.h = meta.h; S.note = meta.note || '';
+  S.shrunkNote = meta.shrunk_note || S.shrunkNote || '';
+  const url = 'api/image/' + S.id + '?res=' + encodeURIComponent(S.res) + '&v=' + Date.now();
+  if (onProg) await loadImageProgress(url, onProg, signal);
+  else await loadImage(url);
+  S.fit = Math.min(S.cw / S.w, S.ch / S.h);
+  updateFileInfo();
+}
+
+function updateFileInfo() {
+  if (!S.id) return;
+  const k = (S.ow / S.w);
+  const an = S.analysis;
+  const extra = (S.roiNative && an && an.roi_native && an.w)
+    ? ` · 选区原生 ${an.w}×${an.h}（${an.scale.toFixed(2)}× 于画布）`
+    : '';
+  $('#fileInfo').textContent = (S.shrunkNote ? `⚠ ${S.shrunkNote} · ` : '') +
+    `存档 ${S.ow}×${S.oh} → 分析 ${S.w}×${S.h}（缩小 ${k.toFixed(2)}×）` +
+    extra +
+    (Math.abs(S.rot) > 1e-6 ? ` · 旋转 ${S.rot.toFixed(1)}°` : '') +
+    (S.note ? ` · ${S.note}` : '');
+}
+
+/* ------------------------------------------------------------------ 分析 */
+/* 判法 = auto 时只是“先自动定个 k”，真正算的时候仍按宽度判法 */
+function srvMode() { return (S.exmode === 'auto' || S.exmode === 'auto_blk') ? 'width' : S.exmode; }
+function payload() {
+  return {
+    id: S.id, res: S.res,
+    rois: S.rois.map(r => ({ box: r.box, ang: r.ang || 0 })),
+    samples: S.samples.map(s => ({ rgb: s.rgb, role: s.role })),
+    tol: S.tol, purity: S.purity, line_px: S.line, mode: srvMode(),
+    want_hist: true, detail: S.detail, overlay: true,
+    ruler_hist: S.rulerHist, ruler_full: S.rulerFull,
+    soft: false,                      // 软权重已撤下，不再参与计算
+    roi_native: !!S.roiNative,
+    want_suggest: (S.exmode === 'width'),    // 按块数回落时 k 由判法定，别让服务器再猜一遍
+  };
+}
+
+/* 按钮的“计算中…”要盖住两段：分析 + 列块/画蚂蚁线。只盖分析的话，
+   分析一结束按钮就变回“计算”，但蚂蚁线还是淡色（块还没回来），看着像算完了其实没有。 */
+function refreshCalcBtn() {
+  const b = !!(S.busy || S.blocksBusy || S.blocksDue);
+  $('#btnCalc').disabled = b;
+  $('#btnCalc').textContent = b ? '计算中…' : '▶ 计算';
+}
+function setBusy(b) { S.busy = b; refreshCalcBtn(); }
+function setBlocksBusy(b) { S.blocksBusy = b; refreshCalcBtn(); }
+
+/* 自动定刀缝：扫 k 曲线，取“再降 1 px 露底就突增”的上侧那一档 */
+let kneeBusy = false;
+function kneeSig() {
+  return JSON.stringify({
+    r: S.rois.map(r => [Math.round(r.box[0]), Math.round(r.box[1]), Math.round(r.box[2]), Math.round(r.box[3]), r.ang || 0]),
+    s: S.samples.map(s => s.rgb.join(',') + s.role),
+    t: S.tol, p: S.purity, n: S.roiNative ? 1 : 0, res: S.res,
+  });
+}
+function renderKneeWarn() {
+  const el = $('#kneeWarn');
+  const t = (S.exmode === 'width') ? '' : (S.kneeWarn || '').trim();   // 按宽度时这条不适用
+  if (el) { el.textContent = t; el.style.display = t ? 'block' : 'none'; }
+  // 顶栏那个常驻小黄标：判法在「量尺」标签页里，平时看不见，别让人漏掉
+  const pill = $('#warnPill');
+  if (pill) {
+    pill.style.display = t ? '' : 'none';
+    pill.title = t;
+    pill.onclick = () => {
+      const b = $$('.tabs button').find(x => x.dataset.tab === 'ruler');
+      if (b) b.click();
+    };
+  }
+}
+
+function goRulerTab() {
+  const b = $$('.tabs button').find(x => x.dataset.tab === 'ruler');
+  if (b) b.click();
+}
+
+function renderKnee() {
+  const el = $('#kneeInfo'); if (!el) return;
+  if (S.exmode === 'width') { el.textContent = ''; try { renderKneeWarn(); } catch (_) {} ; return; }   // 按宽度：k 由你定，表不会跟着动，不显示
+  if (!S.knee || !S.knee.rows) { el.textContent = ''; return; }
+  const autoNow = (S.exmode === 'auto' || S.exmode === 'auto_blk');
+  // 每一行都能点：点哪档就把刀缝设成哪档，边看蚂蚁线边挑
+  const rows = S.knee.rows.map(r => {
+    const on = r.k === S.line;
+    return '<div class="krow' + (on ? ' on' : '') + '" data-k="' + r.k + '" style="cursor:pointer;padding:1px 4px;border-radius:3px;'
+      + (on ? 'background:rgba(88,166,255,.18);color:#8cc8ff;font-weight:600' : '') + '">'
+      + (on ? '▶ ' : '&nbsp;&nbsp;') + 'k=' + String(r.k).padStart(2) + '   块 '
+      + String(r.n).padStart(3) + '   露底 ' + r.pct.toFixed(2) + '%</div>';
+  }).join('');
+  el.innerHTML = (autoNow
+      ? '<b>按块数回落：k=' + S.knee.k + '</b>（' + (S.knee.why || '') + '）'
+      : '<b>k 曲线</b>（自动值 k=' + (S.knee.k || '—') + '，当前按你设的宽度 ' + S.line + ' 算；点下面任意一档就改用它）')
+    + '<div style="margin-top:6px;font-size:11.5px;line-height:1.5">' + rows + '</div>'
+    + '<div style="opacity:.65;font-size:11px;margin-top:2px">点任意一行 = 用该档当刀缝（▶ 是当前用的）</div>';
+  el.querySelectorAll('.krow').forEach(d => {
+    d.onclick = () => { setLine(+d.dataset.k); renderKnee(); };
+  });
+  try { renderKneeWarn(); } catch (_) {}
+}
+
+/* 没有 k 曲线时给一句话，别让面板空着让人以为功能没了 */
+function updateKneeHint() {
+  const el = $('#kneeInfo'); if (!el) return;
+  if (S.knee && S.knee.rows && S.knee.rows.length) { renderKnee(); return; }
+  if (S.exmode === 'width') { el.textContent = ''; return; }      // 按宽度：不显示 k 曲线
+  el.innerHTML = '<span style="opacity:.65">k 曲线：框好选区、吸完两个颜色（或打开已有记录）就会自动扫一次（约 4 秒）；'
+    + '这里会列出 k=1…16 的块数和露底，点任意一档可直接用它。</span>';
+}
+
+async function ensureKnee(force) {
+  if (!S.id || !S.rois.length || S.samples.length < 2) return false;
+  const sig = kneeSig();
+  const rule = (S.exmode === 'auto_blk') ? 'count' : 'area';
+  const autoNow = (S.exmode === 'auto' || S.exmode === 'auto_blk');
+  if (!force && S.knee && S.knee.sig === sig && S.knee.rule === rule) {
+    // 切回自动判法：即便曲线是缓存的，也要把刀缝重新按判法对齐（用户手改过的除外）
+    if (autoNow && !S.lineManual && S.knee.k && S.line !== S.knee.k) {
+      S.line = S.knee.k;
+      if ($('#rngLine')) $('#rngLine').value = Math.min(25, S.line);
+      if ($('#numLine')) $('#numLine').value = S.line;
+      setStatus('按块数回落：k=' + S.knee.k + '（已按判法重设刀缝）');
+    }
+    renderKnee();
+    return true;
+  }
+  if (kneeBusy) return false;
+  kneeBusy = true;
+  try {
+    setStatus('自动定刀缝：正在扫 k=1…15（约 4 秒）…');
+    const r = await post('api/knee', { ...payload(), mode: 'width', k_max: 16, rule });
+    if (!r.ok) { setStatus(r.reason || '自动定刀缝失败'); return false; }
+    S.knee = { sig, rule, k: r.k_wire || S.line, rows: r.rows || [], why: r.why || '',
+               k_area: r.k_area, k_count: r.k_count, why_area: r.why_area, why_count: r.why_count };
+    const autoMode = (S.exmode === 'auto' || S.exmode === 'auto_blk');
+    if (r.k_wire && !S.lineManual && autoMode) {
+      S.line = r.k_wire;
+      if ($('#rngLine')) $('#rngLine').value = Math.min(25, S.line);
+      if ($('#numLine')) $('#numLine').value = S.line;
+    }
+    // 判法没定出 k：留一条常驻黄条（不是状态栏那种一眨眼就没的提示）
+    if (autoMode && rule === 'count' && r.k_from === 'suggest' && r.k_wire) {
+      const rows0 = (r.rows || []).filter(x => x && typeof x.n === 'number');
+      let pk0 = rows0[0]; for (const x of rows0) if (pk0 && x.n > pk0.n) pk0 = x;
+      const last0 = rows0[rows0.length - 1];
+      const hit0 = rows0.find(x => x.k === r.k_wire) || {};
+      S.kneeWarn = '⚠ 按块数回落没找到台阶（块数峰值 ' + (pk0 ? pk0.n : '?') + '，到 k=' + (last0 ? last0.k : '?')
+        + ' 还有 ' + (last0 ? last0.n : '?') + ' 块）→ 已改用露底分布的建议 k=' + r.k_wire
+        + (hit0.pct != null ? '（露底 ' + hit0.pct.toFixed(2) + '%）' : '')
+        + '。这是兜底值，请在下面曲线点一档确认。';
+    } else if (autoMode && rule === 'count' && !r.k_wire) {
+      const rows = (r.rows || []).filter(x => x && typeof x.n === 'number');
+      if (rows.length) {
+        let pk = rows[0]; for (const x of rows) if (x.n > pk.n) pk = x;
+        const last = rows[rows.length - 1];
+        const thr = Math.round(pk.n * 0.25);
+        S.kneeWarn = '⚠ 按块数回落没找到台阶：块数峰值 ' + pk.n + '（k=' + pk.k + '），到 k=' + last.k
+          + ' 还有 ' + last.n + ' 块（要 ≤' + thr + ' 才算回落）。现在沿用 ' + S.line + ' px —— '
+          + '请在下面曲线里点一档确认。';
+      } else {
+        S.kneeWarn = '⚠ 按块数回落没定出 k，现在沿用 ' + S.line + ' px，建议手挑一档。';
+      }
+    } else if (r.k_wire) {
+      S.kneeWarn = '';
+    }
+    renderKnee();
+    setStatus(!autoMode
+      ? ('k 曲线已扫（自动值 k=' + (r.k_wire || '—') + '，当前按你设的宽度 ' + S.line + ' 算；点曲线任意一档可改用它）')
+      : (r.k_wire
+         ? (S.lineManual ? ('按块数回落：k=' + r.k_wire + '；你已手设刀缝 ' + S.line + '，按你的算（重选「按块数回落」可恢复）')
+                         : ('按块数回落：k=' + r.k_wire + '（' + (r.why || '') + '）'))
+         : '按块数回落：没找到明显台阶，仍用当前值'));
+    return true;
+  } finally { kneeBusy = false; }
+}
+
+async function analyze() {
+  if (!S.id) return;
+  if (!S.rois.length) {                       // 选区全删了：不许拿整图凑数（会得 0B）
+    S.rows = null; S.total = null; S.autoTotal = null; S.autoRows = null;
+    S.lines = []; S.soft = null;
+    setResult('还没有选区：先在图上框出划格区，再计算。');
+    const sum0 = $('#summary');
+    if (sum0) { sum0.textContent = '—'; sum0.className = 'summary'; }
+    const bd = $('#resBadge');
+    if (bd) { bd.textContent = '—'; bd.className = 'rg'; }
+    const pc0 = $('#resCardPct');
+    if (pc0) pc0.textContent = '';
+    const rb0 = $('#resCardRows');
+    if (rb0) rb0.innerHTML = '<div class="rrow"><span>—</span></div>';
+    const ss0 = $('#sideSummary');
+    if (ss0) ss0.textContent = '—';
+    renderDiag();
+    dropOverlay();
+    draw();
+    return;
+  }
+  if (!S.samples.length) {
+    setResult('请先吸两个颜色：①完好漆膜 ②露底基材\n（切到「吸色」页，在图上各点一下）');
+    return;
+  }
+  if (S.samples.length < 2) {
+    setResult('只吸了一个颜色。还需要另一个（漆膜 / 基材），否则没法算占比。');
+    return;
+  }
+  // 两种判法各走各的：按块数回落 → 先扫 k；按宽度 → 只等服务器的露底分布建议值，不扫 k（免得两套规则重复算）
+  if (S.exmode === 'auto' || S.exmode === 'auto_blk') await ensureKnee();
+  const my = ++S.seq;
+  setBusy(true);
+  try {
+    const r = await post('api/analyze', payload());
+    if (my !== S.seq) return;
+    if (!r.ok) { setResult(r.reason || '分析失败'); return; }
+    S.rows = r.rows; S.total = r.total; S.lines = r.lines;
+    S.analysis = r.analysis || null; updateFileInfo();
+    S.autoTotal = { ...r.total, worst: r.total.worst ? { ...r.total.worst } : null };
+    S.autoRows = r.rows.map(x => ({ ...x }));
+    S.autoLines = r.lines.slice();
+    S.soft = r.soft || null;
+    // 开着的时候绝不把块清空：清了蚂蚁线会空一段（后端列块要 1~3 s，用户看到的就是“线消失了”）。
+    // 旧块留着半透明继续画，新结果一到就替换；只有“已关闭”状态下才按签名清缓存。
+    if (S.blocks && S.blocks.sig !== blocksSig() && !S.blocksOn) { S.blocks = null; renderBlocks(); }
+    else if (S.blocks) applyBlocks();
+    if (S.blocksOn) {
+      clearTimeout(S.blocksTimer);
+      S.blocksDue = true; refreshCalcBtn();                     // 分析刚结束、块还没开始算的 450ms 空档也要显示“计算中”
+      S.blocksTimer = setTimeout(() => listBlocks(true), 450);   // 拖框/调 k 时合并成一次
+    }
+    if (S.suggestHold == null) { S.suggest = r.suggest_px; S.suggestSrc = r.suggest_src; }
+    // 按宽度模式：服务器给的建议值（按露底厚度猜的刀缝宽度）当这张图的起点
+    if (S.exmode === 'width' && !S.widthTouched && !S.suggRetry) {
+      const hasSug = (typeof r.suggest_px === 'number' && r.suggest_px >= 1);
+      const want = hasSug ? clamp(Math.round(r.suggest_px), 1, 60) : 1;   // 拒绝给建议 → 用 1 px
+      if (want !== S.line) {
+        S.suggRetry = true;
+        S.line = want;
+        $('#rngLine').value = Math.min(25, S.line); $('#numLine').value = S.line;
+        try { localStorage.setItem('baige.line', String(S.line)); } catch (_) {}
+        setStatus(hasSug
+          ? ('按露底分布：已用建议值 ' + S.line + ' px 起算（' + (r.suggest_src || '按露底厚度') + '，可自己改）')
+          : '按露底分布：给不出可信阈值（照建议会把真实脱落删掉），先用 1 px；可到 k 曲线里手挑一档');
+        { const _my = my; setTimeout(() => { if (S.seq === _my) analyze(); }, 0); return; }
+      }
+      S.suggRetry = true;
+    }
+    S.span = r.span;
+    updateTolHint(r);
+    renderResult(); refreshRoiList(); updateSuggest(); updateSpan();
+    if (r.overlay_url) loadOverlay(r.overlay_url); else { S.overlayImg = null; }
+    draw();
+  } catch (err) {
+    setResult('分析失败：' + err.message);
+  } finally {
+    if (my === S.seq) setBusy(false);
+  }
+}
+const debouncedAnalyze = debounce(analyze, 220);
+
+const THR = [0.5, 5, 15, 35, 65];
+const GRADE_ABOVE = ['4B', '3B', '2B', '1B', '0B'];
+
+/* 复刻 crosscut.margin_hint 的文案，用于“手动排除块之后”改写那一行 */
+function marginHint(pct) {
+  const L = [0.5, 5.0, 15.0, 35.0, 65.0];
+  const parts = [`判定余量：${pct.toFixed(2)}% 属 ${gradeOf(pct)}`];
+  for (const lim of L) {
+    if (pct < lim - 1e-9) {
+      parts.push(`再多 ${(lim - pct).toFixed(2)} pp（到 ${lim.toFixed(1)}%）即 ${gradeOf(lim + 1e-6)}`);
+      break;
+    }
+  }
+  for (const lim of [...L].reverse()) {
+    if (pct >= lim - 1e-9) {
+      if (lim === 0.5) parts.push(`降到 0.5% 以下即 5B（少 ${(pct - 0.5).toFixed(2)} pp）`);
+      else parts.push(`少 ${(pct - lim).toFixed(2)} pp（到 ${lim.toFixed(0)}%）即 ${gradeOf(lim - 1e-6)}`);
+      break;
+    }
+  }
+  return parts.join('；');
+}
+
+function marginText(pct) {
+  let best = null;
+  THR.forEach((b, i) => {
+    const d = Math.abs(pct - b);
+    if (!best || d < best.d) best = { d, b, i };
+  });
+  if (!best) return '';
+  const dir = pct < best.b
+    ? `再高 ${best.d.toFixed(2)} pp 就越到 ${GRADE_ABOVE[best.i]}`
+    : `再低 ${best.d.toFixed(2)} pp 就越到 ${best.i === 0 ? '5B' : GRADE_ABOVE[best.i - 1]}`;
+  return `距分界 ${best.b}% 仅 ${best.d.toFixed(2)} pp（${dir}）`;
+}
+
+function renderDiag() {
+  const dg = $('#diagx'), v1 = S.total;
+  if (!v1 || !S.detail) { dg.innerHTML = ''; return; }   // 诊断明细关着就不铺这些数
+  const rows = [
+    ['判级余量', marginText(v1.pct)],
+    ['已剔除', v1.groove_px > 0
+      ? `${v1.groove_px} px（占统计面积 ${fmt(v1.groove_share, 2)}%，刀缝阈值 ${S.line}）`
+      : `0 px（刀缝阈值 = ${S.line}，没有剔除任何刀缝）`],
+    ['未分类', `${fmt(v1.unassigned_pct, 2)}%`],
+  ];
+  dg.innerHTML = rows.map(([k, v]) => `<div class="diagrow"><span class="dk">${k}</span><span>${v}</span></div>`).join('');
+}
+
+/* 软权重（实验口径）—— 只追加显示，上面 v1 的数字一个字都不改 */
+function softText() {
+  const s = S.soft;
+  if (!s || !s.ok) return '';
+  const base = S.total ? S.total.pct : 0;
+  const d = s.pct - base;
+  const out = [
+    '——— 软权重（实验口径）———',
+    `主值 ${fmt(s.pct, 2)}% → ${s.astm} / ${s.iso}　（硬口径 ${fmt(base, 2)}%，差 ${d >= 0 ? '+' : ''}${fmt(d, 2)} pp）`,
+    `不确定 ${fmt(s.unc_pct, 1)}%　区间 ${fmt(s.lo, 2)}% ~ ${fmt(s.hi, 2)}%`,
+  ];
+  if (s.cross) {
+    out.push(`⚠ 区间跨档 ${s.lo_cls}~${s.hi_cls}：这张图只够给"临界"，别写成单一等级`);
+  } else {
+    out.push(`区间落在同一档（${s.astm}），可以按这个数报`);
+  }
+  return out.join('\n');
+}
+
+/* 手绘口径：三色笔 + 纯面积统计，和自动分类完全无关 */
+let annotSeq = 0;
+async function annotCalc() {
+  if (!S.id) return;
+  if (!S.annot.strokes.length) { S.annot.res = null; renderAnnot(); if (S.total) renderResult(); return; }
+  const my = ++annotSeq;
+  try {
+    const r = await post('api/annot', {
+      id: S.id, res: S.res,
+      rois: S.rois.map(x => ({ box: x.box, ang: x.ang || 0 })),
+      strokes: S.annot.strokes.map(k => ({ t: k.t, r: k.r, pts: k.pts })),
+    });
+    if (my !== annotSeq) return;
+    S.annot.res = r.ok ? r : null;
+  } catch (err) {
+    if (my !== annotSeq) return;
+    S.annot.res = null;
+  }
+  renderAnnot();
+  if (S.total) renderResult();
+}
+const debouncedAnnot = debounce(annotCalc, 450);
+
+function annotText() {
+  const r = S.annot.res;
+  if (!r || !r.ok) return '';
+  const out = [
+    '——— 手绘口径（你自己涂的）———',
+    `脱落 ${fmt(r.d_pct, 2)}%｜刀缝 ${fmt(r.g_pct, 2)}%｜不确定 ${fmt(r.u_pct, 2)}%｜其余 ${fmt(r.bg_pct, 1)}%（完好／没标）`,
+    `主值 ${fmt(r.pct, 2)}%（扣刀缝）→ ${r.astm} / ${r.iso}　范围 ${fmt(r.lo, 2)}% ~ ${fmt(r.hi, 2)}%`,
+  ];
+  out.push(r.cross ? `⚠ 范围跨档 ${r.lo_cls}~${r.hi_cls}：只够给"临界"` : `范围落在同一档（${r.astm}）`);
+  return out.join('\n');
+}
+
+function renderAnnot() {
+  const el = $('#annotInfo');
+  if (!el) return;
+  const r = S.annot.res;
+  if (!r || !r.ok) {
+    el.textContent = S.annot.strokes.length
+      ? '算不出来：先框一个选区，再涂。'
+      : '还没涂。切到这一页后直接在图上按住拖动。';
+    return;
+  }
+  el.textContent = [
+    `笔迹 ${r.n_stroke} 笔`,
+    `脱落 ${fmt(r.d_pct, 2)}%　刀缝 ${fmt(r.g_pct, 2)}%　不确定 ${fmt(r.u_pct, 2)}%　其余 ${fmt(r.bg_pct, 1)}%（完好漆膜／没标）`,
+    `主值 ${fmt(r.pct, 2)}%（扣刀缝）→ ${r.astm} / ${r.iso}`,
+    `范围 ${fmt(r.lo, 2)}% ~ ${fmt(r.hi, 2)}%（刀缝不扣 ~ 不确定全算脱落）`,
+    r.cross ? `⚠ 范围跨档 ${r.lo_cls}~${r.hi_cls}：只够给"临界"` : `范围同一档（${r.astm}），可以按这个数报`,
+  ].join('\n');
+}
+
+
+/* 容差提示：mind 落在 tol 附近的像素才会因为调 tol 改变分类。
+   带内占比≈0 就说明这张图调容差不会有任何反应，直接说清楚，别让人在滑块上白试。 */
+function updateTolHint(r) {
+  const el = $('#tolHint');
+  if (!el) return;
+  const te = r && r.tol_eff;
+  if (!te) { el.style.display = 'none'; return; }
+  if (Math.abs(te.delta) >= 0.05) { el.style.display = 'none'; return; }   // 有差就不提示
+  // 注意措辞：这是“用不上”，不是“没调好”。容差本来就是干“兜底模糊像素”这一件事的，
+  // 图上没有那种像素，它自然闲着；结果完全正常，用户什么都不用做。
+  el.style.display = 'block';
+  el.style.color = '';
+  el.innerHTML = '<b>容差在这张图上用不上，不用调</b>：'
+    + (r.tol * 0.75).toFixed(0) + ' / ' + r.tol + ' / ' + (r.tol * 1.25).toFixed(0)
+    + ' 算出来都是 ' + te.lo.toFixed(2) + '%'
+    + ((r.total && r.total.astm) ? ' · ' + r.total.astm : '') + '。'
+    + '图里每个像素都能明确归到漆膜或基材，没有需要容差兜底的模糊像素，所以它闲着不影响结果；'
+    + '当前值是按取样间距自动定的，保持自动就行。';
+}
+
+function renderResult() {
+  if (S.blocks) applyBlocks();
+  if (!S.total) return;
+  const t = S.total;
+  const st = '';                    // 软权重已撤下
+  const bt = S.detail ? blocksText() : '';     // 逐块确认摘要归诊断明细
+  let lines = S.lines || [];
+  if (!S.detail) {                  // 只显示：总判级 + 各选区脱落率/判级 + 合计
+    const keep = [];
+    for (const ln of lines) {
+      if (/^(判定余量|判级余量|露底厚度|—— 诊断明细)/.test(ln)) break;
+      keep.push(ln);
+    }
+    lines = keep;
+  }
+  const rel = $('#result');
+  rel.textContent = lines.join('\n') + '\n' + (bt ? bt + '\n' : '');
+  rel.style.display = S.detail ? '' : 'none';     // 关闭诊断明细：卡片已经说清了，不再重复一层文本
+  renderDiag();
+  const sum = $('#summary');
+  const w = t.worst;
+  const G = w ? w.astm : t.astm;
+  const B = w ? w.iso : t.iso;
+  sum.textContent = w
+    ? `最差 R${w.roi}　脱落 ${fmt(w.pct, 2)}%  →  ASTM ${w.astm}  /  ISO ${w.iso}　（合计 ${fmt(t.pct, 2)}% ${t.astm}，仅参考）`
+    : `脱落 ${fmt(t.pct, 2)}%  →  ASTM ${t.astm}  /  ISO ${t.iso}`;
+  sum.className = 'summary' + ((G === '0B' || G === '1B') ? ' bad' : '');
+  const ss = $('#sideSummary');
+  if (ss) ss.textContent = w ? `R${w.roi} ${fmt(w.pct, 2)}% ${G}` : `${fmt(t.pct, 2)}% ${G}`;
+  const badge = $('#resBadge');
+  if (badge) { badge.textContent = G; badge.className = 'rg ' + gcls(G); }
+  const pc = $('#resCardPct');
+  if (pc) pc.textContent = w ? `R${w.roi} ${fmt(w.pct, 2)}%（最差）` : `${fmt(t.pct, 2)}% 脱落`;
+  const box = $('#resCardRows');
+  if (box) {
+    const rows = (S.rows || []).map((r, i) =>
+      `<div class="rrow"><span>R${i + 1}</span><span>${fmt(r.pct, 2)}%</span>` +
+      `<span class="rg ${gcls(r.astm)}">${r.astm || '—'}</span></div>`);
+    if (rows.length > 1) {
+      rows.push(`<div class="rrow" style="border-top:1px dashed var(--line);margin-top:3px;padding-top:3px">` +
+        `<span>合计</span><span>${fmt(t.pct, 2)}%</span>` +
+        `<span class="rg ${gcls(t.astm)}">${t.astm || '—'}</span></div>`);
+    }
+    box.innerHTML = rows.join('') || '<div class="rrow"><span>—</span></div>';
+  }
+  if (S.needRedraw) { S.needRedraw = false; draw(); }   // 让画布上的 R1 标签跟着变
+}
+
+function gcls(g) {
+  const m = /(\d)B/.exec(g || '');
+  return m ? 'g' + m[1] : 'g3';
+}
+
+async function copyText(txt) {
+  try { await navigator.clipboard.writeText(txt); return true; } catch (_) {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = txt;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (_) { return false; }
+}
+
+/* 复制成 TSV（制表符分隔）：就复制眼睛看到的这几行——选区 / 脱落率 / 等级，
+   粘进 Excel 自动分列；要看面积/露底/未分类这些明细，用「导出 CSV」。 */
+$('#resCopy').onclick = async () => {
+  if (!S.total) { setStatus('还没有结果可复制'); return; }
+  const pc = v => (v === undefined || v === null) ? '' : fmt(v, 2) + '%';
+  const out = (S.rows || []).map((r, i) => ['R' + (i + 1), pc(r.pct), r.astm || ''].join('\t'));
+  out.push(['合计', pc(S.total.pct), S.total.astm || ''].join('\t'));
+  const ok = await copyText(out.join('\r\n'));
+  const btn = $('#resCopy');
+  if (ok) {
+    btn.textContent = '✓ 已复制';
+    btn.classList.add('ok');
+    clearTimeout(btn._t);
+    btn._t = setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('ok'); }, 1600);
+    setStatus(`已复制 ${out.length} 行（选区 / 脱落率 / 等级），粘到 Excel 自动分列；明细请用「导出 CSV」`);
+  } else {
+    setStatus('复制失败：浏览器不让写剪贴板，手动选中结果框复制吧');
+  }
+};
+
+function loadContour(url) {
+  if (!url) { S.contourUrl = null; S.contourImg = null; draw(); return; }
+  if (S.contourUrl === url && S.contourImg) { draw(); return; }
+  const im = new Image();
+  im.onload = () => { S.contourUrl = url; S.contourImg = im; draw(); };
+  im.src = url;
+}
+
+function loadOverlay(url) {
+  if (S.overlayUrl === url && S.overlayImg) { draw(); return; }
+  const im = new Image();
+  im.onload = () => {
+    S.overlayUrl = url; S.overlayImg = im;
+    if (S.showOverlay) draw();
+  };
+  im.src = url;
+}
+
+/* 连续操作（拖第二个框、删框、调参）时把半自动合并成一次：
+   350ms 内的多次触发只跑最后一次，并中断还在飞的上一次请求，避免服务器排队算没人看的结果 */
+let semiTimer = null;
+function scheduleSemi(delay = 350) {
+  if (!S.semi) { if (S.samples.length >= 2 && S.rois.length) analyze(); return; }
+  clearTimeout(semiTimer);
+  semiTimer = setTimeout(() => { semiTimer = null; runSemi(); }, delay);
+}
+
+async function runSemi() {
+  if (!S.id) return;
+  if (!S.rois.length) { setResult('半自动已开：先在图上框出划格区，框完自动出结果。'); return; }
+  const my = ++S.seq;
+  if (S.autoAbort) { try { S.autoAbort.abort(); } catch (_) {} }
+  const ac = new AbortController(); S.autoAbort = ac;
+  setBusy(true);
+  try {
+    const prevRows = S.autoRows ? S.autoRows.map(x => ({ ...x })) : null;
+    const semiBody = { id: S.id, res: S.res, soft: false, roi_native: !!S.roiNative,
+                       purity: S.purity,
+                       rois: S.rois.map(x => ({ box: x.box, ang: x.ang || 0 })) };
+    // 半自动不再自己判 k：第一步只认色，k 交给当前判法定，再回来算一次
+    const det = await post('api/autorun', { ...semiBody, detect_only: true }, undefined, ac.signal);
+    if (my !== S.seq) return;
+    if (!det.ok) throw new Error(det.reason || '认色失败');
+    if (det.samples) { S.samples = det.samples.map(s => ({ rgb: s.rgb, role: s.role })); S.selSample = -1; }
+    if (typeof det.tol === 'number') { S.tol = det.tol; $('#rngTol').value = S.tol; $('#numTol').value = S.tol; }
+    if (det.span != null) S.span = det.span;
+    syncParams(); syncSampleUI();
+    await ensureKnee();                     // 判法定 k（面板里那张表也在这步出来）
+    if (my !== S.seq) return;
+    // 哪种判法定 k：按块数回落 → 用判法的 k；按宽度 → 不传，让服务器按露底分布猜（就是它原来的做法）
+    const autoMode = (S.exmode === 'auto' || S.exmode === 'auto_blk');
+    const r = await post('api/autorun', autoMode ? { ...semiBody, line_px: S.line } : semiBody, undefined, ac.signal);
+    if (my !== S.seq) return;
+    if (!r.ok && r.reason === 'superseded') return;      // 已被更新的请求取代，静默丢掉
+    if (!r.ok) {
+      setStatus('');
+      setResult('半自动没认出来：' + (r.reason || '未知原因') + '。\n请取消「半自动」后在图上手动吸两个色。');
+      $('#chkSemi').checked = false; S.semi = false;
+      setBusy(false);
+      return;
+    }
+    if (r.samples) { S.samples = r.samples.map(s => ({ rgb: s.rgb, role: s.role })); S.selSample = -1; }
+    if (typeof r.tol === 'number') S.tol = r.tol;
+    if (typeof r.line_px === 'number' && !(S.exmode === 'auto' || S.exmode === 'auto_blk')) {
+      S.line = r.line_px; S.widthTouched = true;      // 半自动给的就是这张图的宽度，别再被建议值顶掉
+      if ($('#rngLine')) $('#rngLine').value = Math.min(25, S.line);
+      if ($('#numLine')) $('#numLine').value = S.line;
+      try { localStorage.setItem('baige.line', String(S.line)); } catch (_) {}
+    }
+    syncParams(); syncSampleUI();
+    S.rows = r.rows; S.total = r.total;
+    S.analysis = r.analysis || null; updateFileInfo();
+    S.autoTotal = { ...r.total, worst: r.total.worst ? { ...r.total.worst } : null };
+    S.autoRows = r.rows.map(x => ({ ...x }));
+    S.autoLines = r.lines.slice();
+    S.soft = r.soft || null;
+    S.lines = (r.note ? [r.note] : []).concat(r.lines);
+    if (S.blocksOn && S.rois.length && S.samples.length >= 2) {
+      clearTimeout(S.blocksTimer);
+      S.blocksTimer = setTimeout(() => listBlocks(true), 450);
+    }
+    if (r.ignored && r.ignored.length) {
+      const ps = r.ignored.map(o => `${o.pct}%`).join('、');
+      const at = r.note ? 1 : 0;
+      S.lines.splice(at, 0, `· 程序自动忽略了 ${r.ignored.length} 类颜色（占选区 ${ps}）`
+        + `——在「吸色」页可改角色或删除`);
+    }
+    // 新加的框会让整张图重新认色（KMeans 跑全部选区的并集），旧 ROI 的数字可能跟着变——明说，别让它悄悄变
+    if (prevRows && prevRows.length && prevRows.length < r.rows.length) {
+      const diffs = [];
+      prevRows.forEach((o, i) => {
+        const n = r.rows[i];
+        if (n && Math.abs(n.pct - o.pct) > 0.02) diffs.push(`R${i + 1} ${fmt(o.pct, 2)}% → ${fmt(n.pct, 2)}%`);
+      });
+      if (diffs.length) {
+        const at = r.note ? 1 : 0;
+        S.lines.splice(at, 0, `· 加了这个选区后重新认色，之前的结果跟着变了：${diffs.join('、')}`
+          + `（同一张图只认一套颜色；想固定就先只框一个、确认后再框下一个）`);
+      }
+    }
+    if (S.suggestHold == null) { S.suggest = r.suggest_px; S.suggestSrc = r.suggest_src; }
+    S.span = r.span;
+    renderResult(); refreshRoiList(); updateSuggest(); updateSpan();
+    if (S.exmode === 'auto' || S.exmode === 'auto_blk') ensureKnee().then(() => updateKneeHint()).catch(() => {});
+    if (r.overlay_url) loadOverlay(r.overlay_url);
+    draw();
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;        // 被更新的请求中断，正常
+    setResult('半自动失败：' + err.message);
+  } finally {
+    if (my === S.seq) setBusy(false);
+  }
+}
+
+/* ------------------------------------------------------------------ 吸色 / 量尺 */
+async function pickAt(ex, ey) {
+  if (!S.id) return;
+  const p = toImg(ex, ey);
+  if (p.x < 0 || p.y < 0 || p.x >= S.w || p.y >= S.h) return;
+  try {
+    const r = await post('api/pick', {
+      id: S.id, res: S.res, x: p.x, y: p.y,
+      samples: S.samples.map(s => ({ rgb: s.rgb, role: s.role })),
+    });
+    if (!r.ok) { setStatus(r.reason); return; }
+    S.samples = r.samples;
+    S.selSample = S.samples.length - 1;
+    S.span = r.span;
+    const autoApplied = S.autoTol && typeof r.auto_tol === 'number';
+    if (autoApplied) {
+      S.tol = r.auto_tol;                   // 服务端给的是整数
+      $('#rngTol').value = S.tol; $('#numTol').value = S.tol;
+    }
+    syncParams(); syncSampleUI(); updateSpan();
+    setStatus(`取到 ${r.role_name} RGB(${r.rgb.join(',')}) ${r.note}` +
+      (autoApplied ? `　自动容差 → ${S.tol}` : ''));
+    if (S.samples.length >= 2) analyze(); else setResult('再点一下另一个颜色：' +
+      (S.samples[0].role === 'coat' ? '露底基材' : '完好漆膜'));
+  } catch (err) { setStatus('吸色失败：' + err.message); }
+}
+
+async function measureGroove(a, b) {
+  try {
+    const r = await post('api/ruler', { id: S.id, res: S.res, p0: [a.x, a.y], p1: [b.x, b.y], on_full: true });
+    S.rulerDone = [a.x, a.y, b.x, b.y];
+    if (r.ok === false || r.width_full == null) {
+      S.rulerLast = null;
+      $('#rulerMsg').textContent = r.reason || '没测到明显的沟槽：让线段垂直于刀缝、长度 30px 以上';
+      draw(); return;
+    }
+    S.rulerLast = r;
+    if (r.reliable) {
+      S.rulerHist.push(r.width_analysis);
+      if (r.full_analysis) S.rulerFull.push(r.full_analysis);
+    }
+    const avg = S.rulerHist.length ? S.rulerHist.reduce((x, y) => x + y, 0) / S.rulerHist.length : 0;
+    const avgF = S.rulerFull.length ? S.rulerFull.reduce((x, y) => x + y, 0) / S.rulerFull.length : 0;
+    const wHalfA = r.width_analysis, wFullA = r.full_analysis || r.width_analysis;
+    $('#rulerMsg').textContent = r.reliable
+      ? `分析图：半高宽 ${fmt(wHalfA, 1)} px（缝心）／全宽 ${fmt(wFullA, 1)} px（含发虚的边）\n` +
+        `原图：${fmt(r.width_full, 1)} ／ ${fmt(r.full_full || r.width_full, 1)} px　对比度 ${Math.round(r.contrast)} ✓\n` +
+        `已量 ${S.rulerHist.length} 次｜均值 半高 ${fmt(avg, 1)} / 全宽 ${fmt(avgF, 1)}\n` +
+        `→ 点「用测量值」会把阈值设成全宽 +1 = ${Math.round(avgF || avg) + 1}（半高宽只是缝心，边缘也得一起排掉）\n` +
+        `（这条线 6 秒后自动隐去，数值和均值仍然保留）`
+      : `分析图：半高宽 ${fmt(wHalfA || 0, 1)} / 全宽 ${fmt(wFullA || 0, 1)} px，但对比度只有 ${Math.round(r.contrast)}，不可靠\n` +
+        `换个位置重拖一条，或先点「放大到 100%」`;
+    S.suggestHold = null;                        // 量到新刀缝了，建议重新算
+    updateSuggest(); draw();
+    rulerFadeSoon();
+  } catch (err) { $('#rulerMsg').textContent = '量尺失败：' + err.message; }
+}
+
+/* ------------------------------------------------------------------ 分辨率 / 旋转 */
+async function changeRes(res) {
+  if (!S.id) { S.res = res; return; }
+  const oldW = S.w, oldLine = S.line;
+  const meta = await post('api/load', { id: S.id, res });
+  const f = oldW ? meta.w / oldW : 1;
+  S.res = res;
+  S.rois = S.rois.map(r => ({ box: r.box.map(v => v * f), ang: r.ang }));
+  S.line = oldLine > 1 ? Math.max(1, Math.round(oldLine * f)) : 1;
+  if (S.annot.strokes.length && Math.abs(f - 1) > 1e-6) {
+    S.annot.strokes.forEach(k => { k.r = k.r * f; k.pts = k.pts.map(([x, y]) => [x * f, y * f]); });
+    S.annot.res = null;
+  }
+  S.overlayUrl = null; S.overlayImg = null; S.contourUrl = null; S.contourImg = null;
+  await refetchImage();
+  syncParams(); fitView();
+  if (S.samples.length) analyze(); else setResult('分辨率已切换，选区与刀缝阈值已按比例换算。');
+}
+
+/* ------------------------------------------------------------------ 导出 */
+async function download(path, name) {
+  const body = Object.assign(payload(), { name: S.name || '结果' });
+  const r = await fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  if (!r.ok) { setStatus('导出失败：' + (await r.text()).slice(0, 200)); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+/* ------------------------------------------------------------------ UI 同步 */
+function setResult(text) {
+  const el = $('#result'); if (!el) return;
+  el.textContent = text; el.style.display = '';   // 提示/报错一律要看得到
+}
+
+/* 换图/换记录前，把上一张图的所有派生结果清干净：
+   结果卡（大等级、百分比、每选区行）、右上角胶囊、建议刀缝阈值、诊断、块确认、软权重、量尺结果 */
+function clearImageState() {
+  S.rows = null; S.total = null; S.lines = [];
+  S.suggest = null; S.suggestSrc = ''; S.span = null;
+  S.autoTotal = null; S.autoRows = null; S.autoLines = null;
+  S.blocks = null; S.soft = null;
+  S.rulerHist = []; S.rulerFull = []; S.rulerLast = null; S.rulerSeg = null; S.rulerDone = null;
+  S.suggestHold = null;
+  clearTimeout(S.rulerFadeT);
+  setResult('打开图片 → 吸两个颜色 → 框出划格区 → 计算\n');
+  setStatus('');
+  const set = (id, t) => { const e = $(id); if (e) e.textContent = t; };
+  const sum = $('#summary');
+  if (sum) { sum.textContent = ''; sum.className = 'summary'; }
+  const ss = $('#sideSummary');
+  if (ss) ss.textContent = '';
+  const badge = $('#resBadge');
+  if (badge) { badge.textContent = '—'; badge.className = 'rg'; }
+  set('#resCardPct', '');
+  const rowsBox = $('#resCardRows');
+  if (rowsBox) rowsBox.innerHTML = '<div class="rrow"><span>—</span></div>';
+  const dx = $('#diagx'); if (dx) dx.innerHTML = '';
+  const cm = $('#cmp'); if (cm) cm.innerHTML = '';
+  const bl = $('#blockList'); if (bl) bl.innerHTML = '';
+  const bi = $('#blockInfo'); if (bi) bi.textContent = '—';
+  set('#rulerMsg', '');
+  updateSuggest();          // 建议阈值回到占位提示，不再显示上一张图的 n px
+  updateKneeHint();
+}
+function setStatus(text) { $('#hint').textContent = text || ''; }
+
+function syncParams() {
+  $('#rngTol').value = S.tol; $('#numTol').value = S.tol;
+  $('#rngPurity').value = S.purity; $('#numPurity').value = S.purity;
+  $('#rngLine').value = S.line; $('#numLine').value = S.line;
+  if ($('#selExmode')) $('#selExmode').value = S.exmode;   // 已撤下（只剩固定宽度一种）
+  $('#selRes').value = String(S.res);
+  $('#chkAutoTol').checked = S.autoTol;
+  $('#chkDetail').checked = S.detail;
+  $('#chkSemi').checked = S.semi;
+  $('#chkOverlay').checked = S.showOverlay;
+  updatePurityInfo();
+}
+
+/* 与服务端 _auto_tol_of 同一套换算：整数，6~120 */
+const autoTolOf = span => (span == null ? null
+  : Math.round(Math.max(6, Math.min(120, span * 0.45))));
+
+function updateSpan() {
+  const el = $('#spanInfo');
+  if (S.span == null) { el.textContent = '样本间距：—（还缺漆膜或基材）'; return; }
+  el.textContent = `样本间距 ${Math.round(S.span)}（Lab 距离）→ 建议容差 ${autoTolOf(S.span)}` +
+    (S.autoTol ? `　· 当前自动采用 ${S.tol}` : `　· 手动 ${S.tol}`);
+}
+
+/* 向服务端要真实的样本间距 / 建议容差；自动容差开着就立刻套用 */
+async function refreshSpan() {
+  if (!S.samples.length) { S.span = null; updateSpan(); return; }
+  try {
+    const r = await post('api/samples', {
+      samples: S.samples.map(s => ({ rgb: s.rgb, role: s.role })),
+    });
+    S.span = r.span;
+    if (S.autoTol && r.auto_tol != null) {
+      S.tol = r.auto_tol;                       // 服务端给的就是整数
+      $('#rngTol').value = S.tol;
+      $('#numTol').value = S.tol;
+    }
+  } catch (err) { /* 间距算不出来不影响主流程 */ }
+  updateSpan();
+}
+
+function updateSuggest() {
+  const btn = $('#btnSuggest'), info = $('#suggestInfo');
+  if (!btn || !info) return;      // 采用建议按钮与提示行已撤下
+  if (S.suggestHold != null) {
+    info.textContent = `已采用 ${S.suggestHold} px（改容差/纯度/选区/量尺后会重新建议）`;
+    btn.disabled = false; btn.textContent = `采用 ${S.suggestHold} px`;
+    return;
+  }
+  if (S.suggest == null) {
+    info.textContent = '建议刀缝阈值：先吸色算一次，或量一条刀缝（成片脱落为主的图只能靠量尺）';
+    btn.disabled = true; btn.textContent = '采用建议';
+  } else {
+    info.textContent = `建议刀缝阈值 ≈ ${S.suggest} px（${S.suggestSrc || '按露底厚度'}）`;
+    btn.disabled = false; btn.textContent = `采用 ${S.suggest} px`;
+  }
+}
+
+function refreshRoiList() {
+  const box = $('#roiList');
+  if (!S.rois.length) {
+    box.innerHTML = '<div class="empty">还没有选区：在图上拖出划格区</div>';
+    return;
+  }
+  box.innerHTML = '';
+  S.rois.forEach((r, i) => {
+    const st = (S.rows && S.rows.length === S.rois.length) ? S.rows[i] : null;
+    const el = document.createElement('div');
+    el.className = 'roiitem' + (i === S.sel ? ' on' : '');
+    el.innerHTML = `<span class="nm">R${i + 1}</span>
+      <span class="pc">${st ? fmt(st.pct, 2) + '%' : '—'}</span>
+      <span class="cl">${st ? st.astm : '—'}</span>
+      <button class="del" title="删除">×</button>`;
+    el.onclick = ev => {
+      if (ev.target.classList.contains('del')) { deleteRoi(i); return; }
+      S.sel = i; refreshRoiList(); syncRoiAngle(); draw();
+    };
+    box.appendChild(el);
+  });
+}
+
+function dropOverlay() {
+  // 覆盖层是按"当前这组选区"算的；选区一改，旧的那张就是错的，立刻撤掉。
+  // seq 一定要跟着 +1：在飞的分析算的是旧的这组选区，回来时不能再往画布上贴图
+  // （否则删完框等一两秒，浅色区域会自己"变回来"）。
+  S.seq++;
+  if (S.autoAbort) { try { S.autoAbort.abort(); } catch (_) {} S.autoAbort = null; }
+  setBusy(false);
+  if (!S.overlayUrl && !S.overlayImg) return;
+  S.overlayUrl = null; S.overlayImg = null; S.contourUrl = null; S.contourImg = null;
+}
+
+/* 清空全部选区（按钮以前没接事件，点了没反应） */
+function clearAllRois() {
+  if (!S.rois.length) return;
+  S.rois = []; S.sel = -1;
+  dropOverlay();
+  refreshRoiList(); syncRoiAngle(); draw();
+  analyze();                       // 没选区 → 走"清空结果"分支
+}
+
+function deleteRoi(i) {
+  S.rois.splice(i, 1);
+  if (S.sel >= S.rois.length) S.sel = S.rois.length - 1;
+  dropOverlay();
+  refreshRoiList(); syncRoiAngle(); draw();
+  if (S.samples.length) debouncedAnalyze();
+}
+
+function syncSampleUI() {
+  updateKneeHint();
+  const box = $('#sampleList');
+  if (!S.samples.length) {
+    box.innerHTML = '<div class="empty">还没有样本：图上点一下完好漆膜，再点一下露底基材</div>';
+    $('#spanInfo').textContent = '样本间距：—（先吸漆膜和基材）';
+    return;
+  }
+  box.innerHTML = '';
+  S.samples.forEach((s, i) => {
+    const el = document.createElement('div');
+    el.className = 'sitem' + (i === S.selSample ? ' on' : '');
+    el.innerHTML = `<span class="chip" style="background:rgb(${s.rgb.join(',')})"></span>
+      <span class="rl">${roleName(s.role)}</span>
+      <span class="rgb">RGB ${s.rgb.join(',')}</span>
+      <button class="x" title="删除">×</button>`;
+    el.onclick = ev => {
+      if (ev.target.classList.contains('x')) {
+        S.samples.splice(i, 1);
+        if (S.selSample >= S.samples.length) S.selSample = S.samples.length - 1;
+        afterSamplesChanged();
+        return;
+      }
+      S.selSample = i; syncSampleUI();
+    };
+    box.appendChild(el);
+  });
+  updateSpan();
+}
+
+function roleName(r) { return r === 'sub' ? '基材' : '漆膜'; }   // v1.42：只有两个角色
+
+/* 样本角色改动后的统一收尾：刷新列表 → 重算自动容差 → 重算结果 */
+async function afterSamplesChanged() {
+  S.overlayUrl = null; S.overlayImg = null; S.contourUrl = null; S.contourImg = null;
+  syncSampleUI();
+  await refreshSpan();                 // 角色变了间距就变，自动容差跟着走
+  const hasCoat = S.samples.some(s => s.role === 'coat');
+  const hasSub = S.samples.some(s => s.role === 'sub');
+  if (S.samples.length >= 2 && hasCoat && hasSub) analyze();
+  else setResult('颜色角色还没齐：至少需要一行「漆膜」和一行「基材」。\n' +
+    '在下面的列表里点一行选中，再点上面的「设为漆膜 / 设为基材」按钮改过来。');
+}
+
+function setSampleRole(role) {
+  if (S.selSample < 0 && S.samples.length) { S.selSample = 0; syncSampleUI(); }
+  const i = S.selSample;
+  if (i < 0 || !S.samples[i]) { setStatus('还没有颜色样本：先在图上点一下漆膜、再点一下基材'); return; }
+  if (S.samples[i].role === role) { setStatus('这一行已经是「' + roleName(role) + '」了'); return; }
+  S.samples[i].role = role;
+  setStatus(`第 ${i + 1} 个样本（RGB ${S.samples[i].rgb.join(',')}）→ ${roleName(role)}`);
+  afterSamplesChanged();
+}
+
+/* 已不绑按钮，保留给键盘 Delete 用；样本行右侧的 × 也走这里 */
+function delSampleSel() {
+  if (S.selSample < 0 && S.samples.length) { S.selSample = 0; syncSampleUI(); }
+  const i = S.selSample;
+  if (i < 0 || !S.samples[i]) { setStatus('还没有颜色样本可删'); return; }
+  S.samples.splice(i, 1);
+  S.selSample = Math.min(S.samples.length - 1, i);
+  afterSamplesChanged();
+}
+
+function syncRoiAngle() {
+  const el = $('#roiAng');           // 数值旋转已从界面撤下（只在画布上拖手柄转）
+  if (!el) return;
+  if (S.sel >= 0 && S.rois[S.sel]) el.value = (S.rois[S.sel].ang || 0).toFixed(1);
+  else el.value = '0';
+}
+
+/* ------------------------------------------------------------------ 事件绑定 */
+$('#btnOpen').onclick = () => $('#fileInput').click();
+$('#fileInput').onchange = e => { upload(e.target.files[0]); e.target.value = ''; };
+$('#btnCalc').onclick = analyze;
+$('#btnFit').onclick = fitView;
+$('#btnOne').onclick = zoomOne;
+$('#btnCsv').onclick = () => download('api/export/csv', (S.name || '结果').replace(/\.[^.]+$/, '') + '_百格.csv');
+$('#btnPng').onclick = () => download('api/export/png', (S.name || '结果').replace(/\.[^.]+$/, '') + '_标注.png');
+
+/* ---- 结果栏高度：拖顶部把手上下调（往上 = 变高），双击复原 ----
+   上下都留位置：最少 120px，上面固定留 110px 给参数区，拉不出视野。 */
+(function () {
+  const grip = document.getElementById('resGrip');
+  const box = document.getElementById('resultBox');
+  if (!grip || !box) return;
+  const MIN = 120, DEF = 300, PANE_KEEP = 100;   // 上面给参数区至少留 100px（不含页签）
+  const tabsH = () => (document.querySelector('.side .tabs') || {}).offsetHeight || 42;
+  const maxH = () => Math.max(MIN, (box.parentElement.clientHeight || 600) - tabsH() - PANE_KEEP);
+  const apply = h => { box.style.height = Math.min(maxH(), Math.max(MIN, h)) + 'px'; };
+  const saved = parseInt(localStorage.getItem('baige.resH'), 10);
+  if (saved > 0) apply(saved);
+
+  let sy = 0, sh = 0, on = false;
+  grip.addEventListener('pointerdown', e => {
+    on = true; sy = e.clientY; sh = box.getBoundingClientRect().height;
+    grip.classList.add('drag');
+    try { grip.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault();
+  });
+  grip.addEventListener('pointermove', e => { if (on) apply(sh - (e.clientY - sy)); });
+  const end = e => {
+    if (!on) return;
+    on = false; grip.classList.remove('drag');
+    try { grip.releasePointerCapture(e.pointerId); } catch (_) {}
+    localStorage.setItem('baige.resH', String(parseInt(box.style.height, 10) || DEF));
+  };
+  grip.addEventListener('pointerup', end);
+  grip.addEventListener('pointercancel', end);
+  grip.addEventListener('dblclick', () => { apply(DEF); localStorage.setItem('baige.resH', String(DEF)); });
+  window.addEventListener('resize', () => {
+    const h = parseInt(box.style.height, 10);
+    if (h) apply(h);
+  });
+})();
+$('#chkOverlay').onchange = e => { S.showOverlay = e.target.checked; draw(); };
+$('#chkSemi').onchange = e => {
+  S.semi = e.target.checked;
+  if (S.semi) runSemi();
+};
+$('#chkDetail').onchange = e => {
+  S.detail = e.target.checked;
+  renderResult();                                  // 先按本地数据立刻切换显示
+  if (S.samples.length >= 2) analyze();            // 再让服务器按需补算/省算明细
+};
+function setSoft(on) {
+  S.softOn = on;
+  const a = $('#chkSoft'); if (a) a.checked = on;
+  const b = $('#chkSoftR'); if (b) b.checked = on;
+  try { localStorage.setItem('baige.soft', on ? '1' : '0'); } catch (_) {}
+  if (!S.id) return;
+  if (on) { analyze(); }
+  else { S.soft = null; if (S.total) renderResult(); setStatus('已关闭软权重，只显示 v1 口径'); }
+}
+if ($('#chkSoftR')) $('#chkSoftR').onchange = e => setSoft(e.target.checked);   // 开关已撤下
+
+/* 选区原生：只把框里那一点按原图像素算（v1.31，默认关） */
+function setRoiNative(on) {
+  S.roiNative = !!on;
+  const cb = $('#chkRoiNative');
+  if (cb) cb.checked = S.roiNative;
+  // 不持久化：每次打开都默认开「选区原生」
+  S.blocks = null;
+  try { renderBlocks(); } catch (_) {}
+  if (!S.id) return;
+  if (!S.rois.length) {
+    setStatus(S.roiNative ? '已开「选区原生」：框完选区再生效（只分析框内那块）'
+                          : '已关「选区原生」：按整图 6MP 分析');
+    return;
+  }
+  if (S.samples.length >= 2) analyze();
+  else setStatus(S.roiNative ? '已开「选区原生」：吸两个颜色后再计算' : '已关「选区原生」');
+}
+
+$('#chkRoiNative').onchange = e => setRoiNative(e.target.checked);
+
+/* 刀缝判法只剩两种：按块数回落（默认）/ 按宽度。
+   旧记录里存的 shape/local/auto 已停用，打开时一律按「按宽度」+ 记录里的 k 还原，
+   并在状态栏说明数字可能与存档不同。*/
+const EXMODE_TXT = {
+  auto_blk: '按块数回落：自动扫 k=1…16，块数先从低急升到峰值、再回落。①取过峰值后第一档块数 ≤ 峰值 25% 的 k；②若进这一档时露底还在大跌（≥2 个百分点），说明还没走平，继续往下一档；③走平的那一档当刀缝宽度，再按这个宽度算。扫一次约 4 秒；下面的曲线可以点任意一档手动覆盖。',
+  width: '按露底分布：看露底厚度分布给一个刀缝阈值（薄结构占主导时才信它），比阈值粗的算脱落、其余全算刀缝。这个值你可以随时手改；换个判法再回来会重算。'
+};
+const RETIRED_MODES = { auto: 1, shape: 1, local: 1 };
+/* 只同步状态与界面，不触发计算（打开记录时要用它，否则会先按错的判法算一遍） */
+function applyExmode(v) {
+  const retired = !!RETIRED_MODES[v];
+  S.exmode = (v === 'auto_blk') ? v : 'width';        // 停用的判法一律回落到按宽度
+  const el = $('#selExmode'); if (el) el.value = S.exmode;
+  if (retired && S.line > 0) {
+    setStatus('这条记录原来用的是「' + ({ auto: '按露底突增', shape: '按形状', local: '按局部宽度' }[v])
+      + '」（已停用），现按「按露底分布 ' + S.line + ' px」重算，数字可能与存档略有不同');
+  }
+  try { localStorage.setItem('baige.exmode', S.exmode); } catch (_) {}
+  const info = $('#exmodeInfo');
+  if (info) info.textContent = EXMODE_TXT[S.exmode] || '';
+  try { updateKneeHint(); } catch (_) {}     // 换判法立刻刷新/隐藏 k 曲线
+}
+function setExmode(v) {
+  applyExmode(v);
+  S.lineManual = false;                                  // 只要切换判法，手改标记一律作废
+  S.widthTouched = false; S.suggRetry = false;            // 新判法要能覆盖你之前设的宽度
+  if (v === 'auto' || v === 'auto_blk') S.knee = null;    // 重选自动判法 = 重新扫、重新套用
+  else if (v === 'width') setStatus('按露底分布：沿用当前 ' + S.line + ' px（手改标记已清；切回按块数回落会重新按判法定 k）');
+  S.blocks = null;
+  if (S.id && S.samples.length >= 2 && S.rois.length) analyze();
+}
+$('#selExmode').onchange = e => setExmode(e.target.value);
+
+/* 点块确认：不用画笔，点一下某块 = 排除 */
+function blocksSig() {
+  // 判法(mode)、样本颜色也会改变块的分法，必须进签名——否则换了判法还拿旧编号沿用排除，
+  // 那就是把“排除第 7 块”套到一个完全不同的块上。
+  return JSON.stringify({ k: S.line, tol: S.tol, pur: S.purity, res: S.res, rn: S.roiNative ? 1 : 0,
+                          md: S.exmode, lt: S.locTile || null, lf: S.locFactor || null,
+                          s: S.samples.map(x => x.rgb.join(',') + x.role),
+                          r: S.rois.map(x => x.box.map(v => Math.round(v * 10) / 10).concat([x.ang || 0])) });
+}
+
+async function listBlocks(silent) {
+  S.blocksDue = false; refreshCalcBtn();
+  if (!S.id) return;
+  if (!S.samples.length) { if (!silent) setStatus('先吸两个颜色再列块'); return; }
+  if (!S.rois.length) { if (!silent) setStatus('先框一个选区'); return; }
+  if (!silent) setStatus('列出露底块…');
+  const my = ++S.blocksSeq;
+  const sig = blocksSig();
+  setBlocksBusy(true);
+  const keepEx = (S.blocks && S.blocks.sig === sig) ? S.blocks.excluded : null;
+  try {
+    const r = await post('api/blocks', {
+      id: S.id, res: S.res,
+      rois: S.rois.map(x => ({ box: x.box, ang: x.ang || 0 })),
+      samples: S.samples.map(s => ({ rgb: s.rgb, role: s.role })),
+      tol: S.tol, purity: S.purity, line_px: S.line, mode: srvMode(),
+      loc_tile: S.locTile || 64, loc_factor: S.locFactor || 1.6,
+      roi_native: !!S.roiNative,
+    });
+    if (my !== S.blocksSeq) return;                 // 又来了新的一次，这次结果作废
+    if (!r.ok) { if (!silent) setStatus(r.reason || '列块失败'); return; }
+    const excluded = r.rois.map((x, ri) => {
+      const old = keepEx && keepEx[ri];
+      if (!old) return new Set();
+      return new Set([...old].filter(i => i < x.blocks.length));   // 同参数改回来时保留排除
+    });
+    S.blocks = { k: r.k, rois: r.rois, excluded, sig, hover: -1 };
+    draw(); renderBlocks();
+    const n = r.rois.reduce((a, x) => a + x.blocks.length, 0);
+    if (!silent) setStatus(`列出 ${n} 块`);
+    else setStatus(`已自动更新：${n} 块（点块可排除）`);
+  } catch (err) {
+    if (!silent) setStatus('列块失败：' + err.message);
+  } finally {
+    if (my === S.blocksSeq) setBlocksBusy(false);
+  }
+}
+
+function blocksCalc() {
+  const B = S.blocks;
+  if (!B || !B.rois || !B.rois.length) return null;
+  let num = 0, den = 0, keptAll = 0, exN = 0, exA = 0;
+  const per = [];
+  B.rois.forEach((r, ri) => {
+    const ex = B.excluded[ri];
+    let inc = r.kept;
+    r.blocks.forEach(b => { if (ex.has(b.i)) { inc -= b.area; exN++; exA += b.area; } });
+    per.push({ pct: r.denom ? 100 * inc / r.denom : 0, auto: r.denom ? 100 * r.kept / r.denom : 0 });
+    num += inc; den += r.denom; keptAll += r.kept;
+  });
+  if (!den) return null;
+  const pct = 100 * num / den;
+  return { pct, lo: 100 * num / B.rois.reduce((a, r) => a + r.A, 0), astm: gradeOf(pct), iso: isoOf(pct),
+           auto: 100 * keptAll / den, exN, exA, n: B.rois.reduce((a, r) => a + r.blocks.length, 0), per };
+}
+
+function gradeOf(p) {
+  if (p <= 0.5) return '5B';
+  if (p < 5) return '4B';
+  if (p < 15) return '3B';
+  if (p < 35) return '2B';
+  if (p < 65) return '1B';
+  return '0B';
+}
+function isoOf(p) {
+  if (p <= 0.5) return 'Gt0';
+  if (p < 5) return 'Gt1';
+  if (p < 15) return 'Gt2';
+  if (p < 35) return 'Gt3';
+  if (p < 65) return 'Gt4';
+  return 'Gt5';
+}
+
+/* 逐块排除要影响所有显示（右上胶囊、R1 标签、结果区），不能让用户再点一次计算 */
+function applyBlocks() {
+  if (!S.autoTotal) return;
+  const R = blocksCalc();
+  const t = S.autoTotal;
+  if (!R || R.exN === 0) {
+    S.total = { ...t, worst: t.worst ? { ...t.worst } : null };
+  } else {
+    S.total = { ...t, pct: R.pct, astm: R.astm, iso: R.iso, worst: null, manual: R.exN };
+  }
+  if (S.autoRows && S.rows && R && R.per.length === S.rows.length) {
+    const prev = S.rows.map(x => x.pct);
+    S.rows = S.autoRows.map(x => ({ ...x }));
+    R.per.forEach((p, i) => {
+      S.rows[i].pct = p.pct;
+      S.rows[i].astm = gradeOf(p.pct);
+      S.rows[i].iso = isoOf(p.pct);
+    });
+    if (S.rows.some((x, i) => Math.abs((prev[i] ?? -1) - x.pct) > 1e-9)) S.needRedraw = true;
+  }
+  // 结果区里 "R1  1.96%  4B" 这行也要跟着改，否则跟上面的胶囊对不上
+  const base = S.autoLines || S.lines;
+  const out = base.slice();
+  if (R && R.exN > 0 && S.rows) {
+    S.rows.forEach((row, i) => {
+      const re = new RegExp('^R' + (i + 1) + '\\s');
+      const k = out.findIndex(s => re.test(s));
+      if (k >= 0) out[k] = out[k].replace(/(R\d+\s+)[\d.]+%(\s+)\S+/, `$1${fmt(row.pct, 2)}%$2${row.astm}`);
+    });
+    const mi = out.findIndex(s => s.startsWith('判定余量'));
+    if (mi >= 0) out[mi] = marginHint(R.per.length === 1 ? R.per[0].pct : R.pct);
+  }
+  S.lines = out;
+}
+
+function blocksText() {
+  const R = blocksCalc();
+  if (!R) return '';
+  const d = R.pct - R.auto;
+  const dTxt = R.exN ? `${d < 0 ? '−' : '+'}${fmt(Math.abs(d), 2)} pp` : '未排除任何块';
+  return [
+    '——— 逐块确认（自动重算，不用点「计算」）———',
+    `共 ${R.n} 块，已排除 ${R.exN} 块（${fmt(R.exA, 0)} px）`,
+    `脱落 ${fmt(R.pct, 2)}% → ${R.astm} / ${R.iso}　${dTxt}（自动 ${fmt(R.auto, 2)}%）`,
+  ].join('\n');
+}
+
+function renderBlocks() {
+  const box = $('#blockList'), info = $('#blockInfo');
+  const B = S.blocks;
+  if (!B) {
+    box.innerHTML = '<div class="empty">还没列出。框好选区后会自动列（勾着「自动列出」时）。</div>';
+    info.textContent = '—';
+    if (S.total) renderResult();
+    return;
+  }
+  const R = blocksCalc();
+  const rows = [];
+  if (!S.blocksOn) {
+    rows.push('<div class="recnone" style="padding:6px 8px">块显示已关闭：不再计算、图上也不画。'
+      + '已排除的记录（' + B.excluded.reduce((a, x) => a + x.size, 0) + ' 个）先留着，'
+      + '参数或判法一改就清空。</div>');
+  }
+  // 每个选区自己的块号都从 1 开始，必须分组显示，否则 4 个选区就有 4 个“1”，看不出谁是谁
+  B.rois.forEach((r, ri) => {
+    const sr = (S.rows && S.rows[ri]) || null;
+    const exN = B.excluded[ri] ? B.excluded[ri].size : 0;
+    // 每个选区一个“独立盒子”：分组头只在自己的盒子里吸顶，滚出这个盒子就跟着走，
+    // 否则多个 sticky 头都停在 top:0，滚到后面 R1 R2 R3 R4 会叠在一起。
+    rows.push(`<div class="recgrp" data-roi="${ri}"><div class="recg">
+      <span class="gname">R${ri + 1}</span>
+      <span class="gmeta">${sr ? fmt(sr.pct, 2) + '% · ' + sr.astm : '—'} ｜ ${r.blocks.length} 块${exN ? ' · 已排除 ' + exN : ''}</span>
+    </div>`);
+    if (!r.blocks.length) {
+      rows.push('<div class="recnone">这个选区里没有够大的露底块。</div></div>');
+      return;
+    }
+    r.blocks.forEach(b => {
+      const ex = B.excluded[ri].has(b.i);
+      const share = r.kept ? 100 * b.area / r.kept : 0;
+      rows.push(`<div class="reckitem" data-roi="${ri}" data-i="${b.i}">
+        <span class="rk">${b.i + 1}</span>
+        <span class="rv">${fmt(b.area, 0)} px · 占露底 ${fmt(share, 1)}%</span>
+        <button class="mini ${ex ? '' : 'on'}" data-act="toggle" data-roi="${ri}" data-i="${b.i}">${ex ? '已排除' : '算脱落'}</button>
+      </div>`);
+    });
+    rows.push('</div>');
+  });
+  box.innerHTML = rows.join('') || '<div class="empty">还没有块。框一个选区、或者调一下刀缝阈值就会自动列出来。</div>';
+  info.textContent = R
+    ? [`共 ${R.n} 块，已排除 ${R.exN} 块（${fmt(R.exA, 0)} px）`,
+       `脱落 ${fmt(R.pct, 2)}% → ${R.astm} / ${R.iso}`,
+       `自动口径 ${fmt(R.auto, 2)}%（不减任何块）`].join('\n')
+    : '—';
+  if (S.total) renderResult();
+}
+
+function toggleBlock(ri, i) {
+  const B = S.blocks;
+  if (!B || !B.rois[ri]) return;
+  if (B.sig !== blocksSig()) { setStatus('块正在按新参数更新，稍等一下再点'); return; }
+  const ex = B.excluded[ri];
+  if (ex.has(i)) ex.delete(i); else ex.add(i);
+  draw(); renderBlocks();
+}
+
+/* 一个开关管两件事：显示就自动列块（调参数实时更新），不显示就压根不算。
+   以前是“自动列出 / 图上显示”两个勾，勾了不显示也照样算一遍，白跑。 */
+function setShowBlocks(on) {
+  S.blocksOn = !!on;
+  const el = $('#chkBlocks'); if (el) el.checked = S.blocksOn;
+  try { localStorage.setItem('baige.showBlocks', S.blocksOn ? '1' : '0'); } catch (_) {}
+  if (!S.blocksOn) {
+    // 只停“算”和“画”：已排除的块留在缓存里，勾回来不用重算也还在。
+    // 一旦参数/判法/选区变了，blocksSig() 对不上，下面的分支和 analyze 回来的校验会把它清掉。
+    clearTimeout(S.blocksTimer);
+    renderBlocks();
+  } else if (S.blocks && S.blocks.sig === blocksSig()) {
+    draw(); renderBlocks();                              // 缓存还有效：不动后端
+  } else {
+    if (S.blocks) { S.blocks = null; renderBlocks(); }
+    if (S.id && S.rois.length && S.samples.length >= 2) listBlocks(true);
+  }
+  draw();
+}
+$('#chkBlocks').onchange = e => {
+  setShowBlocks(e.target.checked);
+  setStatus(e.target.checked ? '块已显示（调参数会实时更新）' : '块已隐藏，也不再计算');
+};
+$('#bReset').onclick = () => {
+  if (!S.blocks) return;
+  S.blocks.excluded = S.blocks.rois.map(() => new Set());
+  draw(); renderBlocks();
+  setStatus('已恢复全部块');
+};
+
+
+$('#blockList').onclick = e => {
+  const b = e.target.closest('[data-act="toggle"]');
+  if (!b) return;
+  toggleBlock(+b.dataset.roi, +b.dataset.i);
+};
+
+/* ------------------------------------------------------------------ 记录（手工保存） */
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+async function refreshRecords() {
+  const box = $('#recList'), stat = $('#recStat');
+  try {
+    const r = await post('api/records', undefined, 'GET');
+    if (!r.ok) throw new Error(r.reason || '读不到记录');
+    $('#recCount').textContent = r.total;
+    const mb = r.bytes / 1e6;
+    stat.textContent = `${r.total}/${r.max} 条 · ${fmt(mb, 1)} MB` + (r.free_mb != null ? ` · 服务器剩 ${fmt(r.free_mb / 1000, 1)} GB` : '');
+    if (!r.items.length) {
+      box.innerHTML = '<div class="empty">还没有记录。算完之后点结果栏右上角的「保存到记录」。</div>';
+      return;
+    }
+    box.innerHTML = r.items.map(it => {
+      const grade = it.worst_roi ? (it.worst_pct != null ? fmt(it.worst_pct, 2) : '—') : (it.pct != null ? fmt(it.pct, 2) : '—');
+      const g = it.astm || '—';
+      const cur = (it.id === S.curRid) ? ' cur' : '';
+      return `<div class="recitem${cur}" data-id="${it.id}">
+        <img src="api/records/${it.id}/thumb.jpg?v=${Date.now()}" alt="" loading="lazy">
+        <div class="recmeta">
+          <div class="recname" data-name="${it.id}">${esc(it.name)}</div>
+          <div class="recsub">${esc(it.created || '')}　${it.w}×${it.h}　k=${it.line_px}　tol=${it.tol}</div>
+          <div class="recsub"><b>${grade}%</b> ${g}${it.manual ? `　✎排除${it.manual}块` : ''}${it.worst_roi ? `　最差 R${it.worst_roi}` : ''}　${it.n_roi} 个选区</div>
+        </div>
+        <button class="ren" data-ren="${it.id}" title="重命名">✎</button>
+        <button class="del" data-del="${it.id}" title="删除（服务器上一起删）">×</button>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    box.innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`;
+  }
+}
+
+/* 重命名：把那行的名字换成输入框，回车保存，Esc 取消；空名字不提交 */
+function startRename(rid) {
+  const box = document.querySelector(`[data-name="${rid}"]`);
+  if (!box || box.querySelector('input')) return;
+  const old = box.textContent.trim();
+  const inp = document.createElement('input');
+  inp.className = 'renbox';
+  inp.value = old;
+  inp.maxLength = 60;
+  box.innerHTML = '';
+  box.appendChild(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const v = inp.value.trim();
+    if (!save || !v || v === old) { refreshRecords(); return; }
+    try {
+      const r = await post('api/records/' + rid + '/rename', { name: v });
+      if (!r.ok) throw new Error(r.reason || '改名失败');
+      if (rid === S.curRid) { S.name = v; updateFileInfo(); }
+      setStatus('已改名为「' + v + '」');
+    } catch (err) {
+      setStatus('改名失败：' + err.message);
+    }
+    refreshRecords();
+  };
+  inp.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+  });
+  inp.addEventListener('blur', () => finish(true));
+}
+
+function openDrawer() {
+  $('#drawer').classList.add('on');
+  $('#scrim').classList.add('on');
+  refreshRecords();
+}
+function closeDrawer() {
+  $('#drawer').classList.remove('on');
+  $('#scrim').classList.remove('on');
+}
+
+async function saveRecord() {
+  if (!S.id) { setStatus('先打开一张图'); return; }
+  if (!S.rois.length) { setStatus('先框一个选区再存'); return; }
+  const btn = $('#btnSave');
+  btn.disabled = true; btn.textContent = '保存中…';
+  try {
+    const B = S.blocks;
+    const R = B ? blocksCalc() : null;
+    const excl = B ? B.rois.map((r, ri) => [...B.excluded[ri]].sort((a, b) => a - b)) : null;
+    const r = await post('api/records/save', {
+      id: S.id, name: S.name || '未命名', res: S.res,
+      rois: S.rois.map(x => ({ box: x.box, ang: x.ang || 0 })),
+      samples: S.samples.map(s => ({ rgb: s.rgb, role: s.role })),
+      tol: S.tol, purity: S.purity, line_px: S.line, mode: srvMode(),
+      pct: (R && R.exN > 0) ? R.pct : null,
+      astm: (R && R.exN > 0) ? R.astm : '',
+      iso: (R && R.exN > 0) ? R.iso : '',
+      excl: (R && R.exN > 0) ? excl : null,
+      knee_warn: S.kneeWarn || '', knee_k: (S.knee && S.knee.k) || null,
+    });
+    if (!r.ok) throw new Error(r.reason || '保存失败');
+    const savedId = r.id || (r.record && r.record.id);
+    if (savedId) { S.curRid = savedId; try { localStorage.setItem('baige.curRid', savedId); } catch (_) {} }
+    btn.textContent = r.updated ? '已更新 ✓' : '已保存 ✓';
+    setStatus(r.updated ? '同一张图同一选区 → 已更新原记录（没有新增）' : '已保存到记录');
+    refreshRecCount();
+    setTimeout(() => { btn.textContent = '保存到记录'; btn.disabled = false; }, 1600);
+  } catch (e) {
+    btn.textContent = '保存到记录'; btn.disabled = false;
+    setStatus('保存失败：' + e.message);
+  }
+}
+
+async function openRecord(rid) {
+  setStatus('打开记录…');
+  S.openAbort = new AbortController();
+  const sig = S.openAbort.signal;
+  let creep = null;
+  const mb = n => (n / 1048576).toFixed(1) + ' MB';
+  upShow('正在打开记录…');
+  let stopCreep = creepStart(2, 7, '读取存档、解码原图…（约 1~2 秒）', 350);
+  try {
+    const r = await post('api/records/' + rid + '/open', {}, 'POST', sig);
+    if (!r.ok) throw new Error(r.reason || '打开失败');
+    const meta = r.meta, rec = r.record;
+    S.curRid = rid;
+    try { localStorage.setItem('baige.curRid', rid); } catch (_) {}
+    if ($('#drawer').classList.contains('on')) refreshRecords();
+    clearImageState();                      // 先清上一张，再按记录恢复
+    S.id = meta.id; S.name = rec.name || meta.name || '记录';
+    S.ow = meta.ow; S.oh = meta.oh; S.res = meta.default_res || 'full'; S.rot = 0;
+    S.shrunkNote = meta.shrunk_note || ''; S.origW = meta.orig_w || meta.ow; S.origH = meta.orig_h || meta.oh;
+    if (stopCreep) { stopCreep(); stopCreep = null; }
+    upSet(8, '取图…');
+    await refetchImage((got, total) => {
+      if (total) upSet(8 + 62 * (got / total), `载入图像 ${mb(got)} / ${mb(total)}　${Math.round(100 * got / total)}%`);
+      else upSet(40, `载入图像 ${mb(got)}…`);
+    }, sig);
+    S.rois = (rec.rois || []).map(x => ({ box: (x.box || [0, 0, 1, 1]).slice(), ang: x.ang || 0 }));
+    S.samples = (rec.samples || []).map(s => ({ rgb: (s.rgb || [128, 128, 128]).slice(), role: s.role || 'coat' }));
+    S.sel = -1; S.selSample = -1;
+    S.tol = rec.tol != null ? rec.tol : 25;
+    S.purity = rec.purity != null ? rec.purity : 0.5;
+    S.line = rec.line_px != null ? rec.line_px : 1;
+    S.widthTouched = true; S.suggRetry = false;   // 记录里的宽度就是当时的定论，别被建议值顶掉
+    S.kneeWarn = rec.knee_warn || '';             // 存的时候判法没定出 k 的警告，重开还在
+    applyExmode(rec.mode || 'width');        // 判法也要还原：不然重开时按当前下拉算，和存下的数字对不上
+    try { renderKneeWarn(); } catch (_) {}
+    S.roiNative = !!rec.roi_native;          // 记录里存了分析口径，重开必须一致（这里只同步状态，别再触发一次计算）
+    $('#chkRoiNative').checked = S.roiNative;
+    S.autoTol = false; S.detail = false;
+    S.overlayUrl = null; S.overlayImg = null; S.contourUrl = null; S.contourImg = null;
+    S.rulerHist = []; S.rulerFull = []; S.rulerLast = null; S.rulerSeg = null; S.rulerDone = null;
+    S.annot.strokes = []; S.annot.cur = null; S.annot.res = null;
+    syncParams(); syncSampleUI(); refreshRoiList();
+    $('#fileName').textContent = S.name;
+    $('#drop').classList.add('hide');
+    fitView();
+    closeDrawer();
+    if (S.samples.length >= 2 && S.rois.length) {
+      if (stopCreep) { stopCreep(); stopCreep = null; }
+      creep = creepStart(72, 93, '重算中…（约 3 秒）', 400);
+      await analyze();
+      if (creep) { creep(); creep = null; }
+      // 存档里记的是当时的数；重算如果对不上，必须说出来（口径/版本变过）
+      const savedPct = rec.result && rec.result.pct;
+      if (savedPct != null && S.total && Math.abs(S.total.pct - savedPct) > 0.05) {
+        setStatus(`⚠ 重算结果 ${fmt(S.total.pct, 2)}% 与存档 ${fmt(savedPct, 2)}% 不一致（判法/阈值或程序版本变过）`);
+      }
+      upSet(100, '完成');
+      const ex = (rec.result && rec.result.excl) || [];
+      const nEx = ex.reduce((a, b) => a + (b ? b.length : 0), 0);
+      if (nEx) {
+        await listBlocks();
+        if (S.blocks) {
+          ex.forEach((arr, ri) => {
+            if (S.blocks.excluded[ri]) (arr || []).forEach(i => S.blocks.excluded[ri].add(i));
+          });
+          draw(); renderBlocks();
+          setStatus(`已按记录复原：手动排除 ${nEx} 块（自动 ${fmt(rec.result.auto_pct, 2)}% → ${fmt(rec.result.pct, 2)}%）`);
+        }
+      }
+    }
+    else setResult(`已打开记录：${S.name}\n${rec.created || ''}\n参数已恢复（吸色 ${S.samples.length} 个、阈值 ${S.line}、容差 ${S.tol}），点「计算」出结果。`);
+  } catch (e) {
+    if (e && e.name === 'AbortError') setStatus('已取消');
+    else setStatus('打开失败：' + e.message);
+  } finally {
+    if (creep) { creep(); creep = null; }
+    if (stopCreep) { stopCreep(); stopCreep = null; }
+    S.openAbort = null;
+    upHide();
+  }
+}
+
+async function deleteRecord(rid) {
+  if (!confirm('从服务器上删除这条记录？（图和参数都会删，无法恢复）')) return;
+  try {
+    const r = await post('api/records/' + rid, {}, 'DELETE');
+    if (!r.ok) throw new Error(r.reason || '删除失败');
+    $('#recCount').textContent = r.total;
+    refreshRecords();
+  } catch (e) {
+    setStatus('删除失败：' + e.message);
+  }
+}
+
+/* 手机上把参数面板收起来，让画布占满 */
+function setSideCollapsed(v) {
+  $('#side').classList.toggle('collapsed', !!v);
+  $('#sideChev').textContent = v ? '▾' : '▴';
+  try { localStorage.setItem('baige.side', v ? '1' : '0'); } catch (e) {}
+  requestAnimationFrame(() => { resizeCanvas(); });
+}
+$('#sideHandle').onclick = () => setSideCollapsed(!$('#side').classList.contains('collapsed'));
+if (window.matchMedia('(max-width: 860px)').matches) {
+  let saved = null;
+  try { saved = localStorage.getItem('baige.side'); } catch (e) {}
+  setSideCollapsed(saved === null ? true : saved === '1');   // 手机上默认收起，画布占满
+} else {
+  setSideCollapsed(false);
+}
+
+async function refreshRecCount() {
+  try {
+    const r = await post('api/records/count', undefined, 'GET');
+    if (r && r.ok) $('#recCount').textContent = r.total;
+  } catch (e) {}
+}
+$('#btnRec3').onclick = applyRecommended;
+async function applyRecommended() {
+  if (!S.id) { setStatus('先打开图片'); return; }
+  if (S.samples.length < 2) { setStatus('先吸两个颜色：漆膜 + 基材'); return; }
+  S.autoTol = true; $('#chkAutoTol').checked = true;
+  S.purity = 0.75;
+  syncParams();
+  setStatus('按推荐参数：自动容差 / 纯度 0.75 / 刀缝取全宽+1 …');
+  await refreshSpan();
+  await analyze();
+  let k = S.line;
+  if (S.rulerFull.length) {
+    k = Math.round(S.rulerFull.reduce((a, b) => a + b, 0) / S.rulerFull.length) + 1;
+  } else if (S.suggest) {
+    k = Math.round(S.suggest);
+  }
+  const before = S.line;
+  S.line = Math.max(1, Math.round(k));
+  syncParams();
+  if (S.line !== before) await analyze();
+  setStatus(`推荐参数已生效：容差 ${S.tol}（自动）· 纯度 ${S.purity} · 刀缝阈值 ${S.line}`);
+}
+
+$('#rZoom').onclick = zoomOne;
+$('#rFit').onclick = fitView;
+refreshRecCount();
+$('#btnRec').onclick = openDrawer;
+$('#recClose').onclick = closeDrawer;
+$('#scrim').onclick = closeDrawer;
+$('#btnSave').onclick = saveRecord;
+$('#recList').addEventListener('click', e => {
+  const ren = e.target.closest('[data-ren]');
+  if (ren) { e.stopPropagation(); startRename(ren.getAttribute('data-ren')); return; }
+  const del = e.target.closest('[data-del]');
+  if (del) { e.stopPropagation(); deleteRecord(del.getAttribute('data-del')); return; }
+  const it = e.target.closest('.recitem');
+  if (it) openRecord(it.getAttribute('data-id'));
+});
+
+
+$$('.tabs button').forEach(b => {
+  b.onclick = () => {
+    $$('.tabs button').forEach(x => x.classList.toggle('on', x === b));
+    const t = b.dataset.tab;
+    $$('.pane').forEach(p => p.classList.toggle('on', p.id === 'pane-' + t));
+    S.mode = t === 'roi' ? 'rect' : t === 'pick' ? 'pick' : t === 'ruler' ? 'ruler' : 'blocks';
+    setStatus({
+      rect: '拖动框选；右键删框', pick: '点击取色（第一次漆膜，第二次基材）',
+      ruler: '横跨刀缝拖一下', annot: '点「列出露底块」，然后点块排除误判',
+    }[t]);
+    if (t === 'annot') {
+      draw(); renderBlocks();
+      if (!S.blocks && S.blocksOn && S.id && S.rois.length && S.samples.length >= 2) listBlocks(true);
+    }
+  };
+});
+
+/* 容差 */
+function setTol(v) {
+  S.tol = clamp(Math.round(+v), 3, 120);        // 只认整数，和桌面版一致
+  const wasAuto = S.autoTol;
+  S.autoTol = false;                             // 手动一动就退出自动（同桌面版）
+  $('#chkAutoTol').checked = false;
+  $('#rngTol').value = S.tol; $('#numTol').value = S.tol;
+  if (wasAuto) setStatus(`已切到手动容差 ${S.tol}（想恢复自动就勾回「自动容差」）`);
+  updateSpan();
+  debouncedAnalyze();
+}
+$('#rngTol').oninput = e => setTol(e.target.value, true);
+$('#numTol').onchange = e => setTol(e.target.value, false);
+$('#chkAutoTol').onchange = async e => {
+  S.autoTol = e.target.checked;
+  if (S.autoTol) {
+    await refreshSpan();
+    if (S.span != null) {
+      setStatus(`自动容差 = ${S.tol}（样本间距 ${Math.round(S.span)} × 45%）`);
+      analyze();
+    }
+  } else setStatus('已取消自动容差，容差不再跟着样本间距走');
+};
+
+/* 纯度 */
+function updatePurityInfo() {
+  const el = $('#purityInfo');
+  const p = S.purity;
+  if (p <= 0.505) {
+    el.textContent = '0.50 = 不剔除过渡带：所有像素只按最近颜色归类，刀缝全靠「刀缝阈值」排掉';
+  } else {
+    el.textContent = `剔除混色比 t∈(${(1 - p).toFixed(2)}, ${p.toFixed(2)}) 的过渡像素（既不算漆膜也不算露底）`;
+  }
+}
+
+function setPurity(v) {
+  S.purity = Math.round(clamp(+v, 0.5, 0.99) * 100) / 100;
+  $('#rngPurity').value = S.purity; $('#numPurity').value = S.purity.toFixed(2);
+  updatePurityInfo();
+  debouncedAnalyze();
+}
+$('#rngPurity').oninput = e => setPurity(e.target.value);
+$('#numPurity').onchange = e => setPurity(e.target.value);
+
+/* 刀缝阈值 */
+function setLine(v, keepSuggest) {
+  S.line = clamp(Math.round(+v), 1, 60);
+  if (!keepSuggest && (S.exmode === 'auto' || S.exmode === 'auto_blk')) {   // 自动判法下用户自己改线宽：以他的为准
+    S.lineManual = true;
+    if (S.knee && S.knee.k) setStatus('已按你设的刀缝 ' + S.line + ' 计算（自动值 ' + S.knee.k + '，重选「自动定刀缝」可恢复）');
+  }
+  $('#rngLine').value = Math.min(25, S.line); $('#numLine').value = S.line;
+  try { localStorage.setItem('baige.line', String(S.line)); } catch (_) {}
+  if (!keepSuggest) { S.suggestHold = null; S.widthTouched = true; }   // 用户自己改的：本图内不再用建议值覆盖
+  debouncedAnalyze();
+}
+$('#rngLine').oninput = e => setLine(e.target.value);
+$('#numLine').onchange = e => setLine(e.target.value);
+
+/* 样本角色 */
+$('#btnClearRoi').onclick = clearAllRois;
+$('#sCoat').onclick = () => setSampleRole('coat');
+$('#sSub').onclick = () => setSampleRole('sub');
+/* 删除靠样本行右侧的 × 或 Delete 键，不再单独放一个「删除」按钮 */
+
+/* 量尺：设完必须在这里给出反馈（数值框在「吸色」页，用户看不见） */
+function applyLineFromRuler(px, wFull, wHalf) {
+  const v = Math.round(px) + 1;
+  setLine(v);
+  const chain = (wHalf && wHalf < px - 0.6)
+    ? `量到的半高宽 ${fmt(wHalf, 1)} px 只是缝心，加上两侧发虚的边缘，基线全宽 ${fmt(wFull, 1)} px`
+    : `基线全宽 ${fmt(wFull, 1)} px`;
+  let msg = `已把「刀缝阈值」设为 ${S.line} px＝${chain}，再 +1 取整。\n` +
+            `（k 的单位是分析图像素，值越大删得越狠；结果已重算，在「结果」栏看。）`;
+  if (v > 14) {
+    msg = `⚠️ ${chain} 比常见刀缝（2~10 px）宽得多，多半量到了格子内部或成片脱落。\n` +
+          `已按 ${S.line} px 设置（可能把真实脱落一起删掉），建议换一条细缝重测。`;
+  }
+  $('#rulerMsg').textContent = msg;
+}
+$('#rUse').onclick = () => {
+  if (!S.rulerLast) {
+    $('#rulerMsg').textContent = '还没量：先在图上垂直于刀缝横着拖一条（长度 30 px 以上）';
+    return;
+  }
+  const full = S.rulerLast.full_analysis || S.rulerLast.width_analysis;
+  applyLineFromRuler(full, full, S.rulerLast.width_analysis);
+};
+$('#rMean').onclick = () => {
+  if (!S.rulerHist.length && !S.rulerFull.length) {
+    $('#rulerMsg').textContent = '还没有可靠的测量记录：先量 1~2 条刀缝';
+    return;
+  }
+  const arr = S.rulerFull.length ? S.rulerFull : S.rulerHist.map(v => v * 1.8);
+  const avg = arr.reduce((a, b) => a + b, 0) / arr.length;
+  applyLineFromRuler(avg, avg);
+};
+$('#rClear').onclick = () => {
+  S.rulerHist = []; S.rulerLast = null; S.rulerDone = null; S.rulerSeg = null;
+  $('#rulerMsg').textContent = '切到这一页后，在图上垂直于刀缝横着拖一小段（30px 以上）。';
+  draw();
+};
+
+/* 分辨率 */
+$('#selRes').onchange = e => changeRes(e.target.value);
+
+/* 选区旋转 */
+function setRoiAngle(v) {
+  if (S.sel < 0 || !S.rois[S.sel]) return;
+  S.rois[S.sel].ang = Math.round(+v * 10) / 10;
+  syncRoiAngle(); refreshRoiList(); draw(); debouncedAnalyze();
+}
+/* 拖拽上传 */
+['dragenter', 'dragover'].forEach(ev => wrap.addEventListener(ev, e => {
+  e.preventDefault(); $('#drop').classList.add('hover');
+}));
+['dragleave', 'drop'].forEach(ev => wrap.addEventListener(ev, e => {
+  e.preventDefault();
+  if (ev === 'drop' || e.target === wrap) $('#drop').classList.remove('hover');
+}));
+wrap.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) upload(f);
+});
+
+/* 启动 */
+S.softOn = false; try { localStorage.removeItem('baige.soft'); } catch (_) {}   // 软权重已撤下，旧开关作废
+try { S.blocksOn = localStorage.getItem('baige.showBlocks') !== '0'; } catch (_) { S.blocksOn = true; }
+$('#chkBlocks').checked = S.blocksOn;
+if ($('#chkSoftR')) $('#chkSoftR').checked = false;
+S.roiNative = true; try { localStorage.removeItem('baige.roiNative'); } catch (_) {}   // 默认就开「选区原生」
+$('#chkRoiNative').checked = S.roiNative;
+try {
+  const keep = localStorage.getItem('baige.exmode');
+  // 旧的 auto 被 auto_blk 取代；shape/local 已撤下，统一回落到新的第一顺位
+  setExmode((keep === 'width' || keep === 'auto_blk') ? keep : 'auto_blk');
+} catch (_) { setExmode('auto_blk'); }
+try { updateKneeHint(); } catch (_) {}
+try {
+  const lw = parseInt(localStorage.getItem('baige.line'), 10);
+  if (lw >= 1) { S.line = Math.min(60, lw); $('#rngLine').value = Math.min(25, S.line); $('#numLine').value = S.line; }
+} catch (_) {}
+resizeCanvas();
+syncParams();
+setStatus('滚轮缩放 · 中键拖动平移 · 双击适应窗口');

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>百格分析 — ASTM D3359 / ISO 2409</title>
+<link rel="stylesheet" href="style.css?v=209">
+</head>
+<body>
+<div class="topbar">
+  <div class="brand">百格分析<small>ASTM D3359 · ISO 2409</small></div>
+  <button id="btnOpen">打开图片</button>
+  <input id="fileInput" type="file" accept="image/*,.dng,.DNG,.raw,.cr2,.nef,.arw" hidden>
+  <button id="btnCalc" class="primary">▶ 计算</button>
+  <button id="btnCsv">导出 CSV</button>
+  <button id="btnPng">导出标注图</button>
+  <button id="btnRec">记录 <span id="recCount" class="cnt">0</span></button>
+  <label class="switch" title="框完就自动吸色+定阈值+出结果（不可盲信，只当起点）">
+    <input type="checkbox" id="chkSemi" checked> 半自动
+  </label>
+
+  <label class="switch" title="只把选区那一块按原图像素分析（不降到 6MP）：小选区更细、更快、更省内存；刀缝阈值仍按画布口径">
+    <input type="checkbox" id="chkRoiNative" checked> 选区原生
+  </label>
+  <label class="switch" title="勾上才显示判定余量、露底厚度分布、色差/容差敏感性、每选区像素构成等明细；关着只给总判级 + 每个选区的脱落率与判级 + 合计">
+    <input type="checkbox" id="chkDetail"> 诊断明细
+  </label>
+  <div class="spacer"></div>
+  <button id="warnPill" class="warnpill" style="display:none" title="">⚠ 判法没定出 k</button>
+  <div id="summary" class="summary">—</div>
+</div>
+
+<div id="drawer" class="drawer">
+  <div class="dhead">记录 <span id="recStat" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="recClose" class="ghost">关闭</button>
+  </div>
+  <div id="recList" class="reclist"><div class="empty">加载中…</div></div>
+  <div class="dfoot muted">记录只有你点 × 才会从服务器删除。存档图是原始上传文件（不重新编码），重开时数字逐位一致。</div>
+</div>
+<div id="scrim" class="scrim"></div>
+
+<main>
+  <section class="stage">
+    <div class="filebar">
+      <span id="fileName" class="name">未打开图片</span>
+      <span id="fileInfo"></span>
+      <span class="spacer"></span>
+      <label class="switch" title="把分类结果显示在图上：红=露底（刀缝+脱落，原样显示），绿=完好漆膜；想区分刀缝和脱落，看「刀缝判法」和结果文字">
+        <input type="checkbox" id="chkOverlay" checked> 覆盖层
+      </label>
+      <button id="btnFit" class="ghost" title="Ctrl+0 / 双击画布">适应窗口</button>
+      <button id="btnOne" class="ghost" title="Ctrl+1：1 图像像素 = 1 屏幕像素">1:1</button>
+      <span id="zoomLabel" class="zoom">—</span>
+    </div>
+    <div class="canvas-wrap" id="wrap">
+      <canvas id="cv"></canvas>
+      <div class="upwrap hide" id="upWrap">
+        <div class="upbox">
+          <button class="upx" id="upCancel" title="取消上传" aria-label="取消上传">×</button>
+          <div class="uptitle" id="upTitle">上传中…</div>
+          <div class="upbar"><i id="upFill"></i></div>
+          <div class="upsub" id="upSub">0%</div>
+        </div>
+      </div>
+      <div class="dropzone" id="drop">拖一张测试照片到这里，或点左上「打开图片」<br>
+        <span style="font-size:12px;opacity:.7">建议垂直拍摄、光照均匀；刀缝越清晰，量化越准</span></div>
+      <div class="hintbox" id="hint"></div>
+    </div>
+  </section>
+
+  <aside class="side" id="side">
+    <div class="sidehandle" id="sideHandle"><span>参数与结果</span>
+      <span id="sideSummary" class="muted"></span><span id="sideChev">▴</span></div>
+    <div class="tabs">
+      <button data-tab="roi" class="on">框选</button>
+      <button data-tab="pick">吸色</button>
+      <button data-tab="ruler">量尺</button>
+      <button data-tab="annot">块确认</button>
+    </div>
+
+    <!-- ============ 框选 ============ -->
+    <div class="pane on" id="pane-roi">
+      <div class="sect">
+        <h4>选区</h4>
+        <div class="roilist" id="roiList"><div class="empty">还没有选区：在图上拖出划格区</div></div>
+        <div class="row" style="margin-top:8px">
+          <button id="btnClearRoi">清空全部</button>
+          <span class="muted" id="roiHint">拖动框内平移 · 拖四角/四边改大小 · 右键删除</span>
+        </div>
+      </div>
+
+      <div class="sect" style="display:none" aria-hidden="true">
+        <h4>分析分辨率</h4>
+        <div class="row tight">
+          <select id="selRes">
+            <option value="full" selected>全画质（原图像素，上限 6 MP）</option>
+            <option value="1800">1800 px（标准，快）</option>
+            <option value="1500">1500 px（最快）</option>
+          </select>
+        </div>
+        <div class="muted">默认全画质：直接用原图像素，只有超过 6 MP 才降采样（4080×3072 手机照 →
+          2822×2124，比例不变）。切换时选区坐标和「忽略细线」宽度会自动按比例换算；刀缝宽度是按<b>分析图</b>像素算的，
+          换分辨率后要重新看阈值（量尺会同时给出原图/分析图两个数）。</div>
+      </div>
+
+      <div class="sect">
+        <h4>快捷键</h4>
+        <div class="tips">方向键微移 1px，Shift+方向键 10px；Delete 删除选中框；
+          Ctrl+0 适应窗口；Ctrl+1 切 1:1；滚轮以鼠标为中心缩放；按住中键拖动平移。</div>
+      </div>
+    </div>
+
+    <!-- ============ 吸色 ============ -->
+    <div class="pane" id="pane-pick">
+      <div class="sect">
+        <h4>颜色样本（点颜色可选中）</h4>
+        <div class="samples" id="sampleList"><div class="empty">还没有样本：图上点一下完好漆膜，再点一下露底基材</div></div>
+        <div class="row tight" style="margin-top:6px">
+          <button id="sCoat">设为漆膜</button>
+          <button id="sSub">设为基材</button>
+        </div>
+      </div>
+
+      <div class="sect">
+        <h4>颜色容差</h4>
+        <div class="row tight">
+          <span class="lab">自动容差</span>
+          <label class="switch"><input type="checkbox" id="chkAutoTol" checked> 按样本间距 × 45%</label>
+        </div>
+        <div class="row">
+          <input type="range" id="rngTol" min="3" max="120" step="1" value="25">
+          <input type="number" id="numTol" min="3" max="120" step="1" value="25">
+        </div>
+        <div class="muted" id="spanInfo">样本间距：—（先吸漆膜和基材）</div>
+        <div class="muted" id="tolHint" style="display:none;margin-top:6px;line-height:1.55;padding:6px 8px;border-left:2px solid rgba(140,148,158,.5);background:rgba(140,148,158,.07);border-radius:0 4px 4px 0"></div>
+      </div>
+
+      <div class="sect">
+        <h4>露底纯度</h4>
+        <div class="row">
+          <input type="range" id="rngPurity" min="0.5" max="0.99" step="0.01" value="0.5">
+          <input type="number" id="numPurity" min="0.5" max="0.99" step="0.01" value="0.5">
+        </div>
+        <div class="muted" id="purityInfo">0.50 = 不剔除过渡带</div>
+        <div class="muted">这是<b>手动判据，不是算出来的</b>：每个像素先算「混色比 t」——离漆膜色的 Lab 距离 ÷
+          (离漆膜 + 离基材)，t≈0 纯漆膜、t≈0.5 一半一半（刀缝/掉漆边缘）、t≈1 纯露底。
+          落在 (1−纯度, 纯度) 之间的像素当过渡带整个剔除，两边都不算。所以 0.50 = 完全不剔除，
+          0.75 = 把 t 在 0.25~0.75 的混色像素都扔掉。</div>
+      </div>
+
+      <div class="sect">
+        <h4>参数怎么调（按顺序，别乱试）</h4>
+        <div class="row tight" style="margin-bottom:6px;display:none" aria-hidden="true">
+          <button id="btnRec3" class="primary" title="按推荐参数算一遍">按推荐参数算一遍</button>
+        </div>
+        <div class="tips">
+          <b>① 容差</b>：先留「自动」。看结果区的<b>未分类%</b>——&gt;10% 说明容差太小或颜色没吸全
+          （亮处/暗处各吸一个漆膜）；&lt;3% 且判定面积明显偏大，再往小调。<br>
+          <b>② 露底纯度</b>：照片有反光、刀缝发白发灰、边缘一片糊的时候才动它，常用 <b>0.75</b>；
+          纯色平面图（标准示意图、扫描件）用 0.75 最稳，真实照片噪点多时 0.6~0.8。<br>
+          <b>③ 刀缝阈值</b>：最靠得住的办法是<b>量一条刀缝 → 用测量值</b>；没有量尺就看
+          「露底厚度」分布——如果 1-3px 占一半以上，说明刀缝没删干净，往外调 2~3。<br>
+          <b>验证</b>：容差 ±25% 结果不跨档、换一组吸色点结果不变，这个数才算能用。
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 量尺 ============ -->
+    <!-- 手机上图片会被缩得很小，量取前先放大到这里 -->
+
+    <div class="pane" id="pane-ruler">
+      <div id="kneeWarn" class="warnband" style="display:none;margin:0 0 8px"></div>
+      <div class="sect">
+        <h4>刀缝量尺</h4>
+        <div class="row tight" style="margin-bottom:6px;display:none" aria-hidden="true">
+          <button id="rZoom">放大到 100%</button>
+          <button id="rFit" class="ghost">适应窗口</button>
+        </div>
+        <div class="tips" id="rulerMsg">切到这一页后，在图上<b>垂直于刀缝</b>横着拖一小段（30px 以上）。</div>
+        <div class="row" style="margin-top:6px">
+          <button id="rUse">用测量值</button>
+          <button id="rMean">用平均值</button>
+          <button id="rClear">清空</button>
+        </div>
+      </div>
+
+      <div class="sect">
+        <h4>忽略细线宽度（刀缝阈值）</h4>
+        <div class="row">
+          <input type="range" id="rngLine" min="1" max="25" step="1" value="1">
+          <input type="number" id="numLine" min="1" max="60" step="1" value="1">
+        </div>
+        <div class="row tight">
+          <label class="muted" for="selExmode" style="flex:0 0 auto">刀缝判法</label>
+          <select id="selExmode" style="flex:1 1 auto"
+                  title="按块数回落：自动扫 k，按块数峰谷定刀缝（默认）。按露底分布：按露底厚度分布给一个阈值，你可以随时手改，比阈值粗的算脱落。">
+            <option value="auto_blk">按块数回落</option>
+            <option value="width">按露底分布</option>
+          </select>
+        </div>
+        <div class="muted" id="exmodeInfo" style="margin-top:1mm"></div>
+        <div class="muted" id="kneeInfo" style="margin-top:1mm"></div>
+      </div>
+
+    </div>
+
+    <!-- ============ 块确认（默认隐藏，勾「逐块确认」才出现） ============ -->
+    <div class="pane" id="pane-annot">
+      <div class="sect">
+        <h4>点块确认（不用画）</h4>
+        <div class="row tight">
+          <label class="switch" title="勾上：算完就自动列块并把块号、轮廓画在图上（调参数会实时更新）；取消：不显示、也不去算，省一次运算">
+            <input type="checkbox" id="chkBlocks" checked> 图上显示块号
+          </label>
+        </div>
+        <div class="row tight">
+          <button id="bReset" class="ghost">全部恢复</button>
+        </div>
+        <div class="muted">程序把检出的露底拆成块、编号画在图上。<b>点一下某块 = 标成刀缝（排除）</b>，
+          再点一下恢复。只排除“其实是刀缝/脏点”的块，不用描边、不用选笔宽。</div>
+        <div class="muted" style="margin-top:8px;line-height:1.55;padding:6px 8px;border-left:2px solid rgba(140,148,158,.5);background:rgba(140,148,158,.07);border-radius:0 4px 4px 0">
+          蚂蚁线只是画出来的：只描块的外圈、并按块大小做了简化，所以它围住的面积和块的像素数不完全相等
+          （一般差 1~3%，带孔的大块偏大、细碎小块偏小）。<b>判级、百分比、排除都按像素数算，与轮廓无关</b>，不影响结果。</div>
+      </div>
+      <div class="sect">
+        <h4>块列表</h4>
+        <div class="roilist" id="blockList"><div class="empty">还没列出。先「列出露底块」。</div></div>
+      </div>
+      <div class="sect">
+        <h4>确认口径</h4>
+        <pre id="blockInfo" style="white-space:pre-wrap;margin:0;font-size:12px;line-height:1.55">—</pre>
+      </div>
+    </div>
+
+    <div class="resultbox" id="resultBox">
+      <div class="rgrip" id="resGrip" title="上下拖动调整结果栏高度（双击复原）"></div>
+      <div class="head">结果
+        <span class="spacer"></span>
+        <button class="mini" id="btnSave" title="把这张图和当前参数存进「记录」，服务器不会自动删除">保存到记录</button>
+      </div>
+      <div class="rescard">
+        <div class="rescard-top">
+          <div class="resbig"><span id="resBadge" class="rg">—</span>
+            <span class="rpct" id="resCardPct"></span></div>
+          <button class="copybtn" id="resCopy" title="复制成表格（制表符分隔），可直接粘进 Excel 自动分列">复制</button>
+        </div>
+        <div class="resrows" id="resCardRows"><div class="rrow"><span>—</span></div></div>
+      </div>
+      <div id="diagx"></div>
+      <pre id="result">打开图片 → 吸两个颜色 → 框出划格区 → 计算
+</pre>
+    </div>
+  </aside>
+</main>
+<script src="app.js?v=209"></script>
+</body>
+</html>
