@@ -5,12 +5,16 @@ data/
 
 # Python
 venv/
+.venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
 
 # 历史快照（体积大，另有备份）
 releases/
+
+# 启动器建的虚拟环境与依赖标记
+.venv/
 
 # 本机临时素材
 big.jpg
