@@ -1,28 +1,34 @@
 @echo off
-rem 百格附着力图像分析 — Windows 双击启动
-rem 需要 Python 3.9+（安装时勾选 Add python.exe to PATH）
-chcp 65001 >nul
+rem Baige cross-cut analyzer - Windows launcher (CRLF, ASCII only - do not re-save as UTF-8/LF)
+rem Requires Python 3.9+ ; when installing tick "Add python.exe to PATH".
+setlocal
 cd /d "%~dp0"
-title 百格附着力图像分析
+title Baige Cross-Cut Analyzer
 
-set "PY="
-where py >nul 2>nul && set "PY=py -3"
-if not defined PY (
-  where python >nul 2>nul && set "PY=python"
-)
-if not defined PY (
-  echo.
-  echo [错误] 没找到 Python。
-  echo        请到 https://www.python.org/downloads/ 安装 3.9 或更高版本，
-  echo        安装时务必勾选 "Add python.exe to PATH"，然后重新双击本文件。
-  echo.
-  pause
-  exit /b 1
-)
+set "BAIGE_PY="
 
-%PY% launcher.py %*
-if errorlevel 1 (
-  echo.
-  echo 启动失败，请把上面的信息截图反馈。
-  pause
-)
+py -3 -c "import sys" >nul 2>nul
+if not errorlevel 1 set "BAIGE_PY=py -3"
+if defined BAIGE_PY goto found
+
+python -c "import sys" >nul 2>nul
+if not errorlevel 1 set "BAIGE_PY=python"
+if defined BAIGE_PY goto found
+
+python3 -c "import sys" >nul 2>nul
+if not errorlevel 1 set "BAIGE_PY=python3"
+if defined BAIGE_PY goto found
+
+echo.
+echo [ERROR] Python 3.9+ was not found on this computer.
+echo         Install it from https://www.python.org/downloads/
+echo         Tick "Add python.exe to PATH" during setup, then double-click start.bat again.
+echo         (ZH) Qing xian an zhuang Python 3.9+, an zhuang shi gou xuan Add python.exe to PATH.
+echo.
+pause
+exit /b 1
+
+:found
+chcp 65001 >nul 2>nul
+%BAIGE_PY% "%~dp0launcher.py" %*
+if errorlevel 1 pause

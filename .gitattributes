@@ -1,0 +1,17 @@
+# Windows 批处理必须是 CRLF，否则 cmd.exe 会把行拆错（曾把 chcp 65001 拆成 '65001' 报错）
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+# 壳脚本必须 LF，否则 /bin/sh 会报 $'\r': command not found
+*.sh      text eol=lf
+*.command text eol=lf
+*.py      text eol=lf
+*.md      text eol=lf
+*.html    text eol=lf
+*.css     text eol=lf
+*.js      text eol=lf
+*.json    text eol=lf
+*.txt     text eol=lf
+*.jpg  binary
+*.png  binary
+*.pdf  binary
+*.tgz  binary

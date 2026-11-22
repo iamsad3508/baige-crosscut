@@ -85,7 +85,8 @@ The annotated image carries the conclusion plus every parameter needed to reprod
 **Linux** — double-click `start.sh` (if the file manager opens it in an editor instead: right-click → *Allow executing file as program*), or run `./start.sh`.
 **macOS** — double-click `start.command`.
 
-The launcher creates a local virtual environment under `.venv`, installs the dependencies (first run: 1–3 minutes, falls back to a mirror if PyPI is unreachable), starts the server on `127.0.0.1:8765` (next free port if taken) and opens your browser. Closing the window stops it. All data stays in the `data/` folder next to the code.
+The launcher speaks Chinese or English (`start.bat` passes `%*` through, so `start.bat --lang en` works; it also follows your system language).
+It creates a local virtual environment under `.venv`, installs the dependencies (first run: 1–3 minutes, falls back to a mirror if PyPI is unreachable), starts the server on `127.0.0.1:8765` (next free port if taken) and opens your browser. Closing the window stops it. All data stays in the `data/` folder next to the code.
 
 Requirements: Python 3.9+ (Windows installer: tick *Add python.exe to PATH*; Debian/Ubuntu: `sudo apt install python3 python3-venv`). Tkinter is **not** needed — the desktop GUI is optional.
 
@@ -119,6 +120,12 @@ releases/      deployment snapshots for rollback — not committed
 - Colour calibration sets the floor: white balance, glare and shadows split one material into two hues. Watch the tolerance-sensitivity line.
 - Area-weighted totals are not ASTM conclusions — use the worst region.
 - Lattices cut by hand with a single blade are not a compliant specimen per the standards; results are valid for relative comparison only.
+
+## Troubleshooting
+
+- **`'65001' is not recognized as an internal or external command`** on Windows: the `.bat` was saved with Unix line endings. Windows `cmd.exe` needs **CRLF and ASCII**; re-download the zip from the current `master` (this is fixed, and `.gitattributes` now pins `*.bat` to CRLF).
+- **`python` not found**: reinstall Python with *Add python.exe to PATH* ticked, or run `py -3 launcher.py` directly.
+- **Port in use**: the launcher picks the next free port automatically; `--port 9000` forces one.
 
 ## Docs
 
