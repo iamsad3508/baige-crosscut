@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 iamsad3508
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Part of Baige (百格附着力分析). Commercial licence: see COMMERCIAL.md
 """百格附着力分析 —— Web 版服务端
 
 算法部分完全复用 crosscut.py 里的纯函数（classify_parts / labels_from_parts /

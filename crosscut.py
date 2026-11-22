@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 iamsad3508
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Part of Baige (百格附着力分析). Commercial licence: see COMMERCIAL.md
 """
 百格附着力（Cross-cut / ASTM D3359 Method B / ISO 2409）图像定量分析工具
 

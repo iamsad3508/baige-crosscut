@@ -121,6 +121,18 @@ releases/      历史快照，回滚用——不入库
 - **提示找不到 python**：重装 Python 时勾选 *Add python.exe to PATH*，或直接跑 `py -3 launcher.py`。
 - **端口被占用**：启动器会自动往后找；也可 `--port 9000` 指定。
 
+## 许可
+
+**AGPL-3.0-or-later** —— 免费使用、修改、自建，公司内部用也没问题。若把改过的版本作为网络服务
+对外提供，AGPL §13 要求你向这些用户开放对应源码。依赖及其许可见 `THIRD_PARTY_NOTICES.md`。
+
+需要闭源修改、集成进产品对外销售、白牌、或要质保/SLA？可另购**商业授权**，见
+`COMMERCIAL.md`（在 Issues 里开一个标题以 `[commercial]` 开头的 issue 即可）。
+
+**「百格分析 / Baige」名称与图标不在授权范围内**，fork 和二次发布请换成你自己的名字。
+
+Copyright (C) 2026 iamsad3508。本工具是计量辅助工具，不是认证测试方法，判级责任在检测人。
+
 ## 文档
 
 `docs/technical-notes-v2.02.pdf` —— 安装部署（含双击启动器）、完整算法、判法规则与局限（14 页）。

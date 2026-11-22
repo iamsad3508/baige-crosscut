@@ -1,4 +1,7 @@
 'use strict';
+/* Copyright (C) 2026 iamsad3508
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * Part of Baige (百格附着力分析). Commercial licence: see COMMERCIAL.md */
 /* 百格分析 — 前端
    坐标：canvas 屏幕坐标 <-> 分析图像素坐标（图像像素 = 服务端 work 图，长边 res 指定）
    所有像素级算法在服务端（复用 crosscut.py 纯函数），前端只负责交互与显示。 */

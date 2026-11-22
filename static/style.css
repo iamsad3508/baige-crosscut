@@ -276,3 +276,7 @@ button{white-space:nowrap}
 .warnpill{background:#fff8e1;color:#8a5a00;border:1px solid #f0ad4e;border-radius:20px;
   padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
 .warnpill:hover{background:#fff2c9}
+
+.srcline{font-size:11px;padding:6px 10px 8px;text-align:right}
+.srcline a{color:var(--ink3);text-decoration:none}
+.srcline a:hover{color:var(--ink2);text-decoration:underline}

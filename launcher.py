@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Copyright (C) 2026 iamsad3508
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Part of Baige (百格附着力分析). Commercial licence: see COMMERCIAL.md
 """百格分析 · 一键启动器 / One-click launcher（双击 start.bat / start.sh 就会跑这个文件）
 
 做的事 / what it does:

@@ -1,3 +1,6 @@
+/* Copyright (C) 2026 iamsad3508
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * Part of Baige (百格附着力分析). Commercial licence: see COMMERCIAL.md */
 /* 百格分析 · 界面多语言（zh / en）
  *
  * 用法：
@@ -110,6 +113,7 @@
     'file.roinative': '选区原生 {0}×{1}（{2}× 于画布）',
     'file.rotated': '旋转 {0}°',
     'status.autoBlocks': '已自动更新：{0} 块（点块可排除）',
+    'src.link': '源码 · AGPL-3.0',
     'lang.label': '语言'
   };
 
@@ -209,6 +213,7 @@
     'file.roinative': 'native ROI {0}×{1} ({2}× of canvas)',
     'file.rotated': 'rotated {0}°',
     'status.autoBlocks': 'updated: {0} blocks (click to exclude)',
+    'src.link': 'Source · AGPL-3.0',
     'lang.label': 'Language'
   };
 

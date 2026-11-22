@@ -127,6 +127,22 @@ releases/      deployment snapshots for rollback — not committed
 - **`python` not found**: reinstall Python with *Add python.exe to PATH* ticked, or run `py -3 launcher.py` directly.
 - **Port in use**: the launcher picks the next free port automatically; `--port 9000` forces one.
 
+## Licence
+
+**AGPL-3.0-or-later** — free to use, modify and self-host, including inside a company.
+If you offer a modified version as a network service, AGPL §13 requires you to offer its
+source to those users. Dependencies and their licences: `THIRD_PARTY_NOTICES.md`.
+
+Need to keep modifications closed, ship it inside a product, white-label it, or get a
+warranty/SLA? A **commercial licence** is available — see `COMMERCIAL.md`
+(open an issue titled `[commercial]`).
+
+The name **Baige / 百格分析** and the logo are not granted by the licence; please keep
+your own name on forks and rebrands.
+
+Copyright (C) 2026 iamsad3508. This is a measurement aid, not a certified test method —
+grading responsibility stays with the inspector.
+
 ## Docs
 
 `docs/technical-notes-v2.02.pdf` — installation (including the one-click launcher), full algorithm, threshold rules and limits (Chinese, 14 pages).
