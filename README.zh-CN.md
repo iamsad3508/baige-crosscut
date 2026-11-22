@@ -2,6 +2,8 @@
 
 把划格法（ASTM D3359 Method B / ISO 2409 / GB/T 9286）的附着力评级从目测比对变成可复算的数字：在照片上框出划格区、吸两个参考色，工具自动剔除刀缝，给出每个选区的脱落百分比与 ASTM / ISO 等级。
 
+*本工具用 DeepSeek API 开发*（界面顶栏有标记）。
+
 ![界面总览](docs/img/ui-overview.jpg)
 
 *多选区分析：每个选区各自给百分比与等级；结论按 ASTM 取最差区域，面积加权的合计仅供参考。*
@@ -72,17 +74,24 @@
 | 35% – 65% | 1B | Gt4 |
 | > 65% | 0B | Gt5 |
 
-## 快速开始
+## 怎么跑起来（不用敲命令）
+
+**Windows**：双击 `start.bat`。
+**Linux**：双击 `start.sh`（文件管理器若用编辑器打开它，右键 → 属性 → 允许作为程序执行），或命令行 `./start.sh`。
+**macOS**：双击 `start.command`。
+
+启动器会自动做这些事：在程序目录建 `.venv` 虚拟环境 → 装依赖（第一次 1~3 分钟，官方源失败自动换国内镜像）→ 起服务（默认 `127.0.0.1:8765`，被占就往后找）→ 打开浏览器。关掉窗口即停止。数据都留在代码旁边的 `data/` 目录里。
+
+需要 Python 3.9+（Windows 安装时勾选 *Add python.exe to PATH*；Debian/Ubuntu 先 `sudo apt install python3 python3-venv`）。**不需要 tkinter**，桌面界面是可选的。
+
+想手动起也可以：
 
 ```bash
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
-export BAIGE_USER=you BAIGE_PASS='your-password'      # 可选：应用层 Basic Auth
 ./venv/bin/uvicorn server:app --host 127.0.0.1 --port 8765
 ```
 
-打开 `http://127.0.0.1:8765/`，然后：打开图片 → 吸两个颜色 → 框出划格区 → 计算。
-
-依赖：Python 3.10+、`pillow numpy fastapi uvicorn[standard] python-multipart`。
+服务只监听本机回环、自身不做登录；要远程访问请放在反代/SSO 后面。
 
 ## 目录
 
@@ -90,8 +99,11 @@ export BAIGE_USER=you BAIGE_PASS='your-password'      # 可选：应用层 Basic
 server.py      FastAPI 服务端：上传、分析、判法、记录、导出
 crosscut.py    图像算法核心：颜色分类、开运算、厚度、连通域、判级
 static/        前端（纯 HTML + JS，无构建步骤）
+launcher.py    一键启动器（建 venv、装依赖、起服务、开浏览器）
+start.bat      Windows 双击入口
+start.sh       Linux 双击入口（macOS 用 start.command）
 docs/          截图与技术说明
-data/          运行期数据（上传会话、标注缓存、记录）——不入库
+data/          运行期数据（上传会话、标注缓存、记录），首次运行自动创建——不入库
 releases/      历史快照，回滚用——不入库
 ```
 
@@ -105,7 +117,7 @@ releases/      历史快照，回滚用——不入库
 
 ## 文档
 
-`docs/technical-notes-v2.01.pdf` —— 安装部署、完整算法、判法规则与局限（14 页）。
+`docs/technical-notes-v2.02.pdf` —— 安装部署（含双击启动器）、完整算法、判法规则与局限（14 页）。
 
 ---
 

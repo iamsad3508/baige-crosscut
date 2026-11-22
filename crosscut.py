@@ -27,11 +27,19 @@ import sys
 
 try:
     import numpy as np
-    from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageTk
+    from PIL import Image, ImageDraw, ImageFilter, ImageOps
 except Exception as exc:  # pragma: no cover
     sys.stderr.write(
         "缺少依赖：%s\n请先安装：pip install pillow numpy\n" % exc)
     raise
+
+# ImageTk 只有桌面版（Tk 图形界面）要用。Linux 上没装 python3-tk 时
+# `from PIL import ImageTk` 会抛 ImportError，把整个模块带死——网页版根本不需要 Tk，
+# 所以这里降级成「有就用、没有就 None」，只有真去开图形界面时才报错。
+try:
+    from PIL import ImageTk
+except Exception:  # pragma: no cover
+    ImageTk = None
 
 try:
     import tkinter as tk
@@ -1862,6 +1870,8 @@ class App:
                     piece = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
             self._disp_img = piece
             self._disp_key = key
+        if ImageTk is None:
+            raise RuntimeError("桌面图形界面需要 tkinter：Linux 请装 python3-tk；网页版不需要它")
         self._imgtk = ImageTk.PhotoImage(self._disp_img)
         if self._img_id is None:
             c.delete("img")

@@ -2,6 +2,8 @@
 
 A web tool that turns cross-cut (cross-hatch) adhesion tests from eyeball comparison into reproducible numbers, following **ASTM D3359 Method B / ISO 2409 / GB/T 9286**.
 
+*Developed with the DeepSeek API* — see the badge in the app's top bar.
+
 Frame each cross-hatched area, pick two reference colours (intact coating / exposed substrate), and the tool removes the lattice cuts, measures how much coating actually came off, and reports per-region percentages with ASTM / ISO grades.
 
 ![UI overview](docs/img/ui-overview.jpg)
@@ -77,17 +79,24 @@ The annotated image carries the conclusion plus every parameter needed to reprod
 | 35 – 65 % | 1B | Gt4 |
 | > 65 % | 0B | Gt5 |
 
-## Quick start
+## Run it (no command line needed)
+
+**Windows** — double-click `start.bat`.
+**Linux** — double-click `start.sh` (if the file manager opens it in an editor instead: right-click → *Allow executing file as program*), or run `./start.sh`.
+**macOS** — double-click `start.command`.
+
+The launcher creates a local virtual environment under `.venv`, installs the dependencies (first run: 1–3 minutes, falls back to a mirror if PyPI is unreachable), starts the server on `127.0.0.1:8765` (next free port if taken) and opens your browser. Closing the window stops it. All data stays in the `data/` folder next to the code.
+
+Requirements: Python 3.9+ (Windows installer: tick *Add python.exe to PATH*; Debian/Ubuntu: `sudo apt install python3 python3-venv`). Tkinter is **not** needed — the desktop GUI is optional.
+
+Manual start, if you prefer:
 
 ```bash
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
-export BAIGE_USER=you BAIGE_PASS='your-password'      # optional app-level Basic Auth
 ./venv/bin/uvicorn server:app --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765/`, then: open image → pick two colours → frame the cross-hatch area → calculate.
-
-Requirements: Python 3.10+, `pillow numpy fastapi uvicorn[standard] python-multipart`.
+The server binds loopback only and has no login of its own — it is meant to be published behind a reverse proxy / SSO if you need remote access.
 
 ## Layout
 
@@ -95,8 +104,11 @@ Requirements: Python 3.10+, `pillow numpy fastapi uvicorn[standard] python-multi
 server.py      FastAPI service: upload, analysis, threshold rules, records, export
 crosscut.py    imaging core: colour classification, opening, thickness, components, grading
 static/        front-end (plain HTML + JS, no build step)
+launcher.py    one-click launcher (venv + deps + server + browser)
+start.bat      Windows double-click entry point
+start.sh       Linux double-click entry point (start.command for macOS)
 docs/          screenshots and technical notes
-data/          runtime data (upload sessions, overlays, records) — not committed
+data/          runtime data (upload sessions, overlays, records) — created on first run, not committed
 releases/      deployment snapshots for rollback — not committed
 ```
 
@@ -110,7 +122,7 @@ releases/      deployment snapshots for rollback — not committed
 
 ## Docs
 
-`docs/technical-notes-v2.01.pdf` — installation, full algorithm, threshold rules and limits (Chinese, 14 pages).
+`docs/technical-notes-v2.02.pdf` — installation (including the one-click launcher), full algorithm, threshold rules and limits (Chinese, 14 pages).
 
 ---
 

@@ -55,9 +55,6 @@ KEEP_HOURS = 24
 # 框到整张 12 MP 图时才会触发降采样，避免一张图吃光内存。
 MAX_ROI_PIXELS = 8_000_000
 
-AUTH_USER = os.environ.get("BAIGE_USER", "")
-AUTH_PASS = os.environ.get("BAIGE_PASS", "")
-
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
 
 # ---------------------------------------------------------------- 基础工具
@@ -438,16 +435,39 @@ class View:
                 round(self.ox, 3), round(self.oy, 3), int(w), int(h))
 
 
+ROI_MIN_WIRE = 4.0        # 选区每边至少这么宽（wire px）；前端新建框的下限是 6
+
+
 def _view_for(sess: Session, req):
     """按请求决定分析视图。返回 (work, view)。
 
     选区原生模式只在「有选区、且整图没旋转过」时生效；其它情况自动退回默认视图
     （整图旋转后裁剪的几何关系会变，宁可不省那点像素也不出错）。
+
+    顺带把选区框规整成「有序 + 落在画面内」：反框（x0>x1）、越界框以前会一路算到
+    分母为 0 / 负面积，静默给出 0B、5B 这种假结论，选区原生路径还会在回退分支上
+    抛 UnboundLocalError 变 500。现在就地修正，修不动（细成一条线）就 400。
     """
     side = _res_to_side(getattr(req, "res", "full"), sess.full_img())
     wi = sess.work_img(side)                  # 只构图，不转 Lab（6 MP 的 Lab 要 1 s 多）
     s6 = wi["size"][0] / float(sess.size[0]) if sess.size[0] else 1.0
-    rois = [r.model_dump() for r in (getattr(req, "rois", None) or [])]
+    W, H = sess.size
+    wmax, hmax = W * s6, H * s6               # wire 口径的画面尺寸
+    rois = []
+    for r in (getattr(req, "rois", None) or []):
+        b = [float(v) for v in r.box]
+        x0, x1 = (b[0], b[2]) if b[0] <= b[2] else (b[2], b[0])
+        y0, y1 = (b[1], b[3]) if b[1] <= b[3] else (b[3], b[1])
+        x0, x1 = min(max(x0, 0.0), wmax), min(max(x1, 0.0), wmax)
+        y0, y1 = min(max(y0, 0.0), hmax), min(max(y1, 0.0), hmax)
+        bw, bh = x1 - x0, y1 - y0
+        if bw < ROI_MIN_WIRE or bh < ROI_MIN_WIRE:
+            raise HTTPException(400, "选区太小或不在画面上（宽 %.0f × 高 %.0f px，"
+                                     "画面 %.0f×%.0f）：请重新框选" % (bw, bh, wmax, hmax))
+        nb = [x0, y0, x1, y1]
+        if nb != b:
+            r.box = nb                        # 回写模型：下游统计用的是同一份框
+        rois.append({"box": nb, "ang": float(r.ang or 0.0)})
     if not getattr(req, "roi_native", False) or not rois or abs(sess.rot) > 1e-6:
         work6 = sess.work(side)               # 默认口径：整图 + Lab
         return work6, View(work6, s6)
@@ -465,13 +485,13 @@ def _view_for(sess: Session, req):
             bx0, by0, bx1, by1 = box
         xs0, ys0 = min(xs0, bx0), min(ys0, by0)
         xs1, ys1 = max(xs1, bx1), max(ys1, by1)
-    W, H = sess.size
     pad = 2                                    # 外扩 2 px：斜切缝的边缘不被裁断
     X0 = max(0, int(math.floor(xs0 / s6)) - pad)
     Y0 = max(0, int(math.floor(ys0 / s6)) - pad)
     X1 = min(W, int(math.ceil(xs1 / s6)) + pad)
     Y1 = min(H, int(math.ceil(ys1 / s6)) + pad)
-    if X1 - X0 < 4 or Y1 - Y0 < 4:
+    if X1 - X0 < 4 or Y1 - Y0 < 4:             # 裁剪小到没意义 → 退回默认口径
+        work6 = sess.work(side)
         return work6, View(work6, s6)
     crop = sess.roi_work(X0, Y0, X1, Y1)
     scale = crop["size"][0] / float(X1 - X0)   # 只有当裁剪超过 MAX_ROI_PIXELS 时才 <1
@@ -2961,29 +2981,7 @@ def health():
 # ---------------------------------------------------------------- 认证 / 清理 / 静态
 
 
-@app.middleware("http")
-async def basic_auth(request: Request, call_next):
-    if not AUTH_USER or not AUTH_PASS:
-        return await call_next(request)
-    if request.url.path in ("/api/health",):
-        return await call_next(request)
-    import base64
-    hdr = request.headers.get("authorization", "")
-    reason = "no-header" if not hdr else "bad-scheme"
-    ok = False
-    if hdr.startswith("Basic "):
-        try:                                  # 只包住 base64 解码，绝不能把业务异常吞掉
-            u, _, p = base64.b64decode(hdr[6:]).decode("utf-8").partition(":")
-        except Exception as exc:
-            reason = "decode-fail %s" % exc
-        else:
-            ok = secrets.compare_digest(u, AUTH_USER) and secrets.compare_digest(p, AUTH_PASS)
-            reason = "mismatch user=%r" % (u,)
-    if not ok:
-        sys.stderr.write("[auth] 401 %s %s -> %s\n" % (request.method, request.url.path, reason))
-        return Response("需要登录", status_code=401,
-                        headers={"WWW-Authenticate": 'Basic realm="baige", charset="UTF-8"'})
-    return await call_next(request)
+# 应用层不再做登录：对外由反代/SSO 负责（内网直连只在本机或 WG 内网）。
 
 
 def _cleanup():
