@@ -6,6 +6,9 @@
    坐标：canvas 屏幕坐标 <-> 分析图像素坐标（图像像素 = 服务端 work 图，长边 res 指定）
    所有像素级算法在服务端（复用 crosscut.py 纯函数），前端只负责交互与显示。 */
 
+/* 一次性/带变量的文案：T(中文, English)。静态 HTML 用 data-i18n，这里用 T 少加一堆 key。 */
+const T = (window.T || ((zh, en) => (en != null ? zh : zh)));
+
 const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 
@@ -33,11 +36,11 @@ const S = {
 
 /* ------------------------------------------------------------------ 工具 */
 function post(path, body, method, signal) {
-  const opt = { method: method || 'POST', headers: { 'Content-Type': 'application/json' } };
+  const opt = { method: method || 'POST', headers: { 'Content-Type': 'application/json', 'X-Baige-Lang': I18N.lang } };
   if (body !== undefined) opt.body = JSON.stringify(body);
   if (signal) opt.signal = signal;
   return fetch(path, opt).then(async r => {
-    if (r.status === 404) throw new Error('图片已过期（分析缓存被换出），请重新「打开图片」上传一次');
+    if (r.status === 404) throw new Error(T('图片已过期（分析缓存被换出），请重新「打开图片」上传一次', 'The image expired (analysis cache evicted) — upload it again with “Open image”'));
     if (!r.ok) throw new Error((await r.text()).slice(0, 200) || ('HTTP ' + r.status));
     return r.json();
   });
@@ -480,7 +483,7 @@ function drawRuler() {
   if (S.rulerDone && S.rulerLast) {
     const a = toScreen(S.rulerDone[0], S.rulerDone[1]);
     const b = toScreen(S.rulerDone[2], S.rulerDone[3]);
-    const txt = fmt(S.rulerLast.width_full, 1) + ' px 原图';
+    const txt = fmt(S.rulerLast.width_full, 1) + T(' px 原图', ' px original');
     ctx.font = '600 12px ui-monospace,Menlo,Consolas,monospace';
     const w = ctx.measureText(txt).width + 10;
     const x = (a.x + b.x) / 2 + 8, y = (a.y + b.y) / 2 - 22;
@@ -852,7 +855,7 @@ function loadImage(url) {
   return new Promise((res, rej) => {
     const im = new Image();
     im.onload = () => { S.img = im; res(im); };
-    im.onerror = () => rej(new Error('图片加载失败'));
+    im.onerror = () => rej(new Error(T('图片加载失败', 'Failed to load the image')));
     im.src = url;
   });
 }
@@ -884,7 +887,7 @@ function upShow(title) {
   const w = $('#upWrap');
   if (!w) return;
   $('#upTitle').textContent = title;
-  upSet(0, '准备中…');
+  upSet(0, T('准备中…', 'Preparing…'));
   w.classList.remove('hide');
 }
 function upHide() { const w = $('#upWrap'); if (w) w.classList.add('hide'); }
@@ -906,11 +909,24 @@ function upSet(pct, sub) {
 let upXhr = null;          // 当前上传请求，供右上角 × 取消
 document.addEventListener('DOMContentLoaded', () => {
   startAnts();
+  // 分页用法说明：× 关掉后记住（localStorage），下次进来不再显示
+  [['guideRuler', 'guideRulerX', 'baige.guide.ruler'],
+   ['guideAnnot', 'guideAnnotX', 'baige.guide.annot']].forEach(([boxId, btnId, key]) => {
+    const box = $('#' + boxId), btn = $('#' + btnId);
+    let off = false;
+    try { off = localStorage.getItem(key) === '1'; } catch (_) { off = false; }
+    if (box && off) box.classList.add('hide');
+    if (btn) btn.onclick = e => {
+      e.preventDefault(); e.stopPropagation();
+      if (box) box.classList.add('hide');
+      try { localStorage.setItem(key, '1'); } catch (_) {}
+    };
+  });
   const x = $('#upCancel');
   if (x) x.onclick = e => {
     e.preventDefault(); e.stopPropagation();
-    if (upXhr) { setStatus('取消中…'); upXhr.abort(); }
-    else if (S.openAbort) { try { S.openAbort.abort(); } catch (_) {} S.openAbort = null; upHide(); setStatus('已取消'); }
+    if (upXhr) { setStatus(T('取消中…', 'Cancelling…')); upXhr.abort(); }
+    else if (S.openAbort) { try { S.openAbort.abort(); } catch (_) {} S.openAbort = null; upHide(); setStatus(T('已取消', 'Cancelled')); }
   };
 });
 
@@ -920,16 +936,17 @@ function uploadXHR(fd, onProg) {
     upXhr = xhr;
     const t0 = performance.now();
     xhr.open('POST', 'api/upload');
+    xhr.setRequestHeader('X-Baige-Lang', I18N.lang);
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         try { resolve(JSON.parse(xhr.responseText)); }
-        catch (e) { reject(new Error('响应解析失败')); }
+        catch (e) { reject(new Error(T('响应解析失败', 'Malformed server response'))); }
       } else {
         reject(new Error((xhr.responseText || ('HTTP ' + xhr.status)).slice(0, 200)));
       }
     };
-    xhr.onerror = () => reject(new Error('网络中断（检查网络或代理）'));
-    xhr.onabort = () => reject(new Error('已取消'));
+    xhr.onerror = () => reject(new Error(T('网络中断（检查网络或代理）', 'Network interrupted (check your connection or proxy)')));
+    xhr.onabort = () => reject(new Error(T('已取消', 'Cancelled')));
     xhr.onloadend = () => { if (upXhr === xhr) upXhr = null; };
     if (xhr.upload) {
       xhr.upload.onprogress = e => {
@@ -956,13 +973,13 @@ function chunkXHR(url, body, isJSON) {
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         try { resolve(JSON.parse(xhr.responseText || '{}')); }
-        catch (e) { reject(new Error('响应解析失败')); }
+        catch (e) { reject(new Error(T('响应解析失败', 'Malformed server response'))); }
       } else {
         reject(new Error((xhr.responseText || ('HTTP ' + xhr.status)).slice(0, 200)));
       }
     };
-    xhr.onerror = () => reject(new Error('网络中断（检查网络或代理）'));
-    xhr.onabort = () => reject(new Error('已取消'));
+    xhr.onerror = () => reject(new Error(T('网络中断（检查网络或代理）', 'Network interrupted (check your connection or proxy)')));
+    xhr.onabort = () => reject(new Error(T('已取消', 'Cancelled')));
     xhr.onloadend = () => { if (upXhr === xhr) upXhr = null; };
     xhr.send(body);
   });
@@ -989,15 +1006,17 @@ async function upload(file) {
   const fd = new FormData();
   fd.append('file', file);
   const mb = (file.size || 0) / 1e6;
-  upShow(`上传 ${file.name || '图片'}（${mb.toFixed(1)} MB）`);
+  upShow(T(`上传 ${file.name || '图片'}（${mb.toFixed(1)} MB）`,
+      `Uploading ${file.name || 'image'} (${mb.toFixed(1)} MB)`));
   try {
     const onProg = (loaded, total, ms, part, parts) => {
       const pct = total ? 100 * loaded / total : 0;
       const secs = ms / 1000;
       const spd = secs > 0.35 ? (loaded / 1e6) / secs : 0;
-      const tag = parts ? `　分片 ${part}/${parts}` : '';
+      const tag = parts ? T(`　分片 ${part}/${parts}`, ` · chunk ${part}/${parts}`) : '';
       if (loaded >= total) {
-        upSet(100, `上传完成 ${mb.toFixed(1)} MB${tag}　服务器解码中…`);
+        upSet(100, T(`上传完成 ${mb.toFixed(1)} MB${tag}　服务器解码中…`,
+      `Uploaded ${mb.toFixed(1)} MB${tag} — server decoding…`));
       } else {
         upSet(pct, `${pct.toFixed(0)}%　${(loaded / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`
           + (spd ? `　${spd.toFixed(1)} MB/s` : '') + tag);
@@ -1009,7 +1028,7 @@ async function upload(file) {
     } catch (err) {
       // 外层反代的 body 上限（曾把 >1 MB 回成 500）偶尔复发：大图自动退到分片再试一次
       if (file.size > CHUNK_OVER && !/已取消/.test(err.message || '')) {
-        upSet(0, '整传被反代拦下，改用分片重传…');
+        upSet(0, T('整传被反代拦下，改用分片重传…', 'The proxy rejected the single-shot upload — retrying in chunks…'));
         meta = await uploadChunked(file, onProg);
       } else {
         throw err;
@@ -1028,21 +1047,24 @@ async function upload(file) {
     clearImageState();                      // 结果卡/胶囊/建议阈值/诊断全部清空
     $('#chkAutoTol').checked = true; S.autoTol = true;
     syncParams(); syncSampleUI(); refreshRoiList();
-    $('#fileName').textContent = meta.name || '未命名';
+    $('#fileName').textContent = meta.name || T('未命名', 'untitled');
     $('#drop').classList.add('hide');
     fitView();
-    const resTxt = (meta.default_res === 'full') ? '全画质' : ('长边 ' + meta.default_res);
-    setResult(`已打开：${meta.name}\n原图 ${meta.ow}×${meta.oh} → 分析 ${meta.w}×${meta.h}（${resTxt}）\n` +
+    const resTxt = (meta.default_res === 'full') ? T('全画质', 'full resolution') : (T('长边 ', 'long edge ') + meta.default_res);
+    setResult(T(`已打开：${meta.name}\n原图 ${meta.ow}×${meta.oh} → 分析 ${meta.w}×${meta.h}（${resTxt}）\n` +
       (meta.dng ? `DNG：${meta.dng}\n` : '') +
-      `\n下一步：切到「吸色」页 → 在完好漆膜上点一下，在露底基材上点一下 → 回「框选」页框出划格区。`);
+      `\n下一步：切到「吸色」页 → 在完好漆膜上点一下，在露底基材上点一下 → 回「框选」页框出划格区。`,
+      `Opened: ${meta.name}\noriginal ${meta.ow}×${meta.oh} → analysed ${meta.w}×${meta.h} (${resTxt})\n` +
+      (meta.dng ? `DNG: ${meta.dng}\n` : '') +
+      `\nNext: go to “Pick” → click the intact coating, click the exposed substrate → back to “Frame” and frame the cross-hatch area.`));
     updateFileInfo();
     setStatus('');
     upHide();
   } catch (err) {
     upHide();
     setStatus('');
-    if (err.message === '已取消') setResult('已取消这次上传，可以重新拖一张进来。');
-    else setResult('打开失败：' + err.message);
+    if (err.message === T('已取消', 'Cancelled')) setResult(T('已取消这次上传，可以重新拖一张进来。', 'Upload cancelled — drop another image when you are ready.'));
+    else setResult(T('打开失败：', 'Failed to open: ') + err.message);
   }
 }
 
@@ -1154,14 +1176,17 @@ function renderKnee() {
     const on = r.k === S.line;
     return '<div class="krow' + (on ? ' on' : '') + '" data-k="' + r.k + '" style="cursor:pointer;padding:1px 4px;border-radius:3px;'
       + (on ? 'background:rgba(88,166,255,.18);color:#8cc8ff;font-weight:600' : '') + '">'
-      + (on ? '▶ ' : '&nbsp;&nbsp;') + 'k=' + String(r.k).padStart(2) + '   块 '
-      + String(r.n).padStart(3) + '   露底 ' + r.pct.toFixed(2) + '%</div>';
+      + (on ? '▶ ' : '&nbsp;&nbsp;') + 'k=' + String(r.k).padStart(2) + T('   块 ', '  blocks ')
+      + String(r.n).padStart(3) + T('   露底 ', '  bare ') + r.pct.toFixed(2) + '%</div>';
   }).join('');
   el.innerHTML = (autoNow
-      ? '<b>按块数回落：k=' + S.knee.k + '</b>（' + (S.knee.why || '') + '）'
-      : '<b>k 曲线</b>（自动值 k=' + (S.knee.k || '—') + '，当前按你设的宽度 ' + S.line + ' 算；点下面任意一档就改用它）')
+      ? '<b>' + T('按块数回落：k=', 'By block count: k=') + S.knee.k + '</b>' + T('（', ' (') + (S.knee.why || '') + T('）', ')')
+      : '<b>' + T('k 曲线', 'k curve') + '</b>' + T('（自动值 k=' + (S.knee.k || '—') + '，当前按你设的宽度 ' + S.line + ' 算；点下面任意一档就改用它）',
+          ` (auto k=${S.knee.k || '—'}, currently using your width ${S.line}; click any row below to switch to it)`))
     + '<div style="margin-top:6px;font-size:11.5px;line-height:1.5">' + rows + '</div>'
-    + '<div style="opacity:.65;font-size:11px;margin-top:2px">点任意一行 = 用该档当刀缝（▶ 是当前用的）</div>';
+    + '<div style="opacity:.65;font-size:11px;margin-top:2px">'
+    + T('点任意一行 = 用该档当刀缝（▶ 是当前用的）', 'Click any row = use that width as the cut threshold (▶ marks the current one)')
+    + '</div>';
   el.querySelectorAll('.krow').forEach(d => {
     d.onclick = () => { setLine(+d.dataset.k); renderKnee(); };
   });
@@ -1173,8 +1198,12 @@ function updateKneeHint() {
   const el = $('#kneeInfo'); if (!el) return;
   if (S.knee && S.knee.rows && S.knee.rows.length) { renderKnee(); return; }
   if (S.exmode === 'width') { el.textContent = ''; return; }      // 按宽度：不显示 k 曲线
-  el.innerHTML = '<span style="opacity:.65">k 曲线：框好选区、吸完两个颜色（或打开已有记录）就会自动扫一次（约 4 秒）；'
-    + '这里会列出 k=1…16 的块数和露底，点任意一档可直接用它。</span>';
+  el.innerHTML = '<span style="opacity:.65">'
+    + T('k 曲线：框好选区、吸完两个颜色（或打开已有记录）就会自动扫一次（约 4 秒）；'
+      + '这里会列出 k=1…16 的块数和露底，点任意一档可直接用它。',
+      'k curve: once a region is framed and two colours are sampled (or a record is opened) it is scanned '
+      + 'automatically (~4 s). It lists block count and bare area for k=1…16; click a row to use it.')
+    + '</span>';
 }
 
 async function ensureKnee(force) {
@@ -1188,7 +1217,8 @@ async function ensureKnee(force) {
       S.line = S.knee.k;
       if ($('#rngLine')) $('#rngLine').value = Math.min(25, S.line);
       if ($('#numLine')) $('#numLine').value = S.line;
-      setStatus('按块数回落：k=' + S.knee.k + '（已按判法重设刀缝）');
+      setStatus(T('按块数回落：k=' + S.knee.k + '（已按判法重设刀缝）',
+        `By block count: k=${S.knee.k} (cut threshold reset by the method)`));
     }
     renderKnee();
     return true;
@@ -1196,9 +1226,9 @@ async function ensureKnee(force) {
   if (kneeBusy) return false;
   kneeBusy = true;
   try {
-    setStatus('自动定刀缝：正在扫 k=1…15（约 4 秒）…');
+    setStatus(T('自动定刀缝：正在扫 k=1…15（约 4 秒）…', 'Auto cut width: scanning k=1…15 (~4 s)…'));
     const r = await post('api/knee', { ...payload(), mode: 'width', k_max: 16, rule });
-    if (!r.ok) { setStatus(r.reason || '自动定刀缝失败'); return false; }
+    if (!r.ok) { setStatus(r.reason || T('自动定刀缝失败', 'Automatic cut width failed')); return false; }
     S.knee = { sig, rule, k: r.k_wire || S.line, rows: r.rows || [], why: r.why || '',
                k_area: r.k_area, k_count: r.k_count, why_area: r.why_area, why_count: r.why_count };
     const autoMode = (S.exmode === 'auto' || S.exmode === 'auto_blk');
@@ -1213,32 +1243,44 @@ async function ensureKnee(force) {
       let pk0 = rows0[0]; for (const x of rows0) if (pk0 && x.n > pk0.n) pk0 = x;
       const last0 = rows0[rows0.length - 1];
       const hit0 = rows0.find(x => x.k === r.k_wire) || {};
-      S.kneeWarn = '⚠ 按块数回落没找到台阶（块数峰值 ' + (pk0 ? pk0.n : '?') + '，到 k=' + (last0 ? last0.k : '?')
+      S.kneeWarn = T('⚠ 按块数回落没找到台阶（块数峰值 ' + (pk0 ? pk0.n : '?') + '，到 k=' + (last0 ? last0.k : '?')
         + ' 还有 ' + (last0 ? last0.n : '?') + ' 块）→ 已改用露底分布的建议 k=' + r.k_wire
         + (hit0.pct != null ? '（露底 ' + hit0.pct.toFixed(2) + '%）' : '')
-        + '。这是兜底值，请在下面曲线点一档确认。';
+        + '。这是兜底值，请在下面曲线点一档确认。',
+        '⚠ No step found by block count (peak ' + (pk0 ? pk0.n : '?') + ' blocks, still '
+        + (last0 ? last0.n : '?') + ' blocks at k=' + (last0 ? last0.k : '?') + ') → fell back to the '
+        + 'bare-distribution suggestion k=' + r.k_wire
+        + (hit0.pct != null ? ' (bare ' + hit0.pct.toFixed(2) + '%)' : '')
+        + '. That is a fallback: confirm it by clicking a row in the curve below.');
     } else if (autoMode && rule === 'count' && !r.k_wire) {
       const rows = (r.rows || []).filter(x => x && typeof x.n === 'number');
       if (rows.length) {
         let pk = rows[0]; for (const x of rows) if (x.n > pk.n) pk = x;
         const last = rows[rows.length - 1];
         const thr = Math.round(pk.n * 0.25);
-        S.kneeWarn = '⚠ 按块数回落没找到台阶：块数峰值 ' + pk.n + '（k=' + pk.k + '），到 k=' + last.k
+        S.kneeWarn = T('⚠ 按块数回落没找到台阶：块数峰值 ' + pk.n + '（k=' + pk.k + '），到 k=' + last.k
           + ' 还有 ' + last.n + ' 块（要 ≤' + thr + ' 才算回落）。现在沿用 ' + S.line + ' px —— '
-          + '请在下面曲线里点一档确认。';
+          + '请在下面曲线里点一档确认。',
+          '⚠ No step found by block count: peak ' + pk.n + ' blocks (k=' + pk.k + '), still ' + last.n
+          + ' blocks at k=' + last.k + ' (needs ≤' + thr + ' to count as a fall). Keeping ' + S.line
+          + ' px — confirm by clicking a row in the curve below.');
       } else {
-        S.kneeWarn = '⚠ 按块数回落没定出 k，现在沿用 ' + S.line + ' px，建议手挑一档。';
+        S.kneeWarn = T('⚠ 按块数回落没定出 k，现在沿用 ' + S.line + ' px，建议手挑一档。',
+        '⚠ Block count did not produce a k; keeping ' + S.line + ' px — pick a row by hand.');
       }
     } else if (r.k_wire) {
       S.kneeWarn = '';
     }
     renderKnee();
     setStatus(!autoMode
-      ? ('k 曲线已扫（自动值 k=' + (r.k_wire || '—') + '，当前按你设的宽度 ' + S.line + ' 算；点曲线任意一档可改用它）')
+      ? T('k 曲线已扫（自动值 k=' + (r.k_wire || '—') + '，当前按你设的宽度 ' + S.line + ' 算；点曲线任意一档可改用它）',
+          `k curve scanned (auto k=${r.k_wire || '—'}; currently using your width ${S.line}; click any row to switch)`)
       : (r.k_wire
-         ? (S.lineManual ? ('按块数回落：k=' + r.k_wire + '；你已手设刀缝 ' + S.line + '，按你的算（重选「按块数回落」可恢复）')
-                         : ('按块数回落：k=' + r.k_wire + '（' + (r.why || '') + '）'))
-         : '按块数回落：没找到明显台阶，仍用当前值'));
+         ? (S.lineManual
+            ? T('按块数回落：k=' + r.k_wire + '；你已手设刀缝 ' + S.line + '，按你的算（重选「按块数回落」可恢复）',
+                `By block count: k=${r.k_wire}; you set ${S.line} by hand, so yours is used (re-select “By block count” to restore)`)
+            : T('按块数回落：k=' + r.k_wire + '（' + (r.why || '') + '）', `By block count: k=${r.k_wire} (${r.why || ''})`))
+         : T('按块数回落：没找到明显台阶，仍用当前值', 'By block count: no clear step, keeping the current value')));
     return true;
   } finally { kneeBusy = false; }
 }
@@ -1269,7 +1311,7 @@ async function analyze() {
     return;
   }
   if (S.samples.length < 2) {
-    setResult('只吸了一个颜色。还需要另一个（漆膜 / 基材），否则没法算占比。');
+    setResult(T('只吸了一个颜色。还需要另一个（漆膜 / 基材），否则没法算占比。', 'Only one colour sampled. Sample the other one (coating / substrate) — without both there is no ratio to compute.'));
     return;
   }
   // 两种判法各走各的：按块数回落 → 先扫 k；按宽度 → 只等服务器的露底分布建议值，不扫 k（免得两套规则重复算）
@@ -1279,7 +1321,7 @@ async function analyze() {
   try {
     const r = await post('api/analyze', payload());
     if (my !== S.seq) return;
-    if (!r.ok) { setResult(r.reason || '分析失败'); return; }
+    if (!r.ok) { setResult(r.reason || T('分析失败', 'Analysis failed')); return; }
     S.rows = r.rows; S.total = r.total; S.lines = r.lines;
     S.analysis = r.analysis || null; updateFileInfo();
     S.autoTotal = { ...r.total, worst: r.total.worst ? { ...r.total.worst } : null };
@@ -1306,8 +1348,10 @@ async function analyze() {
         $('#rngLine').value = Math.min(25, S.line); $('#numLine').value = S.line;
         try { localStorage.setItem('baige.line', String(S.line)); } catch (_) {}
         setStatus(hasSug
-          ? ('按露底分布：已用建议值 ' + S.line + ' px 起算（' + (r.suggest_src || '按露底厚度') + '，可自己改）')
-          : '按露底分布：给不出可信阈值（照建议会把真实脱落删掉），先用 1 px；可到 k 曲线里手挑一档');
+          ? T('按露底分布：已用建议值 ' + S.line + ' px 起算（' + (r.suggest_src || '按露底厚度') + '，可自己改）',
+              'By bare distribution: starting from the suggested ' + S.line + ' px (' + (r.suggest_src || 'bare thickness') + ', you can change it)')
+          : T('按露底分布：给不出可信阈值（照建议会把真实脱落删掉），先用 1 px；可到 k 曲线里手挑一档',
+              'By bare distribution: no trustworthy threshold (following the suggestion deletes real removal) — starting at 1 px; pick a row in the k table instead'));
         { const _my = my; setTimeout(() => { if (S.seq === _my) analyze(); }, 0); return; }
       }
       S.suggRetry = true;
@@ -1318,7 +1362,7 @@ async function analyze() {
     if (r.overlay_url) loadOverlay(r.overlay_url); else { S.overlayImg = null; }
     draw();
   } catch (err) {
-    setResult('分析失败：' + err.message);
+    setResult(T('分析失败：', 'Analysis failed: ') + err.message);
   } finally {
     if (my === S.seq) setBusy(false);
   }
@@ -1331,21 +1375,26 @@ const GRADE_ABOVE = ['4B', '3B', '2B', '1B', '0B'];
 /* 复刻 crosscut.margin_hint 的文案，用于“手动排除块之后”改写那一行 */
 function marginHint(pct) {
   const L = [0.5, 5.0, 15.0, 35.0, 65.0];
-  const parts = [`判定余量：${pct.toFixed(2)}% 属 ${gradeOf(pct)}`];
+  const en = I18N.lang === 'en';
+  const parts = [en ? `Margin: ${pct.toFixed(2)}% is ${gradeOf(pct)}`
+                    : `判定余量：${pct.toFixed(2)}% 属 ${gradeOf(pct)}`];
   for (const lim of L) {
     if (pct < lim - 1e-9) {
-      parts.push(`再多 ${(lim - pct).toFixed(2)} pp（到 ${lim.toFixed(1)}%）即 ${gradeOf(lim + 1e-6)}`);
+      parts.push(en ? `+${(lim - pct).toFixed(2)} pp (to ${lim.toFixed(1)}%) becomes ${gradeOf(lim + 1e-6)}`
+                    : `再多 ${(lim - pct).toFixed(2)} pp（到 ${lim.toFixed(1)}%）即 ${gradeOf(lim + 1e-6)}`);
       break;
     }
   }
   for (const lim of [...L].reverse()) {
     if (pct >= lim - 1e-9) {
-      if (lim === 0.5) parts.push(`降到 0.5% 以下即 5B（少 ${(pct - 0.5).toFixed(2)} pp）`);
-      else parts.push(`少 ${(pct - lim).toFixed(2)} pp（到 ${lim.toFixed(0)}%）即 ${gradeOf(lim - 1e-6)}`);
+      if (lim === 0.5) parts.push(en ? `below 0.5% becomes 5B (-${(pct - 0.5).toFixed(2)} pp)`
+                                     : `降到 0.5% 以下即 5B（少 ${(pct - 0.5).toFixed(2)} pp）`);
+      else parts.push(en ? `-${(pct - lim).toFixed(2)} pp (to ${lim.toFixed(0)}%) becomes ${gradeOf(lim - 1e-6)}`
+                         : `少 ${(pct - lim).toFixed(2)} pp（到 ${lim.toFixed(0)}%）即 ${gradeOf(lim - 1e-6)}`);
       break;
     }
   }
-  return parts.join('；');
+  return parts.join(en ? '; ' : '；');
 }
 
 function marginText(pct) {
@@ -1355,21 +1404,27 @@ function marginText(pct) {
     if (!best || d < best.d) best = { d, b, i };
   });
   if (!best) return '';
+  const en = I18N.lang === 'en';
   const dir = pct < best.b
-    ? `再高 ${best.d.toFixed(2)} pp 就越到 ${GRADE_ABOVE[best.i]}`
-    : `再低 ${best.d.toFixed(2)} pp 就越到 ${best.i === 0 ? '5B' : GRADE_ABOVE[best.i - 1]}`;
-  return `距分界 ${best.b}% 仅 ${best.d.toFixed(2)} pp（${dir}）`;
+    ? (en ? `${best.d.toFixed(2)} pp up crosses into ${GRADE_ABOVE[best.i]}`
+          : `再高 ${best.d.toFixed(2)} pp 就越到 ${GRADE_ABOVE[best.i]}`)
+    : (en ? `${best.d.toFixed(2)} pp down crosses into ${best.i === 0 ? '5B' : GRADE_ABOVE[best.i - 1]}`
+          : `再低 ${best.d.toFixed(2)} pp 就越到 ${best.i === 0 ? '5B' : GRADE_ABOVE[best.i - 1]}`);
+  return en ? `${best.d.toFixed(2)} pp from the ${best.b}% boundary (${dir})`
+            : `距分界 ${best.b}% 仅 ${best.d.toFixed(2)} pp（${dir}）`;
 }
 
 function renderDiag() {
   const dg = $('#diagx'), v1 = S.total;
   if (!v1 || !S.detail) { dg.innerHTML = ''; return; }   // 诊断明细关着就不铺这些数
   const rows = [
-    ['判级余量', marginText(v1.pct)],
-    ['已剔除', v1.groove_px > 0
-      ? `${v1.groove_px} px（占统计面积 ${fmt(v1.groove_share, 2)}%，刀缝阈值 ${S.line}）`
-      : `0 px（刀缝阈值 = ${S.line}，没有剔除任何刀缝）`],
-    ['未分类', `${fmt(v1.unassigned_pct, 2)}%`],
+    [T('判级余量', 'Grade margin'), marginText(v1.pct)],
+    [T('已剔除', 'Excluded'), v1.groove_px > 0
+      ? T(`${v1.groove_px} px（占统计面积 ${fmt(v1.groove_share, 2)}%，刀缝阈值 ${S.line}）`,
+          `${v1.groove_px} px (${fmt(v1.groove_share, 2)}% of the counted area, cut threshold ${S.line})`)
+      : T(`0 px（刀缝阈值 = ${S.line}，没有剔除任何刀缝）`,
+          `0 px (cut threshold = ${S.line}, nothing excluded)`)],
+    [T('未分类', 'Unclassified'), `${fmt(v1.unassigned_pct, 2)}%`],
   ];
   dg.innerHTML = rows.map(([k, v]) => `<div class="diagrow"><span class="dk">${k}</span><span>${v}</span></div>`).join('');
 }
@@ -1478,7 +1533,8 @@ function renderResult() {
   if (!S.detail) {                  // 只显示：总判级 + 各选区脱落率/判级 + 合计
     const keep = [];
     for (const ln of lines) {
-      if (/^(判定余量|判级余量|露底厚度|—— 诊断明细)/.test(ln)) break;
+      if (/^(判定余量|判级余量|露底厚度|—— 诊断明细)/.test(ln)
+          || /^(Margin:|Bare-area thickness:|— diagnostics —)/.test(ln)) break;
       keep.push(ln);
     }
     lines = keep;
@@ -1549,20 +1605,21 @@ async function copyText(txt) {
 /* 复制成 TSV（制表符分隔）：就复制眼睛看到的这几行——选区 / 脱落率 / 等级，
    粘进 Excel 自动分列；要看面积/露底/未分类这些明细，用「导出 CSV」。 */
 $('#resCopy').onclick = async () => {
-  if (!S.total) { setStatus('还没有结果可复制'); return; }
+  if (!S.total) { setStatus(T('还没有结果可复制', 'No result to copy yet')); return; }
   const pc = v => (v === undefined || v === null) ? '' : fmt(v, 2) + '%';
   const out = (S.rows || []).map((r, i) => ['R' + (i + 1), pc(r.pct), r.astm || ''].join('\t'));
-  out.push(['合计', pc(S.total.pct), S.total.astm || ''].join('\t'));
+  out.push([T('合计', 'Total'), pc(S.total.pct), S.total.astm || ''].join('\t'));
   const ok = await copyText(out.join('\r\n'));
   const btn = $('#resCopy');
   if (ok) {
-    btn.textContent = '✓ 已复制';
+    btn.textContent = T('✓ 已复制', '✓ Copied');
     btn.classList.add('ok');
     clearTimeout(btn._t);
-    btn._t = setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('ok'); }, 1600);
-    setStatus(`已复制 ${out.length} 行（选区 / 脱落率 / 等级），粘到 Excel 自动分列；明细请用「导出 CSV」`);
+    btn._t = setTimeout(() => { btn.textContent = T('复制', 'Copy'); btn.classList.remove('ok'); }, 1600);
+    setStatus(T(`已复制 ${out.length} 行（选区 / 脱落率 / 等级），粘到 Excel 自动分列；明细请用「导出 CSV」`,
+      `Copied ${out.length} rows (region / removal / grade) — paste into Excel; use “Export CSV” for the details.`));
   } else {
-    setStatus('复制失败：浏览器不让写剪贴板，手动选中结果框复制吧');
+    setStatus(T('复制失败：浏览器不让写剪贴板，手动选中结果框复制吧', 'Copy failed: the browser blocked clipboard access — select the result box and copy manually.'));
   }
 };
 
@@ -1595,7 +1652,7 @@ function scheduleSemi(delay = 350) {
 
 async function runSemi() {
   if (!S.id) return;
-  if (!S.rois.length) { setResult('半自动已开：先在图上框出划格区，框完自动出结果。'); return; }
+  if (!S.rois.length) { setResult(T('半自动已开：先在图上框出划格区，框完自动出结果。', 'Semi-auto is on: frame the cross-hatch area and the result appears automatically.')); return; }
   const my = ++S.seq;
   if (S.autoAbort) { try { S.autoAbort.abort(); } catch (_) {} }
   const ac = new AbortController(); S.autoAbort = ac;
@@ -1608,7 +1665,7 @@ async function runSemi() {
     // 半自动不再自己判 k：第一步只认色，k 交给当前判法定，再回来算一次
     const det = await post('api/autorun', { ...semiBody, detect_only: true }, undefined, ac.signal);
     if (my !== S.seq) return;
-    if (!det.ok) throw new Error(det.reason || '认色失败');
+    if (!det.ok) throw new Error(det.reason || T('认色失败', 'colour detection failed'));
     if (det.samples) { S.samples = det.samples.map(s => ({ rgb: s.rgb, role: s.role })); S.selSample = -1; }
     if (typeof det.tol === 'number') { S.tol = det.tol; $('#rngTol').value = S.tol; $('#numTol').value = S.tol; }
     if (det.span != null) S.span = det.span;
@@ -1622,7 +1679,9 @@ async function runSemi() {
     if (!r.ok && r.reason === 'superseded') return;      // 已被更新的请求取代，静默丢掉
     if (!r.ok) {
       setStatus('');
-      setResult('半自动没认出来：' + (r.reason || '未知原因') + '。\n请取消「半自动」后在图上手动吸两个色。');
+      setResult(T('半自动没认出来：' + (r.reason || '未知原因') + '。\n请取消「半自动」后在图上手动吸两个色。',
+                 'Semi-auto could not detect the colours: ' + (r.reason || 'unknown reason') +
+                 '.\nTurn off “Semi-auto” and sample the two colours by hand on the image.'));
       $('#chkSemi').checked = false; S.semi = false;
       setBusy(false);
       return;
@@ -1650,8 +1709,10 @@ async function runSemi() {
     if (r.ignored && r.ignored.length) {
       const ps = r.ignored.map(o => `${o.pct}%`).join('、');
       const at = r.note ? 1 : 0;
-      S.lines.splice(at, 0, `· 程序自动忽略了 ${r.ignored.length} 类颜色（占选区 ${ps}）`
-        + `——在「吸色」页可改角色或删除`);
+      S.lines.splice(at, 0, T(`· 程序自动忽略了 ${r.ignored.length} 类颜色（占选区 ${ps}）`
+        + `——在「吸色」页可改角色或删除`,
+        `· ${r.ignored.length} colour cluster(s) were ignored automatically (${ps} of the region)`
+        + ` — change the role or delete them on the “Pick” tab`));
     }
     // 新加的框会让整张图重新认色（KMeans 跑全部选区的并集），旧 ROI 的数字可能跟着变——明说，别让它悄悄变
     if (prevRows && prevRows.length && prevRows.length < r.rows.length) {
@@ -1662,8 +1723,10 @@ async function runSemi() {
       });
       if (diffs.length) {
         const at = r.note ? 1 : 0;
-        S.lines.splice(at, 0, `· 加了这个选区后重新认色，之前的结果跟着变了：${diffs.join('、')}`
-          + `（同一张图只认一套颜色；想固定就先只框一个、确认后再框下一个）`);
+        S.lines.splice(at, 0, T(`· 加了这个选区后重新认色，之前的结果跟着变了：${diffs.join('、')}`
+          + `（同一张图只认一套颜色；想固定就先只框一个、确认后再框下一个）`,
+          `· Adding this region re-detected the colours, so earlier numbers moved: ${diffs.join(', ')}`
+          + ` (one colour set per image; to keep them, frame one region at a time)`));
       }
     }
     if (S.suggestHold == null) { S.suggest = r.suggest_px; S.suggestSrc = r.suggest_src; }
@@ -1674,7 +1737,7 @@ async function runSemi() {
     draw();
   } catch (err) {
     if (err && err.name === 'AbortError') return;        // 被更新的请求中断，正常
-    setResult('半自动失败：' + err.message);
+    setResult(T('半自动失败：', 'Semi-auto failed: ') + err.message);
   } finally {
     if (my === S.seq) setBusy(false);
   }
@@ -1700,11 +1763,13 @@ async function pickAt(ex, ey) {
       $('#rngTol').value = S.tol; $('#numTol').value = S.tol;
     }
     syncParams(); syncSampleUI(); updateSpan();
-    setStatus(`取到 ${r.role_name} RGB(${r.rgb.join(',')}) ${r.note}` +
-      (autoApplied ? `　自动容差 → ${S.tol}` : ''));
-    if (S.samples.length >= 2) analyze(); else setResult('再点一下另一个颜色：' +
-      (S.samples[0].role === 'coat' ? '露底基材' : '完好漆膜'));
-  } catch (err) { setStatus('吸色失败：' + err.message); }
+    setStatus(T(`取到 ${r.role_name} RGB(${r.rgb.join(',')}) ${r.note}`,
+                `Sampled ${r.role_name} RGB(${r.rgb.join(',')}) ${r.note}`) +
+      (autoApplied ? T(`　自动容差 → ${S.tol}`, ` · auto tolerance → ${S.tol}`) : ''));
+    if (S.samples.length >= 2) analyze(); else setResult(T('再点一下另一个颜色：' +
+      (S.samples[0].role === 'coat' ? '露底基材' : '完好漆膜'),
+      'Now click the other one: ' + (S.samples[0].role === 'coat' ? 'exposed substrate' : 'intact coating')));
+  } catch (err) { setStatus(T('吸色失败：', 'Sampling failed: ') + err.message); }
 }
 
 async function measureGroove(a, b) {
@@ -1713,7 +1778,8 @@ async function measureGroove(a, b) {
     S.rulerDone = [a.x, a.y, b.x, b.y];
     if (r.ok === false || r.width_full == null) {
       S.rulerLast = null;
-      $('#rulerMsg').textContent = r.reason || '没测到明显的沟槽：让线段垂直于刀缝、长度 30px 以上';
+      $('#rulerMsg').textContent = r.reason || T('没测到明显的沟槽：让线段垂直于刀缝、长度 30px 以上',
+        'No clear groove measured: keep the segment perpendicular to the cut and at least 30 px long');
       draw(); return;
     }
     S.rulerLast = r;
@@ -1725,17 +1791,24 @@ async function measureGroove(a, b) {
     const avgF = S.rulerFull.length ? S.rulerFull.reduce((x, y) => x + y, 0) / S.rulerFull.length : 0;
     const wHalfA = r.width_analysis, wFullA = r.full_analysis || r.width_analysis;
     $('#rulerMsg').textContent = r.reliable
-      ? `分析图：半高宽 ${fmt(wHalfA, 1)} px（缝心）／全宽 ${fmt(wFullA, 1)} px（含发虚的边）\n` +
+      ? T(`分析图：半高宽 ${fmt(wHalfA, 1)} px（缝心）／全宽 ${fmt(wFullA, 1)} px（含发虚的边）\n` +
         `原图：${fmt(r.width_full, 1)} ／ ${fmt(r.full_full || r.width_full, 1)} px　对比度 ${Math.round(r.contrast)} ✓\n` +
         `已量 ${S.rulerHist.length} 次｜均值 半高 ${fmt(avg, 1)} / 全宽 ${fmt(avgF, 1)}\n` +
         `→ 点「用测量值」会把阈值设成全宽 +1 = ${Math.round(avgF || avg) + 1}（半高宽只是缝心，边缘也得一起排掉）\n` +
-        `（这条线 6 秒后自动隐去，数值和均值仍然保留）`
-      : `分析图：半高宽 ${fmt(wHalfA || 0, 1)} / 全宽 ${fmt(wFullA || 0, 1)} px，但对比度只有 ${Math.round(r.contrast)}，不可靠\n` +
-        `换个位置重拖一条，或先点「放大到 100%」`;
+        `（这条线 6 秒后自动隐去，数值和均值仍然保留）`,
+        `Analysis image: half-max ${fmt(wHalfA, 1)} px (cut centre) / full width ${fmt(wFullA, 1)} px (incl. soft edges)\n` +
+        `Original: ${fmt(r.width_full, 1)} / ${fmt(r.full_full || r.width_full, 1)} px  contrast ${Math.round(r.contrast)} ✓\n` +
+        `Measured ${S.rulerHist.length}× | mean half-max ${fmt(avg, 1)} / full ${fmt(avgF, 1)}\n` +
+        `→ “Use measurement” sets the threshold to full width +1 = ${Math.round(avgF || avg) + 1} (half-max is only the centre; the soft edges must go too)\n` +
+        `(the line fades after 6 s; the values and the mean stay)`)
+      : T(`分析图：半高宽 ${fmt(wHalfA || 0, 1)} / 全宽 ${fmt(wFullA || 0, 1)} px，但对比度只有 ${Math.round(r.contrast)}，不可靠\n` +
+        `换个位置重拖一条，或先点「放大到 100%」`,
+        `Analysis image: half-max ${fmt(wHalfA || 0, 1)} / full ${fmt(wFullA || 0, 1)} px, but contrast is only ${Math.round(r.contrast)} — unreliable\n` +
+        `Drag again somewhere else, or zoom to 100% first`);
     S.suggestHold = null;                        // 量到新刀缝了，建议重新算
     updateSuggest(); draw();
     rulerFadeSoon();
-  } catch (err) { $('#rulerMsg').textContent = '量尺失败：' + err.message; }
+  } catch (err) { $('#rulerMsg').textContent = T('量尺失败：', 'Measurement failed: ') + err.message; }
 }
 
 /* ------------------------------------------------------------------ 分辨率 / 旋转 */
@@ -1754,16 +1827,16 @@ async function changeRes(res) {
   S.overlayUrl = null; S.overlayImg = null; S.contourUrl = null; S.contourImg = null;
   await refetchImage();
   syncParams(); fitView();
-  if (S.samples.length) analyze(); else setResult('分辨率已切换，选区与刀缝阈值已按比例换算。');
+  if (S.samples.length) analyze(); else setResult(T('分辨率已切换，选区与刀缝阈值已按比例换算。', 'Resolution changed; regions and cut threshold were rescaled.'));
 }
 
 /* ------------------------------------------------------------------ 导出 */
 async function download(path, name) {
-  const body = Object.assign(payload(), { name: S.name || '结果' });
+  const body = Object.assign(payload(), { name: S.name || T('结果', 'result') });
   const r = await fetch(path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Baige-Lang': I18N.lang }, body: JSON.stringify(body),
   });
-  if (!r.ok) { setStatus('导出失败：' + (await r.text()).slice(0, 200)); return; }
+  if (!r.ok) { setStatus(T('导出失败：', 'Export failed: ') + (await r.text()).slice(0, 200)); return; }
   const blob = await r.blob();
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -1788,7 +1861,7 @@ function clearImageState() {
   S.rulerHist = []; S.rulerFull = []; S.rulerLast = null; S.rulerSeg = null; S.rulerDone = null;
   S.suggestHold = null;
   clearTimeout(S.rulerFadeT);
-  setResult('打开图片 → 吸两个颜色 → 框出划格区 → 计算\n');
+  setResult(T('打开图片 → 吸两个颜色 → 框出划格区 → 计算\n', 'Open image → sample two colours → frame the cross-hatch area → calculate\n'));
   setStatus('');
   const set = (id, t) => { const e = $(id); if (e) e.textContent = t; };
   const sum = $('#summary');
@@ -1829,9 +1902,11 @@ const autoTolOf = span => (span == null ? null
 
 function updateSpan() {
   const el = $('#spanInfo');
-  if (S.span == null) { el.textContent = '样本间距：—（还缺漆膜或基材）'; return; }
-  el.textContent = `样本间距 ${Math.round(S.span)}（Lab 距离）→ 建议容差 ${autoTolOf(S.span)}` +
-    (S.autoTol ? `　· 当前自动采用 ${S.tol}` : `　· 手动 ${S.tol}`);
+  if (S.span == null) { el.textContent = T('样本间距：—（还缺漆膜或基材）', 'Colour distance: — (coating or substrate missing)'); return; }
+  el.textContent = T(`样本间距 ${Math.round(S.span)}（Lab 距离）→ 建议容差 ${autoTolOf(S.span)}`,
+                     `Colour distance ${Math.round(S.span)} (Lab) → suggested tolerance ${autoTolOf(S.span)}`) +
+    (S.autoTol ? T(`　· 当前自动采用 ${S.tol}`, ` · using ${S.tol} automatically`)
+               : T(`　· 手动 ${S.tol}`, ` · manual ${S.tol}`));
 }
 
 /* 向服务端要真实的样本间距 / 建议容差；自动容差开着就立刻套用 */
@@ -1855,23 +1930,26 @@ function updateSuggest() {
   const btn = $('#btnSuggest'), info = $('#suggestInfo');
   if (!btn || !info) return;      // 采用建议按钮与提示行已撤下
   if (S.suggestHold != null) {
-    info.textContent = `已采用 ${S.suggestHold} px（改容差/纯度/选区/量尺后会重新建议）`;
-    btn.disabled = false; btn.textContent = `采用 ${S.suggestHold} px`;
+    info.textContent = T(`已采用 ${S.suggestHold} px（改容差/纯度/选区/量尺后会重新建议）`,
+      `Using ${S.suggestHold} px (re-suggested after changing tolerance, purity, region or the ruler)`);
+    btn.disabled = false; btn.textContent = T(`采用 ${S.suggestHold} px`, `Use ${S.suggestHold} px`);
     return;
   }
   if (S.suggest == null) {
-    info.textContent = '建议刀缝阈值：先吸色算一次，或量一条刀缝（成片脱落为主的图只能靠量尺）';
-    btn.disabled = true; btn.textContent = '采用建议';
+    info.textContent = T('建议刀缝阈值：先吸色算一次，或量一条刀缝（成片脱落为主的图只能靠量尺）',
+      'Suggested cut threshold: sample the colours and calculate once, or measure a cut (images dominated by sheet removal can only be measured)');
+    btn.disabled = true; btn.textContent = T('采用建议', 'Use suggestion');
   } else {
-    info.textContent = `建议刀缝阈值 ≈ ${S.suggest} px（${S.suggestSrc || '按露底厚度'}）`;
-    btn.disabled = false; btn.textContent = `采用 ${S.suggest} px`;
+    info.textContent = T(`建议刀缝阈值 ≈ ${S.suggest} px（${S.suggestSrc || '按露底厚度'}）`,
+      `Suggested cut threshold ≈ ${S.suggest} px (${S.suggestSrc || 'from bare thickness'})`);
+    btn.disabled = false; btn.textContent = T(`采用 ${S.suggest} px`, `Use ${S.suggest} px`);
   }
 }
 
 function refreshRoiList() {
   const box = $('#roiList');
   if (!S.rois.length) {
-    box.innerHTML = '<div class="empty">还没有选区：在图上拖出划格区</div>';
+    box.innerHTML = '<div class="empty">' + T('还没有选区：在图上拖出划格区', 'No region yet — drag a box around the cross-hatch area') + '</div>';
     return;
   }
   box.innerHTML = '';
@@ -1923,8 +2001,9 @@ function syncSampleUI() {
   updateKneeHint();
   const box = $('#sampleList');
   if (!S.samples.length) {
-    box.innerHTML = '<div class="empty">还没有样本：图上点一下完好漆膜，再点一下露底基材</div>';
-    $('#spanInfo').textContent = '样本间距：—（先吸漆膜和基材）';
+    box.innerHTML = '<div class="empty">' + T('还没有样本：图上点一下完好漆膜，再点一下露底基材',
+      'No colour samples yet — click the intact coating, then the exposed substrate') + '</div>';
+    $('#spanInfo').textContent = T('样本间距：—（先吸漆膜和基材）', 'Colour distance: — (sample coating and substrate first)');
     return;
   }
   box.innerHTML = '';
@@ -1934,7 +2013,7 @@ function syncSampleUI() {
     el.innerHTML = `<span class="chip" style="background:rgb(${s.rgb.join(',')})"></span>
       <span class="rl">${roleName(s.role)}</span>
       <span class="rgb">RGB ${s.rgb.join(',')}</span>
-      <button class="x" title="删除">×</button>`;
+      <button class="x" title="${T('删除', 'Delete')}">×</button>`;
     el.onclick = ev => {
       if (ev.target.classList.contains('x')) {
         S.samples.splice(i, 1);
@@ -1949,7 +2028,8 @@ function syncSampleUI() {
   updateSpan();
 }
 
-function roleName(r) { return r === 'sub' ? '基材' : '漆膜'; }   // v1.42：只有两个角色
+function roleName(r) { return I18N.lang === 'en' ? (r === 'sub' ? 'substrate' : 'coating')
+                                                  : (r === 'sub' ? '基材' : '漆膜'); }   // v1.42：只有两个角色
 
 /* 样本角色改动后的统一收尾：刷新列表 → 重算自动容差 → 重算结果 */
 async function afterSamplesChanged() {
@@ -1959,17 +2039,20 @@ async function afterSamplesChanged() {
   const hasCoat = S.samples.some(s => s.role === 'coat');
   const hasSub = S.samples.some(s => s.role === 'sub');
   if (S.samples.length >= 2 && hasCoat && hasSub) analyze();
-  else setResult('颜色角色还没齐：至少需要一行「漆膜」和一行「基材」。\n' +
-    '在下面的列表里点一行选中，再点上面的「设为漆膜 / 设为基材」按钮改过来。');
+  else setResult(T('颜色角色还没齐：至少需要一行「漆膜」和一行「基材」。\n' +
+    '在下面的列表里点一行选中，再点上面的「设为漆膜 / 设为基材」按钮改过来。',
+    'The colour roles are not complete: you need at least one coating and one substrate row.\n' +
+    'Select a row in the list below, then use the “Set as coating / Set as substrate” buttons.'));
 }
 
 function setSampleRole(role) {
   if (S.selSample < 0 && S.samples.length) { S.selSample = 0; syncSampleUI(); }
   const i = S.selSample;
-  if (i < 0 || !S.samples[i]) { setStatus('还没有颜色样本：先在图上点一下漆膜、再点一下基材'); return; }
-  if (S.samples[i].role === role) { setStatus('这一行已经是「' + roleName(role) + '」了'); return; }
+  if (i < 0 || !S.samples[i]) { setStatus(T('还没有颜色样本：先在图上点一下漆膜、再点一下基材', 'No colour samples yet — click the coating, then the substrate')); return; }
+  if (S.samples[i].role === role) { setStatus(T('这一行已经是「' + roleName(role) + '」了', 'This row is already “' + roleName(role) + '”')); return; }
   S.samples[i].role = role;
-  setStatus(`第 ${i + 1} 个样本（RGB ${S.samples[i].rgb.join(',')}）→ ${roleName(role)}`);
+  setStatus(T(`第 ${i + 1} 个样本（RGB ${S.samples[i].rgb.join(',')}）→ ${roleName(role)}`,
+    `Sample ${i + 1} (RGB ${S.samples[i].rgb.join(',')}) → ${roleName(role)}`));
   afterSamplesChanged();
 }
 
@@ -1977,7 +2060,7 @@ function setSampleRole(role) {
 function delSampleSel() {
   if (S.selSample < 0 && S.samples.length) { S.selSample = 0; syncSampleUI(); }
   const i = S.selSample;
-  if (i < 0 || !S.samples[i]) { setStatus('还没有颜色样本可删'); return; }
+  if (i < 0 || !S.samples[i]) { setStatus(T('还没有颜色样本可删', 'No colour sample to delete')); return; }
   S.samples.splice(i, 1);
   S.selSample = Math.min(S.samples.length - 1, i);
   afterSamplesChanged();
@@ -1996,8 +2079,8 @@ $('#fileInput').onchange = e => { upload(e.target.files[0]); e.target.value = ''
 $('#btnCalc').onclick = analyze;
 $('#btnFit').onclick = fitView;
 $('#btnOne').onclick = zoomOne;
-$('#btnCsv').onclick = () => download('api/export/csv', (S.name || '结果').replace(/\.[^.]+$/, '') + '_百格.csv');
-$('#btnPng').onclick = () => download('api/export/png', (S.name || '结果').replace(/\.[^.]+$/, '') + '_标注.png');
+$('#btnCsv').onclick = () => download('api/export/csv', (S.name || T('结果', 'result')).replace(/\.[^.]+$/, '') + T('_百格.csv', '_crosscut.csv'));
+$('#btnPng').onclick = () => download('api/export/png', (S.name || T('结果', 'result')).replace(/\.[^.]+$/, '') + T('_标注.png', '_annotated.png'));
 
 /* ---- 结果栏高度：拖顶部把手上下调（往上 = 变高），双击复原 ----
    上下都留位置：最少 120px，上面固定留 110px 给参数区，拉不出视野。 */
@@ -2051,7 +2134,7 @@ function setSoft(on) {
   try { localStorage.setItem('baige.soft', on ? '1' : '0'); } catch (_) {}
   if (!S.id) return;
   if (on) { analyze(); }
-  else { S.soft = null; if (S.total) renderResult(); setStatus('已关闭软权重，只显示 v1 口径'); }
+  else { S.soft = null; if (S.total) renderResult(); setStatus(T('已关闭软权重，只显示 v1 口径', 'Soft weighting off — showing the v1 figures only')); }
 }
 if ($('#chkSoftR')) $('#chkSoftR').onchange = e => setSoft(e.target.checked);   // 开关已撤下
 
@@ -2065,12 +2148,15 @@ function setRoiNative(on) {
   try { renderBlocks(); } catch (_) {}
   if (!S.id) return;
   if (!S.rois.length) {
-    setStatus(S.roiNative ? '已开「选区原生」：框完选区再生效（只分析框内那块）'
-                          : '已关「选区原生」：按整图 6MP 分析');
+    setStatus(S.roiNative ? T('已开「选区原生」：框完选区再生效（只分析框内那块）',
+                              'Native region on: applies once a region is framed (only the box is analysed)')
+                          : T('已关「选区原生」：按整图 6MP 分析',
+                              'Native region off: the whole image is analysed at 6 MP'));
     return;
   }
   if (S.samples.length >= 2) analyze();
-  else setStatus(S.roiNative ? '已开「选区原生」：吸两个颜色后再计算' : '已关「选区原生」');
+  else setStatus(S.roiNative ? T('已开「选区原生」：吸两个颜色后再计算', 'Native region on: sample two colours to calculate')
+                             : T('已关「选区原生」', 'Native region off'));
 }
 
 $('#chkRoiNative').onchange = e => setRoiNative(e.target.checked);
@@ -2082,6 +2168,17 @@ const EXMODE_TXT = {
   auto_blk: '按块数回落：自动扫 k=1…16，块数先从低急升到峰值、再回落。①取过峰值后第一档块数 ≤ 峰值 25% 的 k；②若进这一档时露底还在大跌（≥2 个百分点），说明还没走平，继续往下一档；③走平的那一档当刀缝宽度，再按这个宽度算。扫一次约 4 秒；下面的曲线可以点任意一档手动覆盖。',
   width: '按露底分布：看露底厚度分布给一个刀缝阈值（薄结构占主导时才信它），比阈值粗的算脱落、其余全算刀缝。这个值你可以随时手改；换个判法再回来会重算。'
 };
+const EXMODE_TXT_EN = {
+  auto_blk: 'By block count: automatically scans k=1…16. The block count rises steeply to a peak, then falls. '
+    + '(1) take the first k past the peak whose block count is ≤25% of the peak; (2) if the bare area is still '
+    + 'dropping sharply (≥2 pp) at that k, the curve has not levelled off — keep going; (3) the first level k is '
+    + 'the cut width, and the result is computed with it. One scan takes ~4 s; click any row of the curve to '
+    + 'override it by hand.',
+  width: 'By bare distribution: derives a cut threshold from the distribution of bare-pixel thickness (only '
+    + 'trustworthy when thin structures dominate). Anything thicker than the threshold counts as removal, the '
+    + 'rest as cuts. You can change the value at any time; switching the method and coming back recomputes it.'
+};
+function exmodeTxt(v) { return I18N.lang === 'en' ? (EXMODE_TXT_EN[v] || '') : (EXMODE_TXT[v] || ''); }
 const RETIRED_MODES = { auto: 1, shape: 1, local: 1 };
 /* 只同步状态与界面，不触发计算（打开记录时要用它，否则会先按错的判法算一遍） */
 function applyExmode(v) {
@@ -2089,12 +2186,15 @@ function applyExmode(v) {
   S.exmode = (v === 'auto_blk') ? v : 'width';        // 停用的判法一律回落到按宽度
   const el = $('#selExmode'); if (el) el.value = S.exmode;
   if (retired && S.line > 0) {
-    setStatus('这条记录原来用的是「' + ({ auto: '按露底突增', shape: '按形状', local: '按局部宽度' }[v])
-      + '」（已停用），现按「按露底分布 ' + S.line + ' px」重算，数字可能与存档略有不同');
+    setStatus(T('这条记录原来用的是「' + ({ auto: '按露底突增', shape: '按形状', local: '按局部宽度' }[v])
+      + '」（已停用），现按「按露底分布 ' + S.line + ' px」重算，数字可能与存档略有不同',
+      'This record used “' + ({ auto: 'by bare jump', shape: 'by shape', local: 'by local width' }[v])
+      + '” (retired); it is recomputed with “by bare distribution, ' + S.line + ' px”, so numbers may differ '
+      + 'slightly from the archive'));
   }
   try { localStorage.setItem('baige.exmode', S.exmode); } catch (_) {}
   const info = $('#exmodeInfo');
-  if (info) info.textContent = EXMODE_TXT[S.exmode] || '';
+  if (info) info.textContent = exmodeTxt(S.exmode);
   try { updateKneeHint(); } catch (_) {}     // 换判法立刻刷新/隐藏 k 曲线
 }
 function setExmode(v) {
@@ -2102,7 +2202,8 @@ function setExmode(v) {
   S.lineManual = false;                                  // 只要切换判法，手改标记一律作废
   S.widthTouched = false; S.suggRetry = false;            // 新判法要能覆盖你之前设的宽度
   if (v === 'auto' || v === 'auto_blk') S.knee = null;    // 重选自动判法 = 重新扫、重新套用
-  else if (v === 'width') setStatus('按露底分布：沿用当前 ' + S.line + ' px（手改标记已清；切回按块数回落会重新按判法定 k）');
+  else if (v === 'width') setStatus(T('按露底分布：沿用当前 ' + S.line + ' px（手改标记已清；切回按块数回落会重新按判法定 k）',
+        `By bare distribution: keeping ${S.line} px (the manual flag is cleared; switching back to block count re-derives k)`));
   S.blocks = null;
   if (S.id && S.samples.length >= 2 && S.rois.length) analyze();
 }
@@ -2121,9 +2222,9 @@ function blocksSig() {
 async function listBlocks(silent) {
   S.blocksDue = false; refreshCalcBtn();
   if (!S.id) return;
-  if (!S.samples.length) { if (!silent) setStatus('先吸两个颜色再列块'); return; }
-  if (!S.rois.length) { if (!silent) setStatus('先框一个选区'); return; }
-  if (!silent) setStatus('列出露底块…');
+  if (!S.samples.length) { if (!silent) setStatus(T('先吸两个颜色再列块', 'Sample two colours before listing blocks')); return; }
+  if (!S.rois.length) { if (!silent) setStatus(T('先框一个选区', 'Frame a region first')); return; }
+  if (!silent) setStatus(T('列出露底块…', 'Listing bare blocks…'));
   const my = ++S.blocksSeq;
   const sig = blocksSig();
   setBlocksBusy(true);
@@ -2138,7 +2239,7 @@ async function listBlocks(silent) {
       roi_native: !!S.roiNative,
     });
     if (my !== S.blocksSeq) return;                 // 又来了新的一次，这次结果作废
-    if (!r.ok) { if (!silent) setStatus(r.reason || '列块失败'); return; }
+    if (!r.ok) { if (!silent) setStatus(r.reason || T('列块失败', 'Listing blocks failed')); return; }
     const excluded = r.rois.map((x, ri) => {
       const old = keepEx && keepEx[ri];
       if (!old) return new Set();
@@ -2147,10 +2248,10 @@ async function listBlocks(silent) {
     S.blocks = { k: r.k, rois: r.rois, excluded, sig, hover: -1 };
     draw(); renderBlocks();
     const n = r.rois.reduce((a, x) => a + x.blocks.length, 0);
-    if (!silent) setStatus(`列出 ${n} 块`);
+    if (!silent) setStatus(T(`列出 ${n} 块`, `${n} blocks listed`));
     else setStatus(tf('status.autoBlocks', n));
   } catch (err) {
-    if (!silent) setStatus('列块失败：' + err.message);
+    if (!silent) setStatus(T('列块失败：', 'Listing blocks failed: ') + err.message);
   } finally {
     if (my === S.blocksSeq) setBlocksBusy(false);
   }
@@ -2220,7 +2321,7 @@ function applyBlocks() {
       const k = out.findIndex(s => re.test(s));
       if (k >= 0) out[k] = out[k].replace(/(R\d+\s+)[\d.]+%(\s+)\S+/, `$1${fmt(row.pct, 2)}%$2${row.astm}`);
     });
-    const mi = out.findIndex(s => s.startsWith('判定余量'));
+    const mi = out.findIndex(s => s.startsWith('判定余量') || s.startsWith('Margin:'));
     if (mi >= 0) out[mi] = marginHint(R.per.length === 1 ? R.per[0].pct : R.pct);
   }
   S.lines = out;
@@ -2230,11 +2331,14 @@ function blocksText() {
   const R = blocksCalc();
   if (!R) return '';
   const d = R.pct - R.auto;
-  const dTxt = R.exN ? `${d < 0 ? '−' : '+'}${fmt(Math.abs(d), 2)} pp` : '未排除任何块';
+  const dTxt = R.exN ? `${d < 0 ? '−' : '+'}${fmt(Math.abs(d), 2)} pp`
+                     : T('未排除任何块', 'no blocks excluded');
   return [
-    '——— 逐块确认（自动重算，不用点「计算」）———',
-    `共 ${R.n} 块，已排除 ${R.exN} 块（${fmt(R.exA, 0)} px）`,
-    `脱落 ${fmt(R.pct, 2)}% → ${R.astm} / ${R.iso}　${dTxt}（自动 ${fmt(R.auto, 2)}%）`,
+    T('——— 逐块确认（自动重算，不用点「计算」）———', '——— block review (recomputed automatically, no need to press Calculate) ———'),
+    T(`共 ${R.n} 块，已排除 ${R.exN} 块（${fmt(R.exA, 0)} px）`,
+      `${R.n} blocks, ${R.exN} excluded (${fmt(R.exA, 0)} px)`),
+    T(`脱落 ${fmt(R.pct, 2)}% → ${R.astm} / ${R.iso}　${dTxt}（自动 ${fmt(R.auto, 2)}%）`,
+      `removal ${fmt(R.pct, 2)}% → ${R.astm} / ${R.iso}  ${dTxt} (auto ${fmt(R.auto, 2)}%)`),
   ].join('\n');
 }
 
@@ -2242,7 +2346,8 @@ function renderBlocks() {
   const box = $('#blockList'), info = $('#blockInfo');
   const B = S.blocks;
   if (!B) {
-    box.innerHTML = '<div class="empty">还没列出。框好选区后会自动列（勾着「自动列出」时）。</div>';
+    box.innerHTML = '<div class="empty">' + T('还没列出。框好选区后会自动列（勾着「自动列出」时）。',
+      'Nothing listed yet — with the switch on, blocks appear once a region is framed.') + '</div>';
     info.textContent = '—';
     if (S.total) renderResult();
     return;
@@ -2250,9 +2355,13 @@ function renderBlocks() {
   const R = blocksCalc();
   const rows = [];
   if (!S.blocksOn) {
-    rows.push('<div class="recnone" style="padding:6px 8px">块显示已关闭：不再计算、图上也不画。'
-      + '已排除的记录（' + B.excluded.reduce((a, x) => a + x.size, 0) + ' 个）先留着，'
-      + '参数或判法一改就清空。</div>');
+    rows.push('<div class="recnone" style="padding:6px 8px">'
+      + T('块显示已关闭：不再计算、图上也不画。已排除的记录（'
+          + B.excluded.reduce((a, x) => a + x.size, 0) + ' 个）先留着，参数或判法一改就清空。',
+          'Block display is off: nothing is computed or drawn. The ' 
+          + B.excluded.reduce((a, x) => a + x.size, 0)
+          + ' exclusions are kept until the parameters or method change.')
+      + '</div>');
   }
   // 每个选区自己的块号都从 1 开始，必须分组显示，否则 4 个选区就有 4 个“1”，看不出谁是谁
   B.rois.forEach((r, ri) => {
@@ -2262,10 +2371,10 @@ function renderBlocks() {
     // 否则多个 sticky 头都停在 top:0，滚到后面 R1 R2 R3 R4 会叠在一起。
     rows.push(`<div class="recgrp" data-roi="${ri}"><div class="recg">
       <span class="gname">R${ri + 1}</span>
-      <span class="gmeta">${sr ? fmt(sr.pct, 2) + '% · ' + sr.astm : '—'} ｜ ${r.blocks.length} 块${exN ? ' · 已排除 ' + exN : ''}</span>
+      <span class="gmeta">${sr ? fmt(sr.pct, 2) + '% · ' + sr.astm : '—'} ｜ ${r.blocks.length}${T(' 块', ' blocks')}${exN ? T(' · 已排除 ' + exN, ' · ' + exN + ' excluded') : ''}</span>
     </div>`);
     if (!r.blocks.length) {
-      rows.push('<div class="recnone">这个选区里没有够大的露底块。</div></div>');
+      rows.push('<div class="recnone">' + T('这个选区里没有够大的露底块。', 'No bare block large enough in this region.') + '</div></div>');
       return;
     }
     r.blocks.forEach(b => {
@@ -2273,17 +2382,21 @@ function renderBlocks() {
       const share = r.kept ? 100 * b.area / r.kept : 0;
       rows.push(`<div class="reckitem" data-roi="${ri}" data-i="${b.i}">
         <span class="rk">${b.i + 1}</span>
-        <span class="rv">${fmt(b.area, 0)} px · 占露底 ${fmt(share, 1)}%</span>
-        <button class="mini ${ex ? '' : 'on'}" data-act="toggle" data-roi="${ri}" data-i="${b.i}">${ex ? '已排除' : '算脱落'}</button>
+        <span class="rv">${fmt(b.area, 0)} px · ${T('占露底 ', 'of bare ')}${fmt(share, 1)}%</span>
+        <button class="mini ${ex ? '' : 'on'}" data-act="toggle" data-roi="${ri}" data-i="${b.i}">${ex ? T('已排除', 'excluded') : T('算脱落', 'counts as removal')}</button>
       </div>`);
     });
     rows.push('</div>');
   });
-  box.innerHTML = rows.join('') || '<div class="empty">还没有块。框一个选区、或者调一下刀缝阈值就会自动列出来。</div>';
+  box.innerHTML = rows.join('') || ('<div class="empty">' + T('还没有块。框一个选区、或者调一下刀缝阈值就会自动列出来。',
+    'No blocks yet — frame a region or change the cut threshold and they are listed automatically.') + '</div>');
   info.textContent = R
-    ? [`共 ${R.n} 块，已排除 ${R.exN} 块（${fmt(R.exA, 0)} px）`,
-       `脱落 ${fmt(R.pct, 2)}% → ${R.astm} / ${R.iso}`,
-       `自动口径 ${fmt(R.auto, 2)}%（不减任何块）`].join('\n')
+    ? [T(`共 ${R.n} 块，已排除 ${R.exN} 块（${fmt(R.exA, 0)} px）`,
+         `${R.n} blocks, ${R.exN} excluded (${fmt(R.exA, 0)} px)`),
+       T(`脱落 ${fmt(R.pct, 2)}% → ${R.astm} / ${R.iso}`,
+         `removal ${fmt(R.pct, 2)}% → ${R.astm} / ${R.iso}`),
+       T(`自动口径 ${fmt(R.auto, 2)}%（不减任何块）`,
+         `automatic basis ${fmt(R.auto, 2)}% (no blocks excluded)`)].join('\n')
     : '—';
   if (S.total) renderResult();
 }
@@ -2291,7 +2404,7 @@ function renderBlocks() {
 function toggleBlock(ri, i) {
   const B = S.blocks;
   if (!B || !B.rois[ri]) return;
-  if (B.sig !== blocksSig()) { setStatus('块正在按新参数更新，稍等一下再点'); return; }
+  if (B.sig !== blocksSig()) { setStatus(T('块正在按新参数更新，稍等一下再点', 'Blocks are updating for the new parameters — wait a moment')); return; }
   const ex = B.excluded[ri];
   if (ex.has(i)) ex.delete(i); else ex.add(i);
   draw(); renderBlocks();
@@ -2318,13 +2431,14 @@ function setShowBlocks(on) {
 }
 $('#chkBlocks').onchange = e => {
   setShowBlocks(e.target.checked);
-  setStatus(e.target.checked ? '块已显示（调参数会实时更新）' : '块已隐藏，也不再计算');
+  setStatus(e.target.checked ? T('块已显示（调参数会实时更新）', 'Blocks shown (updates live as you change parameters)')
+                             : T('块已隐藏，也不再计算', 'Blocks hidden and no longer computed'));
 };
 $('#bReset').onclick = () => {
   if (!S.blocks) return;
   S.blocks.excluded = S.blocks.rois.map(() => new Set());
   draw(); renderBlocks();
-  setStatus('已恢复全部块');
+  setStatus(T('已恢复全部块', 'All blocks restored'));
 };
 
 
@@ -2343,12 +2457,14 @@ async function refreshRecords() {
   const box = $('#recList'), stat = $('#recStat');
   try {
     const r = await post('api/records', undefined, 'GET');
-    if (!r.ok) throw new Error(r.reason || '读不到记录');
+    if (!r.ok) throw new Error(r.reason || T('读不到记录', 'cannot read records'));
     $('#recCount').textContent = r.total;
     const mb = r.bytes / 1e6;
-    stat.textContent = `${r.total}/${r.max} 条 · ${fmt(mb, 1)} MB` + (r.free_mb != null ? ` · 服务器剩 ${fmt(r.free_mb / 1000, 1)} GB` : '');
+    stat.textContent = T(`${r.total}/${r.max} 条 · ${fmt(mb, 1)} MB`, `${r.total}/${r.max} records · ${fmt(mb, 1)} MB`)
+      + (r.free_mb != null ? T(` · 服务器剩 ${fmt(r.free_mb / 1000, 1)} GB`, ` · ${fmt(r.free_mb / 1000, 1)} GB free on the server`) : '');
     if (!r.items.length) {
-      box.innerHTML = '<div class="empty">还没有记录。算完之后点结果栏右上角的「保存到记录」。</div>';
+      box.innerHTML = '<div class="empty">' + T('还没有记录。算完之后点结果栏右上角的「保存到记录」。',
+        'No records yet — after an analysis, click “Save to records” at the top right of the result box.') + '</div>';
       return;
     }
     box.innerHTML = r.items.map(it => {
@@ -2360,14 +2476,14 @@ async function refreshRecords() {
         <div class="recmeta">
           <div class="recname" data-name="${it.id}">${esc(it.name)}</div>
           <div class="recsub">${esc(it.created || '')}　${it.w}×${it.h}　k=${it.line_px}　tol=${it.tol}</div>
-          <div class="recsub"><b>${grade}%</b> ${g}${it.manual ? `　✎排除${it.manual}块` : ''}${it.worst_roi ? `　最差 R${it.worst_roi}` : ''}　${it.n_roi} 个选区</div>
+          <div class="recsub"><b>${grade}%</b> ${g}${it.manual ? T(`　✎排除${it.manual}块`, ` · ✎${it.manual} excluded`) : ''}${it.worst_roi ? T(`　最差 R${it.worst_roi}`, ` · worst R${it.worst_roi}`) : ''}${T(`　${it.n_roi} 个选区`, ` · ${it.n_roi} region(s)`)}</div>
         </div>
-        <button class="ren" data-ren="${it.id}" title="重命名">✎</button>
-        <button class="del" data-del="${it.id}" title="删除（服务器上一起删）">×</button>
+        <button class="ren" data-ren="${it.id}" title="${T('重命名', 'Rename')}">✎</button>
+        <button class="del" data-del="${it.id}" title="${T('删除（服务器上一起删）', 'Delete (also from the server)')}">×</button>
       </div>`;
     }).join('');
   } catch (e) {
-    box.innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`;
+    box.innerHTML = `<div class="empty">${T('读取失败：', 'Load failed: ')}${esc(e.message)}</div>`;
   }
 }
 
@@ -2392,11 +2508,11 @@ function startRename(rid) {
     if (!save || !v || v === old) { refreshRecords(); return; }
     try {
       const r = await post('api/records/' + rid + '/rename', { name: v });
-      if (!r.ok) throw new Error(r.reason || '改名失败');
+      if (!r.ok) throw new Error(r.reason || T('改名失败', 'rename failed'));
       if (rid === S.curRid) { S.name = v; updateFileInfo(); }
-      setStatus('已改名为「' + v + '」');
+      setStatus(T('已改名为「' + v + '」', 'Renamed to “' + v + '”'));
     } catch (err) {
-      setStatus('改名失败：' + err.message);
+      setStatus(T('改名失败：', 'Rename failed: ') + err.message);
     }
     refreshRecords();
   };
@@ -2418,16 +2534,16 @@ function closeDrawer() {
 }
 
 async function saveRecord() {
-  if (!S.id) { setStatus('先打开一张图'); return; }
-  if (!S.rois.length) { setStatus('先框一个选区再存'); return; }
+  if (!S.id) { setStatus(T('先打开一张图', 'Open an image first')); return; }
+  if (!S.rois.length) { setStatus(T('先框一个选区再存', 'Frame a region before saving')); return; }
   const btn = $('#btnSave');
-  btn.disabled = true; btn.textContent = '保存中…';
+  btn.disabled = true; btn.textContent = T('保存中…', 'Saving…');
   try {
     const B = S.blocks;
     const R = B ? blocksCalc() : null;
     const excl = B ? B.rois.map((r, ri) => [...B.excluded[ri]].sort((a, b) => a - b)) : null;
     const r = await post('api/records/save', {
-      id: S.id, name: S.name || '未命名', res: S.res,
+      id: S.id, name: S.name || T('未命名', 'untitled'), res: S.res,
       rois: S.rois.map(x => ({ box: x.box, ang: x.ang || 0 })),
       samples: S.samples.map(s => ({ rgb: s.rgb, role: s.role })),
       tol: S.tol, purity: S.purity, line_px: S.line, mode: srvMode(),
@@ -2437,43 +2553,45 @@ async function saveRecord() {
       excl: (R && R.exN > 0) ? excl : null,
       knee_warn: S.kneeWarn || '', knee_k: (S.knee && S.knee.k) || null,
     });
-    if (!r.ok) throw new Error(r.reason || '保存失败');
+    if (!r.ok) throw new Error(r.reason || T('保存失败', 'save failed'));
     const savedId = r.id || (r.record && r.record.id);
     if (savedId) { S.curRid = savedId; try { localStorage.setItem('baige.curRid', savedId); } catch (_) {} }
-    btn.textContent = r.updated ? '已更新 ✓' : '已保存 ✓';
-    setStatus(r.updated ? '同一张图同一选区 → 已更新原记录（没有新增）' : '已保存到记录');
+    btn.textContent = r.updated ? T('已更新 ✓', 'Updated ✓') : T('已保存 ✓', 'Saved ✓');
+    setStatus(r.updated ? T('同一张图同一选区 → 已更新原记录（没有新增）', 'Same image and region — the existing record was updated (nothing added)')
+                        : T('已保存到记录', 'Saved to records'));
     refreshRecCount();
-    setTimeout(() => { btn.textContent = '保存到记录'; btn.disabled = false; }, 1600);
+    setTimeout(() => { btn.textContent = T('保存到记录', 'Save to records'); btn.disabled = false; }, 1600);
   } catch (e) {
-    btn.textContent = '保存到记录'; btn.disabled = false;
-    setStatus('保存失败：' + e.message);
+    btn.textContent = T('保存到记录', 'Save to records'); btn.disabled = false;
+    setStatus(T('保存失败：', 'Save failed: ') + e.message);
   }
 }
 
 async function openRecord(rid) {
-  setStatus('打开记录…');
+  setStatus(T('打开记录…', 'Opening record…'));
   S.openAbort = new AbortController();
   const sig = S.openAbort.signal;
   let creep = null;
   const mb = n => (n / 1048576).toFixed(1) + ' MB';
-  upShow('正在打开记录…');
-  let stopCreep = creepStart(2, 7, '读取存档、解码原图…（约 1~2 秒）', 350);
+  upShow(T('正在打开记录…', 'Opening record…'));
+  let stopCreep = creepStart(2, 7, T('读取存档、解码原图…（约 1~2 秒）', 'Reading the archive and decoding the original… (~1–2 s)'), 350);
   try {
     const r = await post('api/records/' + rid + '/open', {}, 'POST', sig);
-    if (!r.ok) throw new Error(r.reason || '打开失败');
+    if (!r.ok) throw new Error(r.reason || T('打开失败', 'open failed'));
     const meta = r.meta, rec = r.record;
     S.curRid = rid;
     try { localStorage.setItem('baige.curRid', rid); } catch (_) {}
     if ($('#drawer').classList.contains('on')) refreshRecords();
     clearImageState();                      // 先清上一张，再按记录恢复
-    S.id = meta.id; S.name = rec.name || meta.name || '记录';
+    S.id = meta.id; S.name = rec.name || meta.name || T('记录', 'record');
     S.ow = meta.ow; S.oh = meta.oh; S.res = meta.default_res || 'full'; S.rot = 0;
     S.shrunkNote = meta.shrunk_note || ''; S.origW = meta.orig_w || meta.ow; S.origH = meta.orig_h || meta.oh;
     if (stopCreep) { stopCreep(); stopCreep = null; }
-    upSet(8, '取图…');
+    upSet(8, T('取图…', 'Fetching image…'));
     await refetchImage((got, total) => {
-      if (total) upSet(8 + 62 * (got / total), `载入图像 ${mb(got)} / ${mb(total)}　${Math.round(100 * got / total)}%`);
-      else upSet(40, `载入图像 ${mb(got)}…`);
+      if (total) upSet(8 + 62 * (got / total), T(`载入图像 ${mb(got)} / ${mb(total)}　${Math.round(100 * got / total)}%`,
+        `Loading image ${mb(got)} / ${mb(total)}  ${Math.round(100 * got / total)}%`));
+      else upSet(40, T(`载入图像 ${mb(got)}…`, `Loading image ${mb(got)}…`));
     }, sig);
     S.rois = (rec.rois || []).map(x => ({ box: (x.box || [0, 0, 1, 1]).slice(), ang: x.ang || 0 }));
     S.samples = (rec.samples || []).map(s => ({ rgb: (s.rgb || [128, 128, 128]).slice(), role: s.role || 'coat' }));
@@ -2498,15 +2616,16 @@ async function openRecord(rid) {
     closeDrawer();
     if (S.samples.length >= 2 && S.rois.length) {
       if (stopCreep) { stopCreep(); stopCreep = null; }
-      creep = creepStart(72, 93, '重算中…（约 3 秒）', 400);
+      creep = creepStart(72, 93, T('重算中…（约 3 秒）', 'Recomputing… (~3 s)'), 400);
       await analyze();
       if (creep) { creep(); creep = null; }
       // 存档里记的是当时的数；重算如果对不上，必须说出来（口径/版本变过）
       const savedPct = rec.result && rec.result.pct;
       if (savedPct != null && S.total && Math.abs(S.total.pct - savedPct) > 0.05) {
-        setStatus(`⚠ 重算结果 ${fmt(S.total.pct, 2)}% 与存档 ${fmt(savedPct, 2)}% 不一致（判法/阈值或程序版本变过）`);
+        setStatus(T(`⚠ 重算结果 ${fmt(S.total.pct, 2)}% 与存档 ${fmt(savedPct, 2)}% 不一致（判法/阈值或程序版本变过）`,
+          `⚠ Recomputed ${fmt(S.total.pct, 2)}% differs from the archived ${fmt(savedPct, 2)}% (method, threshold or version changed)`));
       }
-      upSet(100, '完成');
+      upSet(100, T('完成', 'Done'));
       const ex = (rec.result && rec.result.excl) || [];
       const nEx = ex.reduce((a, b) => a + (b ? b.length : 0), 0);
       if (nEx) {
@@ -2516,14 +2635,16 @@ async function openRecord(rid) {
             if (S.blocks.excluded[ri]) (arr || []).forEach(i => S.blocks.excluded[ri].add(i));
           });
           draw(); renderBlocks();
-          setStatus(`已按记录复原：手动排除 ${nEx} 块（自动 ${fmt(rec.result.auto_pct, 2)}% → ${fmt(rec.result.pct, 2)}%）`);
+          setStatus(T(`已按记录复原：手动排除 ${nEx} 块（自动 ${fmt(rec.result.auto_pct, 2)}% → ${fmt(rec.result.pct, 2)}%）`,
+            `Restored from the record: ${nEx} blocks excluded by hand (auto ${fmt(rec.result.auto_pct, 2)}% → ${fmt(rec.result.pct, 2)}%)`));
         }
       }
     }
-    else setResult(`已打开记录：${S.name}\n${rec.created || ''}\n参数已恢复（吸色 ${S.samples.length} 个、阈值 ${S.line}、容差 ${S.tol}），点「计算」出结果。`);
+    else setResult(T(`已打开记录：${S.name}\n${rec.created || ''}\n参数已恢复（吸色 ${S.samples.length} 个、阈值 ${S.line}、容差 ${S.tol}），点「计算」出结果。`,
+      `Record opened: ${S.name}\n${rec.created || ''}\nParameters restored (${S.samples.length} colour samples, threshold ${S.line}, tolerance ${S.tol}). Press “Calculate” for the result.`));
   } catch (e) {
-    if (e && e.name === 'AbortError') setStatus('已取消');
-    else setStatus('打开失败：' + e.message);
+    if (e && e.name === 'AbortError') setStatus(T('已取消', 'Cancelled'));
+    else setStatus(T('打开失败：', 'Open failed: ') + e.message);
   } finally {
     if (creep) { creep(); creep = null; }
     if (stopCreep) { stopCreep(); stopCreep = null; }
@@ -2533,14 +2654,14 @@ async function openRecord(rid) {
 }
 
 async function deleteRecord(rid) {
-  if (!confirm('从服务器上删除这条记录？（图和参数都会删，无法恢复）')) return;
+  if (!confirm(T('从服务器上删除这条记录？（图和参数都会删，无法恢复）', 'Delete this record from the server? The image and parameters go too; this cannot be undone.'))) return;
   try {
     const r = await post('api/records/' + rid, {}, 'DELETE');
-    if (!r.ok) throw new Error(r.reason || '删除失败');
+    if (!r.ok) throw new Error(r.reason || T('删除失败', 'delete failed'));
     $('#recCount').textContent = r.total;
     refreshRecords();
   } catch (e) {
-    setStatus('删除失败：' + e.message);
+    setStatus(T('删除失败：', 'Delete failed: ') + e.message);
   }
 }
 
@@ -2568,12 +2689,12 @@ async function refreshRecCount() {
 }
 $('#btnRec3').onclick = applyRecommended;
 async function applyRecommended() {
-  if (!S.id) { setStatus('先打开图片'); return; }
-  if (S.samples.length < 2) { setStatus('先吸两个颜色：漆膜 + 基材'); return; }
+  if (!S.id) { setStatus(T('先打开图片', 'Open an image first')); return; }
+  if (S.samples.length < 2) { setStatus(T('先吸两个颜色：漆膜 + 基材', 'Sample two colours first: coating + substrate')); return; }
   S.autoTol = true; $('#chkAutoTol').checked = true;
   S.purity = 0.75;
   syncParams();
-  setStatus('按推荐参数：自动容差 / 纯度 0.75 / 刀缝取全宽+1 …');
+  setStatus(T('按推荐参数：自动容差 / 纯度 0.75 / 刀缝取全宽+1 …', 'Recommended parameters: auto tolerance / purity 0.75 / cut = full width +1 …'));
   await refreshSpan();
   await analyze();
   let k = S.line;
@@ -2586,7 +2707,8 @@ async function applyRecommended() {
   S.line = Math.max(1, Math.round(k));
   syncParams();
   if (S.line !== before) await analyze();
-  setStatus(`推荐参数已生效：容差 ${S.tol}（自动）· 纯度 ${S.purity} · 刀缝阈值 ${S.line}`);
+  setStatus(T(`推荐参数已生效：容差 ${S.tol}（自动）· 纯度 ${S.purity} · 刀缝阈值 ${S.line}`,
+    `Recommended parameters applied: tolerance ${S.tol} (auto) · purity ${S.purity} · cut threshold ${S.line}`));
 }
 
 $('#rZoom').onclick = zoomOne;
@@ -2612,10 +2734,15 @@ $$('.tabs button').forEach(b => {
     const t = b.dataset.tab;
     $$('.pane').forEach(p => p.classList.toggle('on', p.id === 'pane-' + t));
     S.mode = t === 'roi' ? 'rect' : t === 'pick' ? 'pick' : t === 'ruler' ? 'ruler' : 'blocks';
-    setStatus({
+    setStatus(T({
       rect: '拖动框选；右键删框', pick: '点击取色（第一次漆膜，第二次基材）',
       ruler: '横跨刀缝拖一下', annot: '点「列出露底块」，然后点块排除误判',
-    }[t]);
+    }[t], {
+      rect: 'Drag to frame a region; right-click to delete it',
+      pick: 'Click to sample a colour (first coating, second substrate)',
+      ruler: 'Drag across a cut',
+      annot: 'Click a block to exclude a false positive',
+    }[t]));
     if (t === 'annot') {
       draw(); renderBlocks();
       if (!S.blocks && S.blocksOn && S.id && S.rois.length && S.samples.length >= 2) listBlocks(true);
@@ -2630,7 +2757,8 @@ function setTol(v) {
   S.autoTol = false;                             // 手动一动就退出自动（同桌面版）
   $('#chkAutoTol').checked = false;
   $('#rngTol').value = S.tol; $('#numTol').value = S.tol;
-  if (wasAuto) setStatus(`已切到手动容差 ${S.tol}（想恢复自动就勾回「自动容差」）`);
+  if (wasAuto) setStatus(T(`已切到手动容差 ${S.tol}（想恢复自动就勾回「自动容差」）`,
+      `Switched to manual tolerance ${S.tol} (tick “Auto tolerance” to go back)`));
   updateSpan();
   debouncedAnalyze();
 }
@@ -2641,10 +2769,11 @@ $('#chkAutoTol').onchange = async e => {
   if (S.autoTol) {
     await refreshSpan();
     if (S.span != null) {
-      setStatus(`自动容差 = ${S.tol}（样本间距 ${Math.round(S.span)} × 45%）`);
+      setStatus(T(`自动容差 = ${S.tol}（样本间距 ${Math.round(S.span)} × 45%）`,
+        `Auto tolerance = ${S.tol} (colour distance ${Math.round(S.span)} × 45%)`));
       analyze();
     }
-  } else setStatus('已取消自动容差，容差不再跟着样本间距走');
+  } else setStatus(T('已取消自动容差，容差不再跟着样本间距走', 'Auto tolerance off — the tolerance no longer follows the colour distance'));
 };
 
 /* 纯度 */
@@ -2652,9 +2781,11 @@ function updatePurityInfo() {
   const el = $('#purityInfo');
   const p = S.purity;
   if (p <= 0.505) {
-    el.textContent = '0.50 = 不剔除过渡带：所有像素只按最近颜色归类，刀缝全靠「刀缝阈值」排掉';
+    el.textContent = T('0.50 = 不剔除过渡带：所有像素只按最近颜色归类，刀缝全靠「刀缝阈值」排掉',
+      '0.50 = keep the blend band: every pixel is assigned to its nearest colour and cuts are removed only by the cut threshold');
   } else {
-    el.textContent = `剔除混色比 t∈(${(1 - p).toFixed(2)}, ${p.toFixed(2)}) 的过渡像素（既不算漆膜也不算露底）`;
+    el.textContent = T(`剔除混色比 t∈(${(1 - p).toFixed(2)}, ${p.toFixed(2)}) 的过渡像素（既不算漆膜也不算露底）`,
+      `Blend pixels with mixing ratio t in (${(1 - p).toFixed(2)}, ${p.toFixed(2)}) are excluded (neither coating nor bare)`);
   }
 }
 
@@ -2672,7 +2803,8 @@ function setLine(v, keepSuggest) {
   S.line = clamp(Math.round(+v), 1, 60);
   if (!keepSuggest && (S.exmode === 'auto' || S.exmode === 'auto_blk')) {   // 自动判法下用户自己改线宽：以他的为准
     S.lineManual = true;
-    if (S.knee && S.knee.k) setStatus('已按你设的刀缝 ' + S.line + ' 计算（自动值 ' + S.knee.k + '，重选「自动定刀缝」可恢复）');
+    if (S.knee && S.knee.k) setStatus(T('已按你设的刀缝 ' + S.line + ' 计算（自动值 ' + S.knee.k + '，重选「自动定刀缝」可恢复）',
+      `Using your cut width ${S.line} (auto was ${S.knee.k}; re-select “automatic” to restore it)`));
   }
   $('#rngLine').value = Math.min(25, S.line); $('#numLine').value = S.line;
   try { localStorage.setItem('baige.line', String(S.line)); } catch (_) {}
@@ -2693,19 +2825,25 @@ function applyLineFromRuler(px, wFull, wHalf) {
   const v = Math.round(px) + 1;
   setLine(v);
   const chain = (wHalf && wHalf < px - 0.6)
-    ? `量到的半高宽 ${fmt(wHalf, 1)} px 只是缝心，加上两侧发虚的边缘，基线全宽 ${fmt(wFull, 1)} px`
-    : `基线全宽 ${fmt(wFull, 1)} px`;
-  let msg = `已把「刀缝阈值」设为 ${S.line} px＝${chain}，再 +1 取整。\n` +
-            `（k 的单位是分析图像素，值越大删得越狠；结果已重算，在「结果」栏看。）`;
+    ? T(`量到的半高宽 ${fmt(wHalf, 1)} px 只是缝心，加上两侧发虚的边缘，基线全宽 ${fmt(wFull, 1)} px`,
+        `the half-max width ${fmt(wHalf, 1)} px is only the centre; with the soft edges the full width is ${fmt(wFull, 1)} px`)
+    : T(`基线全宽 ${fmt(wFull, 1)} px`, `full width ${fmt(wFull, 1)} px`);
+  let msg = T(`已把「刀缝阈值」设为 ${S.line} px＝${chain}，再 +1 取整。\n` +
+            `（k 的单位是分析图像素，值越大删得越狠；结果已重算，在「结果」栏看。）`,
+            `Cut threshold set to ${S.line} px = ${chain}, +1 rounded.\n` +
+            `(k is in analysis-image pixels; larger removes more. The result was recomputed — see the result box.)`);
   if (v > 14) {
-    msg = `⚠️ ${chain} 比常见刀缝（2~10 px）宽得多，多半量到了格子内部或成片脱落。\n` +
-          `已按 ${S.line} px 设置（可能把真实脱落一起删掉），建议换一条细缝重测。`;
+    msg = T(`⚠️ ${chain} 比常见刀缝（2~10 px）宽得多，多半量到了格子内部或成片脱落。\n` +
+          `已按 ${S.line} px 设置（可能把真实脱落一起删掉），建议换一条细缝重测。`,
+          `⚠️ ${chain} is much wider than a normal cut (2–10 px) — you probably measured inside a square or across a flake.\n` +
+          `Set to ${S.line} px anyway (it may erase real removal); measure a thin cut instead.`);
   }
   $('#rulerMsg').textContent = msg;
 }
 $('#rUse').onclick = () => {
   if (!S.rulerLast) {
-    $('#rulerMsg').textContent = '还没量：先在图上垂直于刀缝横着拖一条（长度 30 px 以上）';
+    $('#rulerMsg').textContent = T('还没量：先在图上垂直于刀缝横着拖一条（长度 30 px 以上）',
+      'Nothing measured yet: drag a line perpendicular to a cut (30 px or longer)');
     return;
   }
   const full = S.rulerLast.full_analysis || S.rulerLast.width_analysis;
@@ -2713,7 +2851,7 @@ $('#rUse').onclick = () => {
 };
 $('#rMean').onclick = () => {
   if (!S.rulerHist.length && !S.rulerFull.length) {
-    $('#rulerMsg').textContent = '还没有可靠的测量记录：先量 1~2 条刀缝';
+    $('#rulerMsg').textContent = T('还没有可靠的测量记录：先量 1~2 条刀缝', 'No reliable measurements yet: measure one or two cuts first');
     return;
   }
   const arr = S.rulerFull.length ? S.rulerFull : S.rulerHist.map(v => v * 1.8);
@@ -2722,7 +2860,8 @@ $('#rMean').onclick = () => {
 };
 $('#rClear').onclick = () => {
   S.rulerHist = []; S.rulerLast = null; S.rulerDone = null; S.rulerSeg = null;
-  $('#rulerMsg').textContent = '切到这一页后，在图上垂直于刀缝横着拖一小段（30px 以上）。';
+  $('#rulerMsg').textContent = T('切到这一页后，在图上垂直于刀缝横着拖一小段（30px 以上）。',
+    'On this tab, drag a short segment across a cut, perpendicular to it (30 px or more).');
   draw();
 };
 
@@ -2768,4 +2907,4 @@ try {
 } catch (_) {}
 resizeCanvas();
 syncParams();
-setStatus('滚轮缩放 · 中键拖动平移 · 双击适应窗口');
+setStatus(T('滚轮缩放 · 中键拖动平移 · 双击适应窗口', 'Wheel to zoom · middle-drag to pan · double-click to fit'));

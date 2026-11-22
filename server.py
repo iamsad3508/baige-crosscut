@@ -34,6 +34,9 @@ from typing import Optional
 from starlette.concurrency import run_in_threadpool
 
 import crosscut as cc
+import srvi18n
+from srvi18n import L
+
 
 def clamp(x, lo, hi):
     return lo if x < lo else (hi if x > hi else x)
@@ -59,6 +62,18 @@ KEEP_HOURS = 24
 MAX_ROI_PIXELS = 8_000_000
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware("http")
+async def _lang_middleware(request, call_next):
+    """按请求头定服务端文案语言（X-Baige-Lang: zh|en）。
+
+    注意：call_next 绝不能放进 try —— 那会把业务异常吞成别的状态码（v2.02 踩过）。
+    """
+    srvi18n.set_lang(request.headers.get("x-baige-lang")
+                     or request.headers.get("accept-language"))
+    return await call_next(request)
+
 
 # ---------------------------------------------------------------- 基础工具
 
@@ -238,7 +253,8 @@ def get_session(sid: str) -> Session:
     with SESS_LOCK:
         s = SESSIONS.get(sid)
         if s is None:
-            raise HTTPException(404, "图片已过期，请重新上传")
+            raise HTTPException(404, L("图片已过期，请重新上传",
+                                   "The image expired — please upload it again"))
         s.touch = time.time()
         return s
 
@@ -465,8 +481,11 @@ def _view_for(sess: Session, req):
         y0, y1 = min(max(y0, 0.0), hmax), min(max(y1, 0.0), hmax)
         bw, bh = x1 - x0, y1 - y0
         if bw < ROI_MIN_WIRE or bh < ROI_MIN_WIRE:
-            raise HTTPException(400, "选区太小或不在画面上（宽 %.0f × 高 %.0f px，"
-                                     "画面 %.0f×%.0f）：请重新框选" % (bw, bh, wmax, hmax))
+            raise HTTPException(400, L("选区太小或不在画面上（宽 %.0f × 高 %.0f px，"
+                                       "画面 %.0f×%.0f）：请重新框选",
+                                       "Region too small or off-canvas (%.0f × %.0f px, canvas "
+                                       "%.0f×%.0f) — please frame it again",
+                                       bw, bh, wmax, hmax))
         nb = [x0, y0, x1, y1]
         if nb != b:
             r.box = nb                        # 回写模型：下游统计用的是同一份框
@@ -744,11 +763,14 @@ def _meta(sess: Session, side: int):
             "side": side, "rot": sess.rot, "scale": ow / float(w) if w else 1.0,
             "orig_w": sess.orig_size[0], "orig_h": sess.orig_size[1],
             "shrunk": sess.orig_size != sess.size,
-            "shrunk_note": ("原图 %d×%d，上传时超过 %d MP 上限，存档已缩到 %d×%d（%.0f%%）"
-                            % (sess.orig_size[0], sess.orig_size[1], MAX_PIXELS // 1_000_000,
-                               ow, oh, 100.0 * ow / float(sess.orig_size[0]))
+            "shrunk_note": (L("原图 %d×%d，上传时超过 %d MP 上限，存档已缩到 %d×%d（%.0f%%）",
+                              "Original %d×%d exceeded the %d MP upload cap; stored at %d×%d (%.0f%%)",
+                              sess.orig_size[0], sess.orig_size[1], MAX_PIXELS // 1_000_000,
+                              ow, oh, 100.0 * ow / float(sess.orig_size[0]))
                             if sess.orig_size != sess.size else ""),
-            "note": ("已按内存上限（%.1f MP）降采样分析" % (MAX_ANALYSIS_PIXELS / 1e6) if capped else "")}
+            "note": (L("已按内存上限（%.1f MP）降采样分析",
+                       "analysed downscaled to the %.1f MP memory cap",
+                       MAX_ANALYSIS_PIXELS / 1e6) if capped else "")}
 
 
 def _raw_exposure_stats(rp):
@@ -775,12 +797,19 @@ def _raw_exposure_msg(st):
         return ""
     clip, mx = st["clip_pct"], st["max_frac"]
     if clip > 0.05:
-        return ("⚠ RAW 有 %.2f%% 像素过曝（最亮处已到白电平），白色区域细节被削平，"
-                "结果可能偏低——建议降 1/3 档重拍" % clip)
+        return L("⚠ RAW 有 %.2f%% 像素过曝（最亮处已到白电平），白色区域细节被削平，"
+                 "结果可能偏低——建议降 1/3 档重拍",
+                 "⚠ %.2f%% of the RAW pixels are clipped (brightest already at white level), so "
+                 "highlight detail is flattened and the result may read low — reshoot 1/3 stop darker",
+                 clip)
     if mx < 0.40:
-        return ("RAW 曝光偏暗：最亮只用到量程的 %.0f%%，过曝 0；能拍就再进 1 档，噪点更低"
-                % (mx * 100))
-    return "RAW 曝光正常：最亮用到量程 %.0f%%，过曝 %.3f%%" % (mx * 100, clip)
+        return L("RAW 曝光偏暗：最亮只用到量程的 %.0f%%，过曝 0；能拍就再进 1 档，噪点更低",
+                 "RAW is underexposed: the brightest pixel uses only %.0f%% of full scale, no clipping; "
+                 "shoot one stop brighter if you can — less noise",
+                 mx * 100)
+    return L("RAW 曝光正常：最亮用到量程 %.0f%%，过曝 %.3f%%",
+             "RAW exposure normal: brightest uses %.0f%% of full scale, %.3f%% clipped",
+             mx * 100, clip)
 
 
 def _decode_dng(raw_bytes, note):
@@ -792,7 +821,9 @@ def _decode_dng(raw_bytes, note):
     try:
         import rawpy
     except Exception:
-        raise HTTPException(400, "服务器没装 rawpy，不能读 DNG（可先导出 TIFF/JPEG 再上传）")
+        raise HTTPException(400, L("服务器没装 rawpy，不能读 DNG（可先导出 TIFF/JPEG 再上传）",
+                                   "rawpy is not installed on the server, so DNG cannot be read "
+                                   "(export TIFF/JPEG first and upload that)"))
     stats = {}
     try:
         with rawpy.imread(io.BytesIO(raw_bytes)) as rp:
@@ -802,10 +833,12 @@ def _decode_dng(raw_bytes, note):
                                  output_color=rawpy.ColorSpace.sRGB,
                                  demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD)
     except Exception as exc:
-        raise HTTPException(400, "DNG 解码失败：%s" % exc)
+        raise HTTPException(400, L("DNG 解码失败：%s", "DNG decoding failed: %s", exc))
     h, w = rgb.shape[:2]
     if w * h > 60_000_000:
-        raise HTTPException(400, "这张 DNG 太大（%d 万像素），请用 12 MP RAW" % (w * h // 10000))
+        raise HTTPException(400, L("这张 DNG 太大（%d 万像素），请用 12 MP RAW",
+                                   "This DNG is too large (%d ×10k pixels) — use a 12 MP RAW",
+                                   w * h // 10000))
     s = rgb[::8, ::8].astype(np.float32)
     lum = s.sum(-1)
     thr = np.percentile(lum, 99)
@@ -829,7 +862,8 @@ def _decode_dng(raw_bytes, note):
     kk = (lo + hi) / 2
     if abs(kk - 1.0) > 0.02:
         out = Image.fromarray(np.clip(np.asarray(out).astype(np.float32) * kk, 0, 255).astype(np.uint8))
-    note["dng"] = ("已解码 DNG：点白平衡 + 曝光对齐（×%.2f），未做锐化" % kk)
+    note["dng"] = L("已解码 DNG：点白平衡 + 曝光对齐（×%.2f），未做锐化",
+                    "DNG decoded: white balance + exposure aligned (×%.2f), not sharpened", kk)
     if stats:
         note["raw"] = {k: round(float(v), 4) for k, v in stats.items()}
         note["raw_msg"] = _raw_exposure_msg(stats)
@@ -846,7 +880,7 @@ async def upload(file: UploadFile = File(...)):
 def _new_session_from_bytes(raw: bytes, filename: str):
     """把一份完整的图片字节装进新会话。分片上传（/api/upload/finish）也走这里，保证两条路完全一致。"""
     if len(raw) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(413, "文件超过 %d MB" % MAX_UPLOAD_MB)
+        raise HTTPException(413, L("文件超过 %d MB", "File exceeds %d MB", MAX_UPLOAD_MB))
     sid = secrets.token_urlsafe(9)
     d = os.path.join(UPLOADS, sid)
     os.makedirs(d, exist_ok=True)
@@ -864,7 +898,8 @@ def _new_session_from_bytes(raw: bytes, filename: str):
             if raw[:4] == b"II*\x00" or raw[:4] == b"MM\x00*":
                 im = _decode_dng(raw, note)
             else:
-                raise HTTPException(400, "图片读不出来（既不是常见图片，也不是 DNG）")
+                raise HTTPException(400, L("图片读不出来（既不是常见图片，也不是 DNG）",
+                                   "Cannot read this image (neither a common image format nor DNG)"))
     orig_size = im.size                     # 存档前的原始尺寸（用来告诉用户“缩过没有”）
     if im.size[0] * im.size[1] > MAX_PIXELS:
         im.thumbnail((6000, 6000), Image.LANCZOS)
@@ -916,14 +951,14 @@ async def upload_chunk(request: Request, uid: str, idx: int, total: int, name: s
     10 MB 的手机照根本传不上来。分片让每个请求都远小于这个门槛，拼回来的字节与整传完全一致。
     """
     if not _chunk_uid_ok(uid):
-        raise HTTPException(400, "上传号不合法")
+        raise HTTPException(400, L("上传号不合法", "Invalid upload id"))
     if idx < 0 or total <= 0 or idx >= total:
-        raise HTTPException(400, "分片序号不合法")
+        raise HTTPException(400, L("分片序号不合法", "Invalid chunk index"))
     raw = await request.body()
     if not raw:
-        raise HTTPException(400, "空分片")
+        raise HTTPException(400, L("空分片", "Empty chunk"))
     if len(raw) > CHUNK_MAX_BYTES:
-        raise HTTPException(413, "单片太大（%d 字节）" % len(raw))
+        raise HTTPException(413, L("单片太大（%d 字节）", "Chunk too large (%d bytes)", len(raw)))
     d = os.path.join(CHUNK_DIR, uid)
     os.makedirs(d, exist_ok=True)
     tmp = os.path.join(d, "%05d.part" % idx)
@@ -939,17 +974,17 @@ async def upload_chunk(request: Request, uid: str, idx: int, total: int, name: s
 def upload_finish(body: dict):
     uid = str(body.get("uid") or "")
     if not _chunk_uid_ok(uid):
-        raise HTTPException(400, "上传号不合法")
+        raise HTTPException(400, L("上传号不合法", "Invalid upload id"))
     d = os.path.join(CHUNK_DIR, uid)
     if not os.path.isdir(d):
-        raise HTTPException(404, "分片不见了，重传一次")
+        raise HTTPException(404, L("分片不见了，重传一次", "Upload chunk disappeared — send it again"))
     parts = sorted(x for x in os.listdir(d) if x.endswith(".part"))
     if not parts:
-        raise HTTPException(400, "一个分片都没收到")
+        raise HTTPException(400, L("一个分片都没收到", "No chunk received at all"))
     buf = bytearray()
     for i, nm in enumerate(parts):
         if nm != "%05d.part" % i:
-            raise HTTPException(400, "分片缺了第 %d 片" % i)
+            raise HTTPException(400, L("分片缺了第 %d 片", "Chunk %d is missing", i))
         with open(os.path.join(d, nm), "rb") as f:
             buf += f.read()
     name = body.get("name") or ""
@@ -1143,81 +1178,130 @@ def overlay(key: str):
     return FileResponse(p, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
 
 
+def _margin_hint_en(pct):
+    """cc.margin_hint() 的英文版（数字与口径逐项对应，别只翻文字）。"""
+    parts = ["Margin: %.2f%% is %s" % (pct, cc.astm_class(pct))]
+    for lim in cc.LINES:
+        if pct < lim - 1e-9:
+            parts.append("+%.2f pp (to %.1f%%) becomes %s"
+                         % (lim - pct, lim, cc.astm_class(lim + 1e-6)))
+            break
+    for lim in reversed(cc.LINES):
+        if pct >= lim - 1e-9:
+            if lim == 0.5:
+                parts.append("below %.1f%% becomes 5B (-%.2f pp)" % (0.5, pct - 0.5))
+            else:
+                parts.append("-%.2f pp (to %.0f%%) becomes %s"
+                             % (pct - lim, lim, cc.astm_class(lim - 1e-6)))
+            break
+    return " | ".join(parts) + "\n"
+
+
+def _margin_hint(pct):
+    return L(cc.margin_hint(pct), _margin_hint_en(pct))
+
+
 def _lines_for(rows, tot, pct, tol, lo, hi, line_px, detail, diag, auto_warn="", purity=0.75):
     """复刻 GUI compute() 的输出文字"""
     lines = []
     for i, st in enumerate(rows, 1):
-        lines.append("R%d   %5.2f%%   %s" % (i, st["pct"], cc.astm_class(st["pct"])))
+        lines.append(L("R%d   %5.2f%%   %s", "R%d   %5.2f%%   %s",
+                       i, st["pct"], cc.astm_class(st["pct"])))
     if len(rows) > 1:
         lines.append("─" * 22)
-        lines.append("合计 %5.2f%%   →  ASTM %s / ISO %s"
-                     % (pct, cc.astm_class(pct), _iso_class(pct)))
-    lines.append(cc.margin_hint(pct).strip())
+        lines.append(L("合计 %5.2f%%   →  ASTM %s / ISO %s",
+                       "Total %5.2f%%   →  ASTM %s / ISO %s",
+                       pct, cc.astm_class(pct), _iso_class(pct)))
+    lines.append(_margin_hint(pct).strip())
     # 未分类占比：只有两个角色以后，亮处漆膜不该被悄悄挖掉，得让用户看见
     try:
         _area = sum(int(r.get("area") or 0) for r in rows)
         _un = sum(int(r.get("unassigned") or 0) for r in rows)
         if _area and _un / float(_area) > 0.02:
-            lines.append("· 选区内有 %.1f%% 的像素既不像漆膜也不像基材（未分类，不计入分子分母）。"
-                         "如果那片其实是亮处/暗处的漆膜，再吸一个「漆膜」点把它们收进来，否则脱落率会偏高。"
-                         % (100.0 * _un / _area))
+            lines.append(L("· 选区内有 %.1f%% 的像素既不像漆膜也不像基材（未分类，不计入分子分母）。"
+                           "如果那片其实是亮处/暗处的漆膜，再吸一个「漆膜」点把它们收进来，否则脱落率会偏高。",
+                           "· %.1f%% of the pixels in the region match neither coat nor substrate "
+                           "(unclassified, excluded from both numerator and denominator). If that area is "
+                           "really coating under different light, sample one more coat point to include it — "
+                           "otherwise the removal percentage reads high.",
+                           100.0 * _un / _area))
     except Exception:
         pass
     if tot.get("thist"):
         seg = " | ".join(("%d-%dpx %.0f%%" % (a[0], a[1], a[3])) if a[1] < 10 ** 5
                          else ("≥%dpx %.0f%%" % (a[0], a[3])) for a in tot["thist"])
-        lines.append("露底厚度：%s" % seg)
+        lines.append(L("露底厚度：%s", "Bare-area thickness: %s", seg))
         thick = sum(a[3] for a in tot["thist"] if a[0] >= 7)
         if thick < 5 and tot["sub_raw"] > 0:
-            lines.append("⚠ 几乎全部露底都薄于 7px —— 这些多半是刀缝，不是掉漆。"
-                         "把「刀缝宽度/阈值」调到 7 以上再看，或换个真正的露底点重新吸色。")
+            lines.append(L("⚠ 几乎全部露底都薄于 7px —— 这些多半是刀缝，不是掉漆。"
+                           "把「刀缝宽度/阈值」调到 7 以上再看，或换个真正的露底点重新吸色。",
+                           "⚠ Nearly all bare pixels are thinner than 7px — most of them are cuts, "
+                           "not coating removal. Raise the cut-width threshold above 7 and look again, "
+                           "or sample a real bare spot instead."))
 
     if detail:
-        lines.append("—— 诊断明细 ——")
+        lines.append(L("—— 诊断明细 ——", "— diagnostics —"))
         for i, st in enumerate(rows, 1):
             a = max(1, st["area"])
             cut = max(0, st["sub_raw"] - st["sub_open"])
-            lines.append("R%d 面积 %d px｜漆膜 %.1f%%  露底 %.1f%%  刀缝排除 %.1f%%  "
-                         "过渡 %.1f%%  未分类 %.1f%%"
-                         % (i, st["area"], 100.0 * st["coat_px"] / a,
-                            100.0 * st["sub_open"] / a, 100.0 * cut / a,
-                            100.0 * st["trans"] / a, 100.0 * st["unassigned"] / a))
+            lines.append(L("R%d 面积 %d px｜漆膜 %.1f%%  露底 %.1f%%  刀缝排除 %.1f%%  "
+                           "过渡 %.1f%%  未分类 %.1f%%",
+                           "R%d area %d px | coat %.1f%%  bare %.1f%%  cut-excluded %.1f%%  "
+                           "blend %.1f%%  unclassified %.1f%%",
+                           i, st["area"], 100.0 * st["coat_px"] / a,
+                           100.0 * st["sub_open"] / a, 100.0 * cut / a,
+                           100.0 * st["trans"] / a, 100.0 * st["unassigned"] / a))
         raw = (100.0 * tot["sub_raw"] / (tot["coat_px"] + tot["sub_raw"])
                if (tot["coat_px"] + tot["sub_raw"]) else 0)
-        lines.append("合计 漆膜 %d px / 基材 %d px；不排除刀缝时 %.2f%%"
-                     % (tot["coat_px"], tot["sub_raw"], raw))
+        lines.append(L("合计 漆膜 %d px / 基材 %d px；不排除刀缝时 %.2f%%",
+                       "Total: coat %d px / substrate %d px; %.2f%% without cut exclusion",
+                       tot["coat_px"], tot["sub_raw"], raw))
         if tot["trans"]:
-            lines.append("过渡带（漆/基材混色，已排除）%d px，占选区 %.1f%%"
-                         % (tot["trans"], 100.0 * tot["trans"] / max(1, tot["area"])))
+            lines.append(L("过渡带（漆/基材混色，已排除）%d px，占选区 %.1f%%",
+                           "Blend band (coat/substrate mixing, excluded) %d px, %.1f%% of the region",
+                           tot["trans"], 100.0 * tot["trans"] / max(1, tot["area"])))
         if tot["n_line"]:
-            lines.append("按形状识别线状刀缝 %d 段，排除 %.0f%% 的露底面积"
-                         % (tot["n_line"], 100.0 * tot["line_area"] / max(1, tot["sub_raw"])))
-        lines.append("容差敏感性：%.1f%% ~ %.1f%%（容差 %.0f~%.0f）"
-                     % (lo, hi, tol * 0.75, tol * 1.25))
+            lines.append(L("按形状识别线状刀缝 %d 段，排除 %.0f%% 的露底面积",
+                           "Shape-based cut detection: %d strands, %.0f%% of bare area excluded",
+                           tot["n_line"], 100.0 * tot["line_area"] / max(1, tot["sub_raw"])))
+        lines.append(L("容差敏感性：%.1f%% ~ %.1f%%（容差 %.0f~%.0f）",
+                       "Tolerance sensitivity: %.1f%% ~ %.1f%% (tol %.0f~%.0f)",
+                       lo, hi, tol * 0.75, tol * 1.25))
         if diag:
-            lines.append("色差分布：中位 %.0f / 90分位 %.0f / 99分位 %.0f；%s"
-                         % (diag["q50"], diag["q90"], diag["q99"], diag["sweep"]))
+            lines.append(L("色差分布：中位 %.0f / 90分位 %.0f / 99分位 %.0f；%s",
+                           "Colour distance: median %.0f / p90 %.0f / p99 %.0f; %s",
+                           diag["q50"], diag["q90"], diag["q99"], diag["sweep"]))
 
     if auto_warn:
         lines.append(auto_warn.strip())
     if purity <= 0.505 and int(line_px) <= 1 and tot["sub_raw"] > 0:
-        lines.append("⚠ 纯度 0.50（不剔除过渡带）＋未排除刀缝：刀缝本身的露底会算进脱落，结果偏高。"
-                     "本工具合成样图实测 13.6% 会读成 15.3%，足以把 3B 顶成 2B —— "
-                     "要么到「量尺」页量一条真刀缝填进阈值，要么把纯度提到 0.75 左右。")
+        lines.append(L("⚠ 纯度 0.50（不剔除过渡带）＋未排除刀缝：刀缝本身的露底会算进脱落，结果偏高。"
+                       "本工具合成样图实测 13.6% 会读成 15.3%，足以把 3B 顶成 2B —— "
+                       "要么到「量尺」页量一条真刀缝填进阈值，要么把纯度提到 0.75 左右。",
+                       "⚠ Purity 0.50 (blend band kept) with no cut exclusion: the bare pixels inside the "
+                       "cuts themselves count as removal, so the result reads high. On the built-in synthetic "
+                       "sample 13.6% reads as 15.3% — enough to turn 3B into 2B. Either measure a real cut "
+                       "on the ruler tab and set the threshold, or raise purity to about 0.75."))
     if cc.astm_class(lo) != cc.astm_class(hi):
-        lines.append("⚠ 这一档不稳：容差稍动就会在 %s ~ %s 之间跳。"
-                     % (cc.astm_class(lo), cc.astm_class(hi)))
+        lines.append(L("⚠ 这一档不稳：容差稍动就会在 %s ~ %s 之间跳。",
+                       "⚠ This grade is not stable: a small tolerance change flips it between %s and %s.",
+                       cc.astm_class(lo), cc.astm_class(hi)))
     unass = 100.0 * tot["unassigned"] / max(1, tot["area"])
     if unass > 12:
-        lines.append("⚠ 未分类 %.0f%%：容差偏小或颜色取样不全（多吸一两个漆膜明暗档）" % unass)
+        lines.append(L("⚠ 未分类 %.0f%%：容差偏小或颜色取样不全（多吸一两个漆膜明暗档）",
+                       "⚠ Unclassified %.0f%%: tolerance too small or colours under-sampled "
+                       "(sample one or two more coat shades)",
+                       unass))
     if tot["sub_raw"] > 0 and tot["sub_open"] < 0.2 * tot["sub_raw"]:
         thick_share = None
         if tot.get("thist"):
             thick_share = sum(a[3] for a in tot["thist"] if a[0] >= 7)
         if thick_share is None or thick_share >= 5:
             raw = 100.0 * tot["sub_raw"] / max(1, tot["coat_px"] + tot["sub_raw"])
-            lines.append("⚠ 刀缝阈值 %d px 可能太大：把细小的脱落也抹掉了（原始 %.1f%% → 现在 %.1f%%）"
-                         % (line_px, raw, pct))
+            lines.append(L("⚠ 刀缝阈值 %d px 可能太大：把细小的脱落也抹掉了（原始 %.1f%% → 现在 %.1f%%）",
+                           "⚠ Cut threshold %d px may be too large: it also erases small removal "
+                           "(raw %.1f%% → now %.1f%%)",
+                           line_px, raw, pct))
     return lines
 
 
@@ -1294,9 +1378,13 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
     else:
         rois_v = []
     if not samples:
-        return {"ok": False, "reason": "请先吸两个颜色：①完好漆膜 ②露底基材", "meta": _meta(sess, side)}
+        return {"ok": False, "reason": L("请先吸两个颜色：①完好漆膜 ②露底基材",
+                                         "Sample two colours first: (1) intact coating (2) exposed substrate"),
+                "meta": _meta(sess, side)}
     if cc.ROLE_COAT not in roles or cc.ROLE_SUB not in roles:
-        return {"ok": False, "reason": "颜色角色不完整：至少需要一个「漆膜」和一个「基材」。",
+        return {"ok": False, "reason": L("颜色角色不完整：至少需要一个「漆膜」和一个「基材」。",
+                                             "Incomplete colour roles: at least one coat and one substrate "
+                                             "sample are required."),
                 "meta": _meta(sess, side)}
 
     shape2 = work["lab"].shape[:2]
@@ -1349,10 +1437,11 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
         mv = mind[m_all]
         if mv.size:
             q = np.percentile(mv, [50, 90, 99])
-            parts = ["容差%.0f→未分类%.0f%%" % (req.tol * k, 100.0 * (mv > req.tol * k).mean())
+            parts = [L("容差%.0f→未分类%.0f%%", "tol%.0f→unclassified %.0f%%",
+                       req.tol * k, 100.0 * (mv > req.tol * k).mean())
                      for k in (0.6, 1.0, 1.5, 2.0)]
             diag = {"q50": float(q[0]), "q90": float(q[1]), "q99": float(q[2]),
-                    "sweep": "，".join(parts)}
+                    "sweep": L("，", ", ").join(parts)}
 
     lines = _lines_for(rows, tot, pct, req.tol, lo, hi, req.line_px, req.detail, diag,
                        auto_warn, req.purity)
@@ -1384,20 +1473,32 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
                                     req.mode, False, px_out)
             if (req.mode == "width" and 0.15 < pct_k < 5.0 and pct_k2 < 0.6 * pct_k
                     and cc.astm_class(pct_k) != cc.astm_class(pct_k2)):
-                lines.append("· 按建议 k=%d 排完还剩 %.2f%%（%s），几乎都卡在划线交叉点上；"
-                             "交叉点比缝身宽 2 px 左右，把 k 提到 %d 就变 %.2f%%（%s）。"
-                             "肉眼判级更接近后者。" % (sug, pct_k, cc.astm_class(pct_k),
-                                                     min(60, sug + 2), pct_k2, cc.astm_class(pct_k2)))
+                lines.append(L("· 按建议 k=%d 排完还剩 %.2f%%（%s），几乎都卡在划线交叉点上；"
+                               "交叉点比缝身宽 2 px 左右，把 k 提到 %d 就变 %.2f%%（%s）。"
+                               "肉眼判级更接近后者。",
+                               "· With the suggested k=%d, %.2f%% (%s) is left, almost all of it on cut "
+                               "intersections: an intersection is about 2 px wider than the cut itself, so "
+                               "raising k to %d gives %.2f%% (%s). Eyeballing matches the latter.",
+                               sug, pct_k, cc.astm_class(pct_k),
+                               min(60, sug + 2), pct_k2, cc.astm_class(pct_k2)))
         except Exception:
             pass
         if pct_k <= 0.05 * max(1e-9, pct):
             if not ruler_full:
                 sug, sug_src = None, ""
-                lines.append("· 露底厚度分布推不出可信的刀缝阈值（按它的建议排完只剩 %.2f%%，等于把真实"
-                             "脱落一起删了），请到「量尺」页量一条刀缝。" % pct_k)
+                lines.append(L("· 露底厚度分布推不出可信的刀缝阈值（按它的建议排完只剩 %.2f%%，等于把真实"
+                               "脱落一起删了），请到「量尺」页量一条刀缝。",
+                               "· The bare-thickness distribution gives no trustworthy cut threshold "
+                               "(excluding by its suggestion leaves %.2f%%, i.e. real removal is deleted "
+                               "too) — measure a cut on the ruler tab.",
+                               pct_k))
             else:
-                lines.append("· 注意：按量尺全宽排完只剩 %.2f%%——这张图的脱落比刀缝还细，刀缝阈值"
-                             "别照建议用（或改用「逐块确认」一块块看）。" % pct_k)
+                lines.append(L("· 注意：按量尺全宽排完只剩 %.2f%%——这张图的脱落比刀缝还细，刀缝阈值"
+                               "别照建议用（或改用「逐块确认」一块块看）。",
+                               "· Note: excluding by the measured full width leaves only %.2f%% — here the "
+                               "removal is finer than the cuts, so do not follow the suggestion (or review "
+                               "block by block instead).",
+                               pct_k))
 
     # 局部宽度口径：厚度只能取偶数（2×3×3 腐蚀步数），刀缝在 6MP 下常常只有 2~4 px，
     # 于是"排除到 2"还是"排除到 4"就决定了几倍差别 —— 直接给区间，别假装有精确值。
@@ -1407,11 +1508,15 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
             if den_local > 0:
                 alt_pct = 100.0 * tot["loc_alt_open"] / den_local
                 med = tot.get("loc_med")
-                lines.append("· 局部宽度对参数敏感：因子 %.1f → %.2f%%（%s），因子 2.2 → %.2f%%（%s）。"
-                             "这个区间就是这张图的分辨极限%s —— 真值多半在中间，别只读一个数。"
-                             % (float(getattr(req, "loc_factor", 1.6)), pct, cc.astm_class(pct),
-                                alt_pct, cc.astm_class(alt_pct),
-                                "（基线缝宽中位 %.1f px）" % med if med else ""))
+                lines.append(L("· 局部宽度对参数敏感：因子 %.1f → %.2f%%（%s），因子 2.2 → %.2f%%（%s）。"
+                               "这个区间就是这张图的分辨极限%s —— 真值多半在中间，别只读一个数。",
+                               "· Local width is parameter-sensitive: factor %.1f → %.2f%% (%s), factor 2.2 "
+                               "→ %.2f%% (%s). That span is the resolution limit of this image%s — the truth "
+                               "is usually in between; do not read a single number.",
+                               float(getattr(req, "loc_factor", 1.6)), pct, cc.astm_class(pct),
+                               alt_pct, cc.astm_class(alt_pct),
+                               L("（基线缝宽中位 %.1f px）", " (median baseline cut width %.1f px)") % med
+                               if med else ""))
         except Exception:
             pass
 
@@ -1433,8 +1538,10 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
             "px_out": round(px_out, 4),                # 视图 px → wire px
             "k_px": int(k_view),                       # 实际用于开运算的视图像素
             "k_wire": int(req.line_px),
-            "note": ("已启用「选区原生像素」：只分析框内 %.2f MP，未降采样（k 仍按画布/6MP 口径）"
-                     % (view.work["size"][0] * view.work["size"][1] / 1e6)) if view.native else "",
+            "note": (L("已启用「选区原生像素」：只分析框内 %.2f MP，未降采样（k 仍按画布/6MP 口径）",
+                       "native-region pixels enabled: only %.2f MP inside the box is analysed, no "
+                       "downscaling (k still in canvas/6MP units)",
+                       view.work["size"][0] * view.work["size"][1] / 1e6)) if view.native else "",
         },
         "rows": [_row_out(st) | {"astm": cc.astm_class(st["pct"]),
                                  "iso": _iso_class(st["pct"]),
@@ -1456,7 +1563,7 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
         },
         "thist": tot.get("thist"),
         "sensitivity": {"lo": lo, "hi": hi, "lo_cls": cc.astm_class(lo), "hi_cls": cc.astm_class(hi)},
-        "margin": cc.margin_hint(pct),
+        "margin": _margin_hint(pct),
         "lines": lines,
         "span": span,
         "auto_tol": _auto_tol_of(span),
@@ -1515,7 +1622,9 @@ def _soft_block(sess: Session, req) -> dict:
     labels, best, mind, t = _labels_for(sess, work, req.tol, req.purity, samples, masks,
                                         _msig(rois_v), vkey)
     if t is None:
-        return {"ok": False, "reason": "样本里缺少「漆膜」或「基材」，软权重算不了"}
+        return {"ok": False, "reason": L("样本里缺少「漆膜」或「基材」，软权重算不了",
+                                             "A coat or substrate sample is missing — soft weighting "
+                                             "cannot run")}
     k = max(1, int(round(view.len_in(req.line_px))))
     shape2 = labels.shape[:2]
     masks = _masks(shape2, rois_v) if rois_v else [np.ones(shape2, bool)]
@@ -2009,9 +2118,11 @@ def knee(req: KneeReq):
         if sig:
             cur, prev, d = sig[-1]
             best_a = cur
-            why_a = ("k=%d：再降到 %d，露底会从 %.2f%% 涨到 %.2f%%（+%.2f 个百分点，块数 %d→%d）；"
-                     "再往上调就只是慢慢收缩" % (cur["k"], prev["k"], cur["pct"], prev["pct"], d,
-                                                 cur["n"], prev["n"]))
+            why_a = L("k=%d：再降到 %d，露底会从 %.2f%% 涨到 %.2f%%（+%.2f 个百分点，块数 %d→%d）；"
+                      "再往上调就只是慢慢收缩",
+                      "k=%d: one step down to %d makes the bare area jump from %.2f%% to %.2f%% "
+                      "(+%.2f pp, blocks %d→%d); going up only shrinks slowly",
+                      cur["k"], prev["k"], cur["pct"], prev["pct"], d, cur["n"], prev["n"])
 
     # 判据二（count）：块数 低→峰值→第二高→回落。
     #   ① 找块数峰值（它标志刀缝被拆开的那一刻）；
@@ -2031,19 +2142,22 @@ def knee(req: KneeReq):
         if peak > 0:
             k0 = next((i for i in range(pk + 1, len(levels)) if levels[i]["n"] <= 0.25 * peak), None)
             if k0 is None:
-                why_c = "块数一直没从峰值 %d 回落到 25%% 以内" % peak
+                why_c = L("块数一直没从峰值 %d 回落到 25%% 以内",
+                          "the block count never falls back within 25%% of the peak %d", peak)
             else:
                 i = k0
                 # 「进这一档」的露底跌幅 = 上一档 - 本档；还在大跌说明没走平，继续往下一档
                 while i + 1 < len(levels) and (levels[i - 1]["pct"] - levels[i]["pct"]) >= 2.0:
                     i += 1
                 best_c = levels[i]
-                why_c = ("块数峰值 %d（k=%d）→ 第一档回落到 25%%（≤%.0f 块）是 k=%d（%d 块）；"
-                         "再看露底：进这一档掉了 %.2f 个百分点，%s → 取 k=%d（%d 块，露底 %.2f%%）"
-                         % (peak, levels[pk]["k"], 0.25 * peak, levels[k0]["k"], levels[k0]["n"],
-                            (levels[k0 - 1]["pct"] - levels[k0]["pct"]) if k0 else 0.0,
-                            "继续降" if i != k0 else "已经走平",
-                            levels[i]["k"], levels[i]["n"], levels[i]["pct"]))
+                why_c = L("块数峰值 %d（k=%d）→ 第一档回落到 25%%（≤%.0f 块）是 k=%d（%d 块）；"
+                          "再看露底：进这一档掉了 %.2f 个百分点，%s → 取 k=%d（%d 块，露底 %.2f%%）",
+                          "peak %d blocks (k=%d) → first step within 25%% (≤%.0f blocks) is k=%d (%d blocks); "
+                          "bare area drops %.2f pp into it, %s → using k=%d (%d blocks, bare %.2f%%)",
+                          peak, levels[pk]["k"], 0.25 * peak, levels[k0]["k"], levels[k0]["n"],
+                          (levels[k0 - 1]["pct"] - levels[k0]["pct"]) if k0 else 0.0,
+                          L("继续降", "still falling") if i != k0 else L("已经走平", "levelled off"),
+                          levels[i]["k"], levels[i]["n"], levels[i]["pct"])
     # 块数回落没找到台阶 → 回落到「露底厚度分布」（和按宽度模式取初值是同一个来源）。
     # 只在 count 判据失败时触发，那 5 条标定记录走的还是原路径，不受影响。
     k_from = "rule"
@@ -2059,16 +2173,26 @@ def knee(req: KneeReq):
             pct1 = rows[0]["pct"] if rows else 0.0
             cand = next((x for x in rows if x["k"] >= int(sug)), rows[-1] if rows else None)
             if cand is not None and cand["pct"] <= 0.05 * max(1e-9, pct1):
-                why_sug = "；但按建议 k=%d 排完只剩 %.2f%%（会把真实脱落一起删掉），不给" % (cand["k"], cand["pct"])
+                why_sug = L("；但按建议 k=%d 排完只剩 %.2f%%（会把真实脱落一起删掉），不给",
+                            "; but excluding at the suggested k=%d leaves only %.2f%% (real removal deleted), "
+                            "so it is not offered", cand["k"], cand["pct"])
                 sug = None
         if sug and sug > 1:
             cand = next((x for x in rows if x["k"] >= int(sug)), rows[-1])
             best_c = cand
             k_from = "suggest"
-            why_c = ("%s；改用露底厚度分布给的建议 k=%d（%s，露底 %.2f%%）。"
-                     "这只是个兜底值，建议在曲线上点一档确认。" % (why_c or "块数没回落", cand["k"], sug_src or "按露底厚度", cand["pct"]))
+            why_c = L("%s；改用露底厚度分布给的建议 k=%d（%s，露底 %.2f%%）。"
+                      "这只是个兜底值，建议在曲线上点一档确认。",
+                      "%s; fell back to the bare-thickness suggestion k=%d (%s, bare %.2f%%). "
+                      "That is only a fallback — confirm it by clicking a row on the curve.",
+                      why_c or L("块数没回落", "block count did not step down"),
+                      cand["k"], L(sug_src, ({"按露底厚度": "from bare thickness",
+                                              "量尺全宽": "from the measured full width"}.get(sug_src, sug_src))) or L("按露底厚度", "from bare thickness"),
+                      cand["pct"])
         else:
-            why_c = (why_c or "块数没回落") + (why_sug or "；露底厚度分布也给不出可信阈值")
+            why_c = (why_c or L("块数没回落", "block count did not step down")) + \
+                    (why_sug or L("；露底厚度分布也给不出可信阈值",
+                                  "; the bare-thickness distribution gives no trustworthy threshold"))
 
     pick = best_c if req.rule == "count" else best_a
     return {"ok": True, "rows": rows, "k_from": k_from,
@@ -2200,7 +2324,7 @@ def _auto_detect(sess: Session, work, rois):
         m = np.ones(shape2, bool)
     idx_all = np.flatnonzero(m)
     if idx_all.size < 500:
-        return None, "选区太小"
+        return None, L("选区太小", "region too small")
     step = max(1, idx_all.size // 20000)
     idx = idx_all[::step]
     lab = lab_all.reshape(-1, 3)[idx]
@@ -2244,11 +2368,13 @@ def _auto_detect(sess: Session, work, rois):
     inner = [k for k in ranked if edge_frac.get(k, 0.0) <= 0.5 and dist[k] >= 10]
     sub = inner[0] if inner else (ranked[0] if dist[ranked[0]] >= 10 else None)
     if sub is None:
-        return None, "两类颜色差得太少（<10）"
+        return None, L("两类颜色差得太少（<10）", "the two colours are too close (<10)")
     warn = ""
     if edge_frac.get(sub, 0.0) > 0.6:
-        warn = ("⚠ 选中的露底颜色占了选区边缘的大半，很可能是背景。"
-                "把框框紧一点，或取消半自动手动改色。")
+        warn = L("⚠ 选中的露底颜色占了选区边缘的大半，很可能是背景。"
+                 "把框框紧一点，或取消半自动手动改色。",
+                 "⚠ The colour picked as substrate covers most of the region border — it is probably the "
+                 "background. Frame tighter, or turn off semi-auto and sample colours by hand.")
 
     def to_rgb(k):
         v = np.clip(rgb_means[k], 0, 255)
@@ -2335,10 +2461,16 @@ async def autorun(req: AutoReq):
                         keep = res["total"]["pct"]
                         base.line_px = 1
                         res2 = _analyze_core(sess, base, auto_warn=got["warn"])
-                        note = ("⚠ 按建议的 %d px 排除刀缝后只剩 %.2f%%（不可信：等于把真实脱落"
-                                "也当刀缝删掉了），已先关掉刀缝排除，当前 %.2f%%。"
-                                "这张图的脱落比刀缝还细，请到「量尺」页量一条真刀缝再手动填阈值；"
-                                "或者别用自动建议。" % (v, bad, keep))
+                        note = L("⚠ 按建议的 %d px 排除刀缝后只剩 %.2f%%（不可信：等于把真实脱落"
+                                 "也当刀缝删掉了），已先关掉刀缝排除，当前 %.2f%%。"
+                                 "这张图的脱落比刀缝还细，请到「量尺」页量一条真刀缝再手动填阈值；"
+                                 "或者别用自动建议。",
+                                 "⚠ Excluding cuts at the suggested %d px leaves only %.2f%% (not "
+                                 "trustworthy: real removal is being deleted as cuts), so cut exclusion is "
+                                 "switched off and the current result is %.2f%%. Here the removal is finer "
+                                 "than the cuts — measure a real cut on the ruler tab and enter the "
+                                 "threshold by hand, or do not use the automatic suggestion.",
+                                 v, bad, keep)
                     res = res2
                 res["samples"] = got["samples"]
                 res["ignored"] = got.get("ignored") or []
@@ -2376,7 +2508,7 @@ async def pick(req: PickReq):
             h, w = rgb.shape[:2]
             x, y = int(round(req.x)), int(round(req.y))
             if not (0 <= x < w and 0 <= y < h):
-                return {"ok": False, "reason": "点在图像外"}
+                return {"ok": False, "reason": L("点在图像外", "That point is outside the image")}
             r = 5
             y0, y1 = max(0, y - r), min(h, y + r + 1)
             x0, x1 = max(0, x - r), min(w, x + r + 1)
@@ -2389,21 +2521,23 @@ async def pick(req: PickReq):
                            axis=1)
                 k = int(np.argmax(d))
                 c = [int(v) for v in patch[k]]
-                note = "（与本块其他色差 %.0f，取最纯的一点）" % d[k]
+                note = L("（与本块其他色差 %.0f，取最纯的一点）",
+                         " (colour distance %.0f from the others in this patch; took the purest pixel)", d[k])
             else:
                 c = [int(v) for v in np.median(patch, axis=0)]
-                note = "（本块中位色）"
+                note = L("（本块中位色）", " (median colour of this patch)")
             role = cc.ROLE_COAT if not samples else (
                 cc.ROLE_SUB if len(samples) == 1 else cc.ROLE_COAT)
             for i, s in enumerate(samples):
                 if max(abs(s["rgb"][0] - c[0]), abs(s["rgb"][1] - c[1]),
                        abs(s["rgb"][2] - c[2])) <= 3:
-                    return {"ok": False, "reason": "这个颜色已经取过了（第 %d 个）" % (i + 1),
+                    return {"ok": False, "reason": L("这个颜色已经取过了（第 %d 个）",
+                                                     "This colour is already sampled (sample %d)", i + 1),
                             "samples": samples}
             samples.append({"rgb": c, "role": role})
             span = _span_of(samples)
             return {"ok": True, "samples": samples, "rgb": c,
-                    "role_name": cc.ROLE_NAME[role], "note": note, "span": span,
+                    "role_name": _role_name(role), "note": note, "span": span,
                     "auto_tol": _auto_tol_of(span)}
 
     return await run_in_threadpool(run)
@@ -2430,7 +2564,9 @@ async def ruler(req: RulerReq):
                 res = cc.measure_line_width(work["rgb"], tuple(req.p0), tuple(req.p1))
                 fw = _profile_full_width(work["rgb"], tuple(req.p0), tuple(req.p1))
             if res is None:
-                return {"ok": False, "reason": "没测到明显的沟槽：让线段垂直于刀缝、长度 30px 以上"}
+                return {"ok": False, "reason": L("没测到明显的沟槽：让线段垂直于刀缝、长度 30px 以上",
+                                             "No clear groove measured: keep the segment perpendicular to "
+                                             "the cut and at least 30 px long")}
             res["width_full"] = res["width_px"] if req.on_full else res["width_px"] * scale
             res["width_analysis"] = (res["width_px"] / scale) if req.on_full else res["width_px"]
             # 全宽同样换算到两个尺度
@@ -2472,18 +2608,23 @@ def _csv_bytes(sess, req):
     import csv
     out = io.StringIO()
     wr = csv.writer(out)
-    units = "原生" if view.native else "分析图"
-    wr.writerow(["ROI", "x0", "y0", "x1", "y1",
-                 "面积px(%s)" % units, "漆膜px(%s)" % units, "基材px(%s)" % units,
-                 "未分类px(%s)" % units, "脱落%(原始)", "脱落%(忽略细线)", "ASTM", "ISO", "分析源"])
-    src = "选区原生" if view.native else "整图6MP"
+    units = L("原生", "native") if view.native else L("分析图", "analysis")
+    hdr = [L("面积px(%s)", "area px (%s)") % units,
+           L("漆膜px(%s)", "coat px (%s)") % units,
+           L("基材px(%s)", "substrate px (%s)") % units,
+           L("未分类px(%s)", "unclassified px (%s)") % units,
+           L("脱落%(原始)", "removal %% (raw)"),
+           L("脱落%(忽略细线)", "removal %% (cuts excluded)"),
+           "ASTM", "ISO", L("分析源", "analysis source")]
+    wr.writerow(["ROI", "x0", "y0", "x1", "y1"] + hdr)
+    src = L("选区原生", "native region") if view.native else L("整图6MP", "full image 6MP")
     for i, st in enumerate(rows, 1):
         r = rois[i - 1]["box"] if i - 1 < len(rois) else [0, 0, 0, 0]
         wr.writerow([i, round(r[0]), round(r[1]), round(r[2]), round(r[3]), st["area"],
                      st["coat_px"], st["sub_raw"], st["unassigned"],
                      round(st["pct_raw"], 2), round(st["pct"], 2),
                      cc.astm_class(st["pct"]), _iso_class(st["pct"]), src])
-    wr.writerow(["合计", "", "", "", "", tot["area"], tot["coat_px"], tot["sub_raw"],
+    wr.writerow([L("合计", "Total"), "", "", "", "", tot["area"], tot["coat_px"], tot["sub_raw"],
                  "", "", round(pct, 2), cc.astm_class(pct), _iso_class(pct), src])
     return ("\ufeff" + out.getvalue()).encode("utf-8")
 
@@ -2714,14 +2855,14 @@ class SaveReq(BaseModel):
 
 def _rec_dir(rid: str) -> str:
     if not rid or "/" in rid or ".." in rid:
-        raise HTTPException(400, "记录号不合法")
+        raise HTTPException(400, L("记录号不合法", "Invalid record id"))
     return os.path.join(RECORDS, rid)
 
 
 def _rec_json(rid: str) -> dict:
     p = os.path.join(_rec_dir(rid), "record.json")
     if not os.path.exists(p):
-        raise HTTPException(404, "记录不存在")
+        raise HTTPException(404, L("记录不存在", "Record not found"))
     with open(p, encoding="utf-8") as f:
         return json.load(f)
 
@@ -2757,11 +2898,13 @@ def records_save(req: SaveReq):
     sess = get_session(req.id)
     names = [n for n in os.listdir(RECORDS) if os.path.isdir(os.path.join(RECORDS, n))]
     if len(names) >= MAX_RECORDS:
-        raise HTTPException(409, "记录已满（%d 条），请先删掉一些" % MAX_RECORDS)
+        raise HTTPException(409, L("记录已满（%d 条），请先删掉一些",
+                                       "Record limit reached (%d) — delete some first", MAX_RECORDS))
     try:
         free_mb = shutil.disk_usage(RECORDS).free / 1e6
         if free_mb < RECORD_MIN_FREE_MB:
-            raise HTTPException(507, "服务器剩余空间只有 %.0f MB，先别存了" % free_mb)
+            raise HTTPException(507, L("服务器剩余空间只有 %.0f MB，先别存了",
+                                       "Only %.0f MB left on the server — stop saving for now", free_mb))
     except HTTPException:
         raise
     except Exception:
@@ -2876,7 +3019,7 @@ def records_list():
 def records_thumb(rid: str):
     p = os.path.join(_rec_dir(rid), "thumb.jpg")
     if not os.path.exists(p):
-        raise HTTPException(404, "没有缩略图")
+        raise HTTPException(404, L("没有缩略图", "No thumbnail"))
     return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
 
 
@@ -2884,7 +3027,7 @@ def records_thumb(rid: str):
 def records_view(rid: str):
     p = os.path.join(_rec_dir(rid), "view.jpg")
     if not os.path.exists(p):
-        raise HTTPException(404, "没有存档图")
+        raise HTTPException(404, L("没有存档图", "No archived image"))
     return FileResponse(p, media_type="image/jpeg")
 
 
@@ -2892,7 +3035,7 @@ def records_view(rid: str):
 def records_view_png(rid: str):
     p = os.path.join(_rec_dir(rid), "view.png")
     if not os.path.exists(p):
-        raise HTTPException(404, "没有存档图")
+        raise HTTPException(404, L("没有存档图", "No archived image"))
     return FileResponse(p, media_type="image/png")
 
 
@@ -2907,7 +3050,7 @@ def records_open(rid: str):
             src = p
             break
     if not src:
-        raise HTTPException(404, "存档图丢了")
+        raise HTTPException(404, L("存档图丢了", "Archived image is gone"))
     sid = secrets.token_urlsafe(9)
     d = os.path.join(UPLOADS, sid)
     os.makedirs(d, exist_ok=True)
@@ -2947,16 +3090,16 @@ def records_rename(rid: str, req: RenameReq):
     """给记录改个名字（只动 record.json 的 name，图片/结果/选区一律不动）。"""
     d = _rec_dir(rid)
     if not os.path.isdir(d):
-        raise HTTPException(404, "记录不存在")
+        raise HTTPException(404, L("记录不存在", "Record not found"))
     nm = " ".join((req.name or "").replace("\n", " ").split())
     nm = "".join(ch for ch in nm if ch.isprintable())[:60]
     if not nm:
-        raise HTTPException(400, "名字不能为空（删掉重输）")
+        raise HTTPException(400, L("名字不能为空（删掉重输）", "Name cannot be blank (clear it and retype)"))
     p = os.path.join(d, "record.json")
     try:
         rec = _rec_json(rid)
     except Exception:
-        raise HTTPException(500, "读不到这条记录")
+        raise HTTPException(500, L("读不到这条记录", "This record cannot be read"))
     rec["name"] = nm
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -2969,7 +3112,7 @@ def records_rename(rid: str, req: RenameReq):
 def records_delete(rid: str):
     d = _rec_dir(rid)
     if not os.path.isdir(d):
-        raise HTTPException(404, "记录不存在")
+        raise HTTPException(404, L("记录不存在", "Record not found"))
     shutil.rmtree(d, ignore_errors=True)
     return {"ok": True, "deleted": rid,
             "total": sum(1 for n in os.listdir(RECORDS) if os.path.isdir(os.path.join(RECORDS, n)))}

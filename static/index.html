@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>百格分析 — ASTM D3359 / ISO 2409（用 DeepSeek API 开发）</title>
-<link rel="stylesheet" href="style.css?v=224">
+<link rel="stylesheet" href="style.css?v=226">
 </head>
 <body>
 <div class="topbar">
@@ -172,6 +172,19 @@
 
     <div class="pane" id="pane-ruler">
       <div id="kneeWarn" class="warnband" style="display:none;margin:0 0 8px"></div>
+      <div class="guide" id="guideRuler">
+        <div class="ghead">
+          <b data-i18n="guide.h">怎么用（3 步）</b>
+          <button class="gx" id="guideRulerX" type="button" data-i18n-tip="guide.close.tip"
+                  title="不再显示这条说明">×</button>
+        </div>
+        <ol class="glist">
+          <li data-i18n="g.ruler.1">在图上垂直于刀缝横着拖一小段（≥30 屏幕像素），松手后会显示这条缝的半高宽和全宽。</li>
+          <li data-i18n="g.ruler.2">点下面「用测量值」，阈值 k 会按全宽 + 1 自动填好；也可以直接点 k 曲线表里的某一档手改。</li>
+          <li data-i18n="g.ruler.3">不想量也行：判法选「按块数回落」会自动定 k，量尺只是最快、最靠谱的一条路。</li>
+        </ol>
+        <div class="gfoot" data-i18n="g.ruler.tip">手机上先把图放大（双指）再量，否则 6 px 的缝在屏幕上只有 1 px，量出来偏小。</div>
+      </div>
       <div class="sect">
         <h4 data-i18n="ruler.h">刀缝量尺</h4>
         <div class="row tight" style="margin-bottom:6px;display:none" aria-hidden="true">
@@ -208,6 +221,19 @@
 
     <!-- ============ 块确认（默认隐藏，勾「逐块确认」才出现） ============ -->
     <div class="pane" id="pane-annot">
+      <div class="guide" id="guideAnnot">
+        <div class="ghead">
+          <b data-i18n="guide.h">怎么用（3 步）</b>
+          <button class="gx" id="guideAnnotX" type="button" data-i18n-tip="guide.close.tip"
+                  title="不再显示这条说明">×</button>
+        </div>
+        <ol class="glist">
+          <li data-i18n="g.annot.1">上面的开关勾着时，框完选区一算，程序就把检出的露底拆成块，按块号画在图上。</li>
+          <li data-i18n="g.annot.2">点某一块（编号或它的轮廓）= 把这块当刀缝排除，块会变灰打叉；再点一下恢复。</li>
+          <li data-i18n="g.annot.3">只排除其实是刀缝或脏点的块，别排除真实的掉漆。排除后数字立刻更新，保存记录会一起存。</li>
+        </ol>
+        <div class="gfoot" data-i18n="g.annot.tip">只能减不能加：自动没检出的块点不上去，那种情况要改 k 或换吸色点重算。</div>
+      </div>
       <div class="sect">
         <h4 data-i18n="annot.h">点块确认（不用画）</h4>
         <div class="row tight">
@@ -218,15 +244,14 @@
         <div class="row tight">
           <button id="bReset" class="ghost" data-i18n="annot.reset">全部恢复</button>
         </div>
-        <div class="muted" data-i18n="annot.tips">程序把检出的露底拆成块、编号画在图上。<b>点一下某块 = 标成刀缝（排除）</b>，
-          再点一下恢复。只排除“其实是刀缝/脏点”的块，不用描边、不用选笔宽。</div>
+        <div class="muted" data-i18n="annot.tips" style="margin-top:6px">点某块 = 标成刀缝排除（变灰打叉），再点一下恢复；不用描边、不用选笔宽。</div>
         <div class="muted" data-i18n="annot.ants" style="margin-top:8px;line-height:1.55;padding:6px 8px;border-left:2px solid rgba(140,148,158,.5);background:rgba(140,148,158,.07);border-radius:0 4px 4px 0">
           蚂蚁线只是画出来的：只描块的外圈、并按块大小做了简化，所以它围住的面积和块的像素数不完全相等
           （一般差 1~3%，带孔的大块偏大、细碎小块偏小）。<b>判级、百分比、排除都按像素数算，与轮廓无关</b>，不影响结果。</div>
       </div>
       <div class="sect">
         <h4 data-i18n="block.h">块列表</h4>
-        <div class="roilist" id="blockList"><div class="empty" data-i18n="block.empty">还没列出。先「列出露底块」。</div></div>
+        <div class="roilist" id="blockList"><div class="empty" data-i18n="block.empty">还没列出：勾着上面的开关、框好选区并计算后会自动列块。</div></div>
       </div>
       <div class="sect">
         <h4 data-i18n="block.info.h">确认口径</h4>
@@ -255,7 +280,7 @@
     </div>
   </aside>
 </main>
-<script src="i18n.js?v=224"></script>
-<script src="app.js?v=224"></script>
+<script src="i18n.js?v=226"></script>
+<script src="app.js?v=226"></script>
 </body>
 </html>

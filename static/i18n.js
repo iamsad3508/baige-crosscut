@@ -73,7 +73,13 @@
     'pur.tips': '这是手动判据，不是算出来的：每个像素先算「混色比 t」——离漆膜色的 Lab 距离 ÷ (离漆膜 + 离基材)，t≈0 纯漆膜、t≈0.5 一半一半（刀缝/掉漆边缘）、t≈1 纯露底。落在 (1−纯度, 纯度) 之间的像素当过渡带整个剔除，两边都不算。所以 0.50 = 完全不剔除，0.75 = 把 t 在 0.25~0.75 的混色像素都扔掉。',
     'tips.h': '参数怎么调（按顺序，别乱试）',
     'tips.body': '① 容差：先留「自动」。看结果区的未分类%——>10% 说明容差太小或颜色没吸全（亮处/暗处各吸一个漆膜）；<3% 且判定面积明显偏大，再往小调。② 露底纯度：照片有反光、刀缝发白发灰、边缘一片糊的时候才动它，常用 0.75；纯色平面图（标准示意图、扫描件）用 0.75 最稳，真实照片噪点多时 0.6~0.8。③ 刀缝阈值：最靠得住的办法是量一条刀缝 → 用测量值；没有量尺就看「露底厚度」分布——如果 1-3px 占一半以上，说明刀缝没删干净，往外调 2~3。验证：容差 ±25% 结果不跨档、换一组吸色点结果不变，这个数才算能用。',
+    'guide.h': '怎么用（3 步）',
+    'guide.close.tip': '不再显示这条说明',
     'ruler.h': '刀缝量尺',
+    'g.ruler.1': '在图上垂直于刀缝横着拖一小段（≥30 屏幕像素），松手后会显示这条缝的半高宽和全宽。',
+    'g.ruler.2': '点下面「用测量值」，阈值 k 会按全宽 + 1 自动填好；也可以直接点 k 曲线表里的某一档手改。',
+    'g.ruler.3': '不想量也行：判法选「按块数回落」会自动定 k，量尺只是最快、最靠谱的一条路。',
+    'g.ruler.tip': '手机上先把图放大（双指）再量，否则 6 px 的缝在屏幕上只有 1 px，量出来偏小。',
     'ruler.msg': '切到这一页后，在图上垂直于刀缝横着拖一小段（30px 以上）。',
     'ruler.use': '用测量值',
     'ruler.mean': '用平均值',
@@ -84,13 +90,17 @@
     'mode.width': '按露底分布',
     'mode.tip': '按块数回落：自动扫 k，按块数峰谷定刀缝（默认）。按露底分布：按露底厚度分布给一个阈值，你可以随时手改，比阈值粗的算脱落。',
     'annot.h': '点块确认（不用画）',
+    'g.annot.1': '上面的开关勾着时，框完选区一算，程序就把检出的露底拆成块，按块号画在图上。',
+    'g.annot.2': '点某一块（编号或它的轮廓）= 把这块当刀缝排除，块会变灰打叉；再点一下恢复。',
+    'g.annot.3': '只排除其实是刀缝或脏点的块，别排除真实的掉漆。排除后数字立刻更新，保存记录会一起存。',
+    'g.annot.tip': '只能减不能加：自动没检出的块点不上去，那种情况要改 k 或换吸色点重算。',
     'annot.chk': '图上显示块号',
     'annot.chk.tip': '勾上：算完就自动列块并把块号、轮廓画在图上（调参数会实时更新）；取消：不显示、也不去算，省一次运算',
     'annot.reset': '全部恢复',
-    'annot.tips': '程序把检出的露底拆成块、编号画在图上。点一下某块 = 标成刀缝（排除），再点一下恢复。只排除“其实是刀缝/脏点”的块，不用描边、不用选笔宽。',
+    'annot.tips': '点某块 = 标成刀缝排除（变灰打叉），再点一下恢复；不用描边、不用选笔宽。',
     'annot.ants': '蚂蚁线只是画出来的：只描块的外圈、并按块大小做了简化，所以它围住的面积和块的像素数不完全相等（一般差 1~3%，带孔的大块偏大、细碎小块偏小）。判级、百分比、排除都按像素数算，与轮廓无关，不影响结果。',
     'block.h': '块列表',
-    'block.empty': '还没列出。先「列出露底块」。',
+    'block.empty': '还没列出：勾着上面的开关、框好选区并计算后会自动列块。',
     'block.info.h': '确认口径',
     'res.h': '结果',
     'res.save': '保存到记录',
@@ -173,7 +183,13 @@
     'pur.tips': 'This is a manual criterion, not a computed one: each pixel gets a mixing ratio t = distance to coating ÷ (distance to coating + distance to substrate). t≈0 pure coating, t≈0.5 half-and-half (cuts, flaking edges), t≈1 pure substrate. Pixels inside (1−purity, purity) are dropped as a transition band and counted on neither side. So 0.50 removes nothing, 0.75 drops everything with t between 0.25 and 0.75.',
     'tips.h': 'How to tune (in this order)',
     'tips.body': '① Tolerance: keep “auto”. Check unclassified% — above 10% means the tolerance is too small or a colour is missing (pick coating in both bright and dark areas); below 3% with an obviously inflated area, lower it. ② Purity: only touch it with glare, washed-out cuts or blurred edges; 0.75 is the usual value, and is safest for flat artwork/scans (0.6–0.8 for noisy photos). ③ Cut threshold: the most reliable way is to measure one cut → use the measured value; without a ruler look at the exposure-thickness histogram — if 1-3 px dominates, cuts are not fully removed, raise by 2–3. Verify: result must not cross a grade at tolerance ±25%, and must not change with a second set of samples.',
+    'guide.h': 'How to use (3 steps)',
+    'guide.close.tip': "Don't show this again",
     'ruler.h': 'Cut ruler',
+    'g.ruler.1': 'Drag a short segment across a cut, perpendicular to it (≥30 screen px). On release you get the half-max width and the full width of that cut.',
+    'g.ruler.2': 'Click “Use measurement” below: the threshold k is filled in as full width + 1. You can also click any row of the k table to set it by hand.',
+    'g.ruler.3': 'Measuring is optional: with the “by block count” method k is found automatically. The ruler is just the fastest and most reliable route.',
+    'g.ruler.tip': 'On a phone, zoom in (two fingers) before measuring — otherwise a 6 px cut is only 1 px on screen and reads too small.',
     'ruler.msg': 'On this tab, drag a short stroke (30 px or more) perpendicular to a cut.',
     'ruler.use': 'Use measured',
     'ruler.mean': 'Use average',
@@ -184,13 +200,17 @@
     'mode.width': 'By exposure distribution',
     'mode.tip': 'By block count: scans k automatically and finds the cut width at the block-count peak/fall (default). By exposure distribution: suggests a threshold from the exposed-thickness histogram; you can override it any time.',
     'annot.h': 'Block review (no drawing)',
+    'g.annot.1': 'While the switch above is on, every analysis splits the detected bare areas into blocks and draws them with numbers on the image.',
+    'g.annot.2': 'Click a block (its number or outline) = treat it as a cut and exclude it; it turns grey with a cross. Click again to restore.',
+    'g.annot.3': 'Only exclude blocks that really are cuts or dirt, not real coating removal. Numbers update immediately and are stored with the record.',
+    'g.annot.tip': 'Subtract only — a block the detector missed cannot be added; in that case change k or pick another colour sample and recalculate.',
     'annot.chk': 'Show block numbers',
     'annot.chk.tip': 'On: after each calculation blocks are listed and their numbers/outlines drawn (updates live); off: nothing is computed or drawn',
     'annot.reset': 'Restore all',
-    'annot.tips': 'Detected exposed areas are split into numbered blocks. Click a block = mark it as a cut (exclude it); click again to restore. Only exclude blocks that are really cuts or dirt — no drawing, no brush width.',
+    'annot.tips': 'Click a block = exclude it as a cut (turns grey, crossed out); click again to restore. No drawing, no brush width.',
     'annot.ants': 'The marching ants are decorative: they trace only the outer ring and are simplified by block size, so the enclosed area does not exactly equal the pixel count (typically within 1–3%). Grades, percentages and exclusions all use pixels, not outlines.',
     'block.h': 'Block list',
-    'block.empty': 'Nothing listed yet.',
+    'block.empty': 'Nothing listed yet — with the switch above on, blocks appear automatically after you frame a region and calculate.',
     'block.info.h': 'Counting basis',
     'res.h': 'Result',
     'res.save': 'Save to records',
@@ -273,9 +293,16 @@
     });
   }
 
+  /* T(zh, en)：给 app.js 里那些一次性/带变量的文案用——不用为每句都在字典里加 key。
+     en 缺省时退回中文，缺译文不会变空白。 */
+  function T(zh, en) {
+    return (LANG === 'en' && en != null) ? en : zh;
+  }
+
   window.I18N = { lang: LANG, t: t, tf: tf, setLang: setLang, apply: applyI18n, dict: DICT };
   window.t = t;
   window.tf = tf;
+  window.T = T;
   window.setLang = setLang;
 
   if (document.readyState === 'loading') {
