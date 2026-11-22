@@ -6,7 +6,7 @@
  *   JS  ：t('btn.calc')            → 当前语言的文案（缺译文时回退中文）
  *         tf('res.row', 3, 12.5)   → 带 %s / %d 占位（用 {0} {1} 也行，见 tf）
  *
- * 语言优先级：localStorage['baige.lang'] > navigator.language（zh 开头=中文）> 英文
+ * 语言优先级：?lang=zh|en > localStorage['baige.lang'] > navigator.language（zh 开头=中文）> 英文
  * 切换语言：左上角下拉，写 localStorage 后整页刷新（比逐处重渲染稳）。
  *
  * 注意：服务端拼出来的诊断长文本、CSV 表头、PNG 标注条仍是中文（第二阶段）。
@@ -213,8 +213,15 @@
   };
 
   var DICT = { zh: ZH, en: EN };
+  // 优先级：?lang=zh|en（自测/截图用）> localStorage > navigator.language
   var saved = null;
   try { saved = localStorage.getItem('baige.lang'); } catch (e) { saved = null; }
+  var qs = '';
+  try { qs = (new URLSearchParams(location.search).get('lang') || '').toLowerCase(); } catch (e) { qs = ''; }
+  if (qs === 'zh' || qs === 'en') {
+    saved = qs;
+    try { localStorage.setItem('baige.lang', qs); } catch (e) {}
+  }
   var nav = (navigator.language || navigator.userLanguage || 'zh').toLowerCase();
   var LANG = (saved === 'zh' || saved === 'en') ? saved : (nav.indexOf('zh') === 0 ? 'zh' : 'en');
 
@@ -254,13 +261,6 @@
     location.reload();
   }
 
-  function initSel() {
-    var sel = document.getElementById('selLang');
-    if (!sel) return;
-    sel.value = LANG;
-    sel.addEventListener('change', function () { setLang(this.value); });
-  }
-
   function tf(key) {
     var args = Array.prototype.slice.call(arguments, 1);
     return String(t(key)).replace(/\{(\d+)\}/g, function (m, i) {
@@ -274,8 +274,8 @@
   window.setLang = setLang;
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function () { applyI18n(); initSel(); });
+    document.addEventListener('DOMContentLoaded', function () { applyI18n(); });
   } else {
-    applyI18n(); initSel();
+    applyI18n();
   }
 })();
