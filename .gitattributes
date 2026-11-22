@@ -1,6 +1,8 @@
-# Windows 批处理必须是 CRLF，否则 cmd.exe 会把行拆错（曾把 chcp 65001 拆成 '65001' 报错）
-*.bat   text eol=crlf
-*.cmd   text eol=crlf
+# Windows 批处理必须是 CRLF，否则 cmd.exe 会把行拆错（曾把 chcp 65001 拆成 '65001' 报错）。
+# 用 -text（而不是 text eol=crlf）：这样 blob 里存的就是 CRLF 字节，
+# GitHub 的 "Download ZIP" 不做换行转换，用户下到 zip 里也还是 CRLF。
+*.bat   -text
+*.cmd   -text
 # 壳脚本必须 LF，否则 /bin/sh 会报 $'\r': command not found
 *.sh      text eol=lf
 *.command text eol=lf
