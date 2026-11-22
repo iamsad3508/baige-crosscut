@@ -4,90 +4,91 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>百格分析 — ASTM D3359 / ISO 2409（用 DeepSeek API 开发）</title>
-<link rel="stylesheet" href="style.css?v=210">
+<link rel="stylesheet" href="style.css?v=222">
 </head>
 <body>
 <div class="topbar">
-  <div class="brand">百格分析<small>ASTM D3359 · ISO 2409</small></div>
-  <span class="devcredit" title="本工具的代码与判定逻辑由 DeepSeek API 辅助开发">用 DeepSeek API 开发</span>
-  <button id="btnOpen">打开图片</button>
+  <div class="brand"><span data-i18n="brand.name">百格分析</span><small>ASTM D3359 · ISO 2409</small></div>
+  <span class="devcredit" data-i18n="devcredit" data-i18n-tip="devcredit.tip" title="本工具的代码与判定逻辑由 DeepSeek API 辅助开发">用 DeepSeek API 开发</span>
+  <button id="btnOpen" data-i18n="btn.open">打开图片</button>
   <input id="fileInput" type="file" accept="image/*,.dng,.DNG,.raw,.cr2,.nef,.arw" hidden>
-  <button id="btnCalc" class="primary">▶ 计算</button>
-  <button id="btnCsv">导出 CSV</button>
-  <button id="btnPng">导出标注图</button>
-  <button id="btnRec">记录 <span id="recCount" class="cnt">0</span></button>
-  <label class="switch" title="框完就自动吸色+定阈值+出结果（不可盲信，只当起点）">
-    <input type="checkbox" id="chkSemi" checked> 半自动
+  <button id="btnCalc" class="primary" data-i18n="btn.calc">▶ 计算</button>
+  <button id="btnCsv" data-i18n="btn.csv">导出 CSV</button>
+  <button id="btnPng" data-i18n="btn.png">导出标注图</button>
+  <button id="btnRec"><span data-i18n="btn.rec">记录</span> <span id="recCount" class="cnt">0</span></button>
+  <label class="switch" data-i18n-tip="chk.semi.tip" title="框完就自动吸色+定阈值+出结果（不可盲信，只当起点）">
+    <input type="checkbox" id="chkSemi" checked> <span data-i18n="chk.semi">半自动</span>
   </label>
 
-  <label class="switch" title="只把选区那一块按原图像素分析（不降到 6MP）：小选区更细、更快、更省内存；刀缝阈值仍按画布口径">
-    <input type="checkbox" id="chkRoiNative" checked> 选区原生
+  <label class="switch" data-i18n-tip="chk.roinative.tip" title="只把选区那一块按原图像素分析（不降到 6MP）：小选区更细、更快、更省内存；刀缝阈值仍按画布口径">
+    <input type="checkbox" id="chkRoiNative" checked> <span data-i18n="chk.roinative">选区原生</span>
   </label>
-  <label class="switch" title="勾上才显示判定余量、露底厚度分布、色差/容差敏感性、每选区像素构成等明细；关着只给总判级 + 每个选区的脱落率与判级 + 合计">
-    <input type="checkbox" id="chkDetail"> 诊断明细
+  <label class="switch" data-i18n-tip="chk.detail.tip" title="勾上才显示判定余量、露底厚度分布、色差/容差敏感性、每选区像素构成等明细；关着只给总判级 + 每个选区的脱落率与判级 + 合计">
+    <input type="checkbox" id="chkDetail"> <span data-i18n="chk.detail">诊断明细</span>
   </label>
   <div class="spacer"></div>
-  <button id="warnPill" class="warnpill" style="display:none" title="">⚠ 判法没定出 k</button>
-  <div id="summary" class="summary">—</div>
+  <button id="warnPill" class="warnpill" style="display:none" title="" data-i18n="pill.knee">⚠ 判法没定出 k</button>
 </div>
 
 <div id="drawer" class="drawer">
-  <div class="dhead">记录 <span id="recStat" class="muted"></span>
+  <div class="dhead"><span data-i18n="rec.title">记录</span> <span id="recStat" class="muted"></span>
     <span class="spacer"></span>
-    <button id="recClose" class="ghost">关闭</button>
+    <button id="recClose" class="ghost" data-i18n="rec.close">关闭</button>
   </div>
-  <div id="recList" class="reclist"><div class="empty">加载中…</div></div>
-  <div class="dfoot muted">记录只有你点 × 才会从服务器删除。存档图是原始上传文件（不重新编码），重开时数字逐位一致。</div>
+  <div id="recList" class="reclist"><div class="empty" data-i18n="rec.loading">加载中…</div></div>
+  <div class="dfoot muted" data-i18n="rec.foot">记录只有你点 × 才会从服务器删除。存档图是原始上传文件（不重新编码），重开时数字逐位一致。</div>
 </div>
 <div id="scrim" class="scrim"></div>
 
 <main>
   <section class="stage">
     <div class="filebar">
-      <span id="fileName" class="name">未打开图片</span>
+      <span id="fileName" class="name" data-i18n="file.none">未打开图片</span>
       <span id="fileInfo"></span>
       <span class="spacer"></span>
-      <label class="switch" title="把分类结果显示在图上：红=露底（刀缝+脱落，原样显示），绿=完好漆膜；想区分刀缝和脱落，看「刀缝判法」和结果文字">
-        <input type="checkbox" id="chkOverlay" checked> 覆盖层
+      <div id="summary" class="summary">—</div>
+      <label class="switch" data-i18n-tip="chk.overlay.tip" title="把分类结果显示在图上：红=露底（刀缝+脱落，原样显示），绿=完好漆膜；想区分刀缝和脱落，看「刀缝判法」和结果文字">
+        <input type="checkbox" id="chkOverlay" checked> <span data-i18n="chk.overlay">覆盖层</span>
       </label>
-      <button id="btnFit" class="ghost" title="Ctrl+0 / 双击画布">适应窗口</button>
-      <button id="btnOne" class="ghost" title="Ctrl+1：1 图像像素 = 1 屏幕像素">1:1</button>
+      <button id="btnFit" class="ghost" data-i18n="btn.fit" data-i18n-tip="btn.fit.tip" title="Ctrl+0 / 双击画布">适应窗口</button>
+      <button id="btnOne" class="ghost" data-i18n="btn.one" data-i18n-tip="btn.one.tip" title="Ctrl+1：1 图像像素 = 1 屏幕像素">1:1</button>
       <span id="zoomLabel" class="zoom">—</span>
+      <select id="selLang" class="langsel" aria-label="Language"><option value="zh">中文</option><option value="en">English</option></select>
     </div>
     <div class="canvas-wrap" id="wrap">
       <canvas id="cv"></canvas>
       <div class="upwrap hide" id="upWrap">
         <div class="upbox">
-          <button class="upx" id="upCancel" title="取消上传" aria-label="取消上传">×</button>
-          <div class="uptitle" id="upTitle">上传中…</div>
+          <button class="upx" id="upCancel" data-i18n-tip="up.cancel" title="取消上传" aria-label="取消上传">×</button>
+          <div class="uptitle" id="upTitle" data-i18n="up.title">上传中…</div>
           <div class="upbar"><i id="upFill"></i></div>
           <div class="upsub" id="upSub">0%</div>
         </div>
       </div>
-      <div class="dropzone" id="drop">拖一张测试照片到这里，或点左上「打开图片」<br>
-        <span style="font-size:12px;opacity:.7">建议垂直拍摄、光照均匀；刀缝越清晰，量化越准</span></div>
+      <div class="dropzone" id="drop"><span data-i18n="drop.text">拖一张测试照片到这里，或点左上「打开图片」</span><br>
+        <span style="font-size:12px;opacity:.7" data-i18n="drop.hint">建议垂直拍摄、光照均匀；刀缝越清晰，量化越准</span></div>
       <div class="hintbox" id="hint"></div>
     </div>
   </section>
 
   <aside class="side" id="side">
-    <div class="sidehandle" id="sideHandle"><span>参数与结果</span>
+    <div class="sidehandle" id="sideHandle"><span data-i18n="side.title">参数与结果</span>
       <span id="sideSummary" class="muted"></span><span id="sideChev">▴</span></div>
     <div class="tabs">
-      <button data-tab="roi" class="on">框选</button>
-      <button data-tab="pick">吸色</button>
-      <button data-tab="ruler">量尺</button>
-      <button data-tab="annot">块确认</button>
+      <button data-tab="roi" class="on" data-i18n="tab.roi">框选</button>
+      <button data-tab="pick" data-i18n="tab.pick">吸色</button>
+      <button data-tab="ruler" data-i18n="tab.ruler">量尺</button>
+      <button data-tab="annot" data-i18n="tab.annot">块确认</button>
     </div>
 
     <!-- ============ 框选 ============ -->
     <div class="pane on" id="pane-roi">
       <div class="sect">
-        <h4>选区</h4>
-        <div class="roilist" id="roiList"><div class="empty">还没有选区：在图上拖出划格区</div></div>
+        <h4 data-i18n="roi.h">选区</h4>
+        <div class="roilist" id="roiList"><div class="empty" data-i18n="roi.empty">还没有选区：在图上拖出划格区</div></div>
         <div class="row" style="margin-top:8px">
-          <button id="btnClearRoi">清空全部</button>
-          <span class="muted" id="roiHint">拖动框内平移 · 拖四角/四边改大小 · 右键删除</span>
+          <button id="btnClearRoi" data-i18n="roi.clear">清空全部</button>
+          <span class="muted" id="roiHint" data-i18n="roi.hint">拖动框内平移 · 拖四角/四边改大小 · 右键删除</span>
         </div>
       </div>
 
@@ -106,8 +107,8 @@
       </div>
 
       <div class="sect">
-        <h4>快捷键</h4>
-        <div class="tips">方向键微移 1px，Shift+方向键 10px；Delete 删除选中框；
+        <h4 data-i18n="roi.keys.h">快捷键</h4>
+        <div class="tips" data-i18n="roi.keys.tips">方向键微移 1px，Shift+方向键 10px；Delete 删除选中框；
           Ctrl+0 适应窗口；Ctrl+1 切 1:1；滚轮以鼠标为中心缩放；按住中键拖动平移。</div>
       </div>
     </div>
@@ -115,47 +116,47 @@
     <!-- ============ 吸色 ============ -->
     <div class="pane" id="pane-pick">
       <div class="sect">
-        <h4>颜色样本（点颜色可选中）</h4>
-        <div class="samples" id="sampleList"><div class="empty">还没有样本：图上点一下完好漆膜，再点一下露底基材</div></div>
+        <h4 data-i18n="pick.h">颜色样本（点颜色可选中）</h4>
+        <div class="samples" id="sampleList"><div class="empty" data-i18n="pick.empty">还没有样本：图上点一下完好漆膜，再点一下露底基材</div></div>
         <div class="row tight" style="margin-top:6px">
-          <button id="sCoat">设为漆膜</button>
-          <button id="sSub">设为基材</button>
+          <button id="sCoat" data-i18n="pick.coat">设为漆膜</button>
+          <button id="sSub" data-i18n="pick.sub">设为基材</button>
         </div>
       </div>
 
       <div class="sect">
-        <h4>颜色容差</h4>
+        <h4 data-i18n="tol.h">颜色容差</h4>
         <div class="row tight">
-          <span class="lab">自动容差</span>
-          <label class="switch"><input type="checkbox" id="chkAutoTol" checked> 按样本间距 × 45%</label>
+          <span class="lab" data-i18n="tol.auto">自动容差</span>
+          <label class="switch"><input type="checkbox" id="chkAutoTol" checked> <span data-i18n="tol.auto.factor">按样本间距 × 45%</span></label>
         </div>
         <div class="row">
           <input type="range" id="rngTol" min="3" max="120" step="1" value="25">
           <input type="number" id="numTol" min="3" max="120" step="1" value="25">
         </div>
-        <div class="muted" id="spanInfo">样本间距：—（先吸漆膜和基材）</div>
+        <div class="muted" id="spanInfo" data-i18n="tol.span">样本间距：—（先吸漆膜和基材）</div>
         <div class="muted" id="tolHint" style="display:none;margin-top:6px;line-height:1.55;padding:6px 8px;border-left:2px solid rgba(140,148,158,.5);background:rgba(140,148,158,.07);border-radius:0 4px 4px 0"></div>
       </div>
 
       <div class="sect">
-        <h4>露底纯度</h4>
+        <h4 data-i18n="pur.h">露底纯度</h4>
         <div class="row">
           <input type="range" id="rngPurity" min="0.5" max="0.99" step="0.01" value="0.5">
           <input type="number" id="numPurity" min="0.5" max="0.99" step="0.01" value="0.5">
         </div>
-        <div class="muted" id="purityInfo">0.50 = 不剔除过渡带</div>
-        <div class="muted">这是<b>手动判据，不是算出来的</b>：每个像素先算「混色比 t」——离漆膜色的 Lab 距离 ÷
+        <div class="muted" id="purityInfo" data-i18n="pur.info">0.50 = 不剔除过渡带</div>
+        <div class="muted" data-i18n="pur.tips">这是<b>手动判据，不是算出来的</b>：每个像素先算「混色比 t」——离漆膜色的 Lab 距离 ÷
           (离漆膜 + 离基材)，t≈0 纯漆膜、t≈0.5 一半一半（刀缝/掉漆边缘）、t≈1 纯露底。
           落在 (1−纯度, 纯度) 之间的像素当过渡带整个剔除，两边都不算。所以 0.50 = 完全不剔除，
           0.75 = 把 t 在 0.25~0.75 的混色像素都扔掉。</div>
       </div>
 
       <div class="sect">
-        <h4>参数怎么调（按顺序，别乱试）</h4>
+        <h4 data-i18n="tips.h">参数怎么调（按顺序，别乱试）</h4>
         <div class="row tight" style="margin-bottom:6px;display:none" aria-hidden="true">
           <button id="btnRec3" class="primary" title="按推荐参数算一遍">按推荐参数算一遍</button>
         </div>
-        <div class="tips">
+        <div class="tips" data-i18n="tips.body">
           <b>① 容差</b>：先留「自动」。看结果区的<b>未分类%</b>——&gt;10% 说明容差太小或颜色没吸全
           （亮处/暗处各吸一个漆膜）；&lt;3% 且判定面积明显偏大，再往小调。<br>
           <b>② 露底纯度</b>：照片有反光、刀缝发白发灰、边缘一片糊的时候才动它，常用 <b>0.75</b>；
@@ -173,31 +174,31 @@
     <div class="pane" id="pane-ruler">
       <div id="kneeWarn" class="warnband" style="display:none;margin:0 0 8px"></div>
       <div class="sect">
-        <h4>刀缝量尺</h4>
+        <h4 data-i18n="ruler.h">刀缝量尺</h4>
         <div class="row tight" style="margin-bottom:6px;display:none" aria-hidden="true">
           <button id="rZoom">放大到 100%</button>
           <button id="rFit" class="ghost">适应窗口</button>
         </div>
-        <div class="tips" id="rulerMsg">切到这一页后，在图上<b>垂直于刀缝</b>横着拖一小段（30px 以上）。</div>
+        <div class="tips" id="rulerMsg" data-i18n="ruler.msg">切到这一页后，在图上<b>垂直于刀缝</b>横着拖一小段（30px 以上）。</div>
         <div class="row" style="margin-top:6px">
-          <button id="rUse">用测量值</button>
-          <button id="rMean">用平均值</button>
-          <button id="rClear">清空</button>
+          <button id="rUse" data-i18n="ruler.use">用测量值</button>
+          <button id="rMean" data-i18n="ruler.mean">用平均值</button>
+          <button id="rClear" data-i18n="ruler.clear">清空</button>
         </div>
       </div>
 
       <div class="sect">
-        <h4>忽略细线宽度（刀缝阈值）</h4>
+        <h4 data-i18n="line.h">忽略细线宽度（刀缝阈值）</h4>
         <div class="row">
           <input type="range" id="rngLine" min="1" max="25" step="1" value="1">
           <input type="number" id="numLine" min="1" max="60" step="1" value="1">
         </div>
         <div class="row tight">
-          <label class="muted" for="selExmode" style="flex:0 0 auto">刀缝判法</label>
-          <select id="selExmode" style="flex:1 1 auto"
+          <label class="muted" for="selExmode" style="flex:0 0 auto" data-i18n="line.mode">刀缝判法</label>
+          <select id="selExmode" style="flex:1 1 auto" data-i18n-tip="mode.tip"
                   title="按块数回落：自动扫 k，按块数峰谷定刀缝（默认）。按露底分布：按露底厚度分布给一个阈值，你可以随时手改，比阈值粗的算脱落。">
-            <option value="auto_blk">按块数回落</option>
-            <option value="width">按露底分布</option>
+            <option value="auto_blk" data-i18n="mode.auto">按块数回落</option>
+            <option value="width" data-i18n="mode.width">按露底分布</option>
           </select>
         </div>
         <div class="muted" id="exmodeInfo" style="margin-top:1mm"></div>
@@ -209,51 +210,51 @@
     <!-- ============ 块确认（默认隐藏，勾「逐块确认」才出现） ============ -->
     <div class="pane" id="pane-annot">
       <div class="sect">
-        <h4>点块确认（不用画）</h4>
+        <h4 data-i18n="annot.h">点块确认（不用画）</h4>
         <div class="row tight">
-          <label class="switch" title="勾上：算完就自动列块并把块号、轮廓画在图上（调参数会实时更新）；取消：不显示、也不去算，省一次运算">
-            <input type="checkbox" id="chkBlocks" checked> 图上显示块号
+          <label class="switch" data-i18n-tip="annot.chk.tip" title="勾上：算完就自动列块并把块号、轮廓画在图上（调参数会实时更新）；取消：不显示、也不去算，省一次运算">
+            <input type="checkbox" id="chkBlocks" checked> <span data-i18n="annot.chk">图上显示块号</span>
           </label>
         </div>
         <div class="row tight">
-          <button id="bReset" class="ghost">全部恢复</button>
+          <button id="bReset" class="ghost" data-i18n="annot.reset">全部恢复</button>
         </div>
-        <div class="muted">程序把检出的露底拆成块、编号画在图上。<b>点一下某块 = 标成刀缝（排除）</b>，
+        <div class="muted" data-i18n="annot.tips">程序把检出的露底拆成块、编号画在图上。<b>点一下某块 = 标成刀缝（排除）</b>，
           再点一下恢复。只排除“其实是刀缝/脏点”的块，不用描边、不用选笔宽。</div>
-        <div class="muted" style="margin-top:8px;line-height:1.55;padding:6px 8px;border-left:2px solid rgba(140,148,158,.5);background:rgba(140,148,158,.07);border-radius:0 4px 4px 0">
+        <div class="muted" data-i18n="annot.ants" style="margin-top:8px;line-height:1.55;padding:6px 8px;border-left:2px solid rgba(140,148,158,.5);background:rgba(140,148,158,.07);border-radius:0 4px 4px 0">
           蚂蚁线只是画出来的：只描块的外圈、并按块大小做了简化，所以它围住的面积和块的像素数不完全相等
           （一般差 1~3%，带孔的大块偏大、细碎小块偏小）。<b>判级、百分比、排除都按像素数算，与轮廓无关</b>，不影响结果。</div>
       </div>
       <div class="sect">
-        <h4>块列表</h4>
-        <div class="roilist" id="blockList"><div class="empty">还没列出。先「列出露底块」。</div></div>
+        <h4 data-i18n="block.h">块列表</h4>
+        <div class="roilist" id="blockList"><div class="empty" data-i18n="block.empty">还没列出。先「列出露底块」。</div></div>
       </div>
       <div class="sect">
-        <h4>确认口径</h4>
+        <h4 data-i18n="block.info.h">确认口径</h4>
         <pre id="blockInfo" style="white-space:pre-wrap;margin:0;font-size:12px;line-height:1.55">—</pre>
       </div>
     </div>
 
     <div class="resultbox" id="resultBox">
       <div class="rgrip" id="resGrip" title="上下拖动调整结果栏高度（双击复原）"></div>
-      <div class="head">结果
+      <div class="head"><span data-i18n="res.h">结果</span>
         <span class="spacer"></span>
-        <button class="mini" id="btnSave" title="把这张图和当前参数存进「记录」，服务器不会自动删除">保存到记录</button>
+        <button class="mini" id="btnSave" data-i18n="res.save" data-i18n-tip="res.save.tip" title="把这张图和当前参数存进「记录」，服务器不会自动删除">保存到记录</button>
       </div>
       <div class="rescard">
         <div class="rescard-top">
           <div class="resbig"><span id="resBadge" class="rg">—</span>
             <span class="rpct" id="resCardPct"></span></div>
-          <button class="copybtn" id="resCopy" title="复制成表格（制表符分隔），可直接粘进 Excel 自动分列">复制</button>
+          <button class="copybtn" id="resCopy" data-i18n="res.copy" data-i18n-tip="res.copy.tip" title="复制成表格（制表符分隔），可直接粘进 Excel 自动分列">复制</button>
         </div>
         <div class="resrows" id="resCardRows"><div class="rrow"><span>—</span></div></div>
       </div>
       <div id="diagx"></div>
-      <pre id="result">打开图片 → 吸两个颜色 → 框出划格区 → 计算
-</pre>
+      <pre id="result" data-i18n="res.placeholder">打开图片 → 吸两个颜色 → 框出划格区 → 计算</pre>
     </div>
   </aside>
 </main>
-<script src="app.js?v=210"></script>
+<script src="i18n.js?v=222"></script>
+<script src="app.js?v=222"></script>
 </body>
 </html>

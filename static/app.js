@@ -982,7 +982,7 @@ async function uploadChunked(file, onProg) {
 
 async function upload(file) {
   if (!file) return;
-  setStatus('上传中…');
+  setStatus(t('res.uploading'));
   const fd = new FormData();
   fd.append('file', file);
   const mb = (file.size || 0) / 1e6;
@@ -1059,13 +1059,29 @@ function updateFileInfo() {
   const k = (S.ow / S.w);
   const an = S.analysis;
   const extra = (S.roiNative && an && an.roi_native && an.w)
-    ? ` · 选区原生 ${an.w}×${an.h}（${an.scale.toFixed(2)}× 于画布）`
+    ? ' · ' + tf('file.roinative', an.w, an.h, an.scale.toFixed(2))
     : '';
-  $('#fileInfo').textContent = (S.shrunkNote ? `⚠ ${S.shrunkNote} · ` : '') +
-    `存档 ${S.ow}×${S.oh} → 分析 ${S.w}×${S.h}（缩小 ${k.toFixed(2)}×）` +
+  $('#fileInfo').textContent = (S.shrunkNote ? `⚠ ${noteText(S.shrunkNote)} · ` : '') +
+    tf('file.info', S.ow, S.oh, S.w, S.h, k.toFixed(2)) +
     extra +
-    (Math.abs(S.rot) > 1e-6 ? ` · 旋转 ${S.rot.toFixed(1)}°` : '') +
-    (S.note ? ` · ${S.note}` : '');
+    (Math.abs(S.rot) > 1e-6 ? ' · ' + tf('file.rotated', S.rot.toFixed(1)) : '') +
+    (S.note ? ` · ${noteText(S.note)}` : '');
+}
+
+
+/* 服务端给的是中文提示（第二阶段才做服务端 i18n）：英文界面按已知形状就地翻译 */
+function noteText(s) {
+  if (!s || I18N.lang !== 'en') return s || '';
+  let m;
+  if ((m = s.match(/^已按内存上限（([\d.]+) MP）降采样分析$/)))
+    return `downscaled to the ${m[1]} MP analysis cap`;
+  if ((m = s.match(/^已启用「选区原生像素」：只分析框内 ([\d.]+) MP/)))
+    return `native ROI: analysing ${m[1]} MP inside the box, no downscaling (k stays in canvas units)`;
+  if ((m = s.match(/^已解码 DNG：点白平衡 \+ 曝光对齐（×([\d.]+)），未做锐化$/)))
+    return `DNG decoded: white balance + exposure aligned (×${m[1]}), not sharpened`;
+  if ((m = s.match(/^原图 (\d+)×(\d+)，上传时超过 (\d+) MP 上限，存档已缩到 (\d+)×(\d+)（(\d+)%）$/)))
+    return `original ${m[1]}×${m[2]} exceeded the ${m[3]} MP cap; stored at ${m[4]}×${m[5]} (${m[6]}%)`;
+  return s;
 }
 
 /* ------------------------------------------------------------------ 分析 */
@@ -1090,7 +1106,7 @@ function payload() {
 function refreshCalcBtn() {
   const b = !!(S.busy || S.blocksBusy || S.blocksDue);
   $('#btnCalc').disabled = b;
-  $('#btnCalc').textContent = b ? '计算中…' : '▶ 计算';
+  $('#btnCalc').textContent = b ? t('res.calculating') : t('btn.calc');
 }
 function setBusy(b) { S.busy = b; refreshCalcBtn(); }
 function setBlocksBusy(b) { S.blocksBusy = b; refreshCalcBtn(); }
@@ -1229,7 +1245,7 @@ async function analyze() {
   if (!S.rois.length) {                       // 选区全删了：不许拿整图凑数（会得 0B）
     S.rows = null; S.total = null; S.autoTotal = null; S.autoRows = null;
     S.lines = []; S.soft = null;
-    setResult('还没有选区：先在图上框出划格区，再计算。');
+    setResult(t('res.noRoi'));
     const sum0 = $('#summary');
     if (sum0) { sum0.textContent = '—'; sum0.className = 'summary'; }
     const bd = $('#resBadge');
@@ -1246,7 +1262,7 @@ async function analyze() {
     return;
   }
   if (!S.samples.length) {
-    setResult('请先吸两个颜色：①完好漆膜 ②露底基材\n（切到「吸色」页，在图上各点一下）');
+    setResult(t('res.needColors'));
     return;
   }
   if (S.samples.length < 2) {
@@ -1472,16 +1488,27 @@ function renderResult() {
   const w = t.worst;
   const G = w ? w.astm : t.astm;
   const B = w ? w.iso : t.iso;
+  // 顶栏胶囊只放最关键的：最差选区 + 等级；完整句子进 title（避免窄屏被省略号截断）
+  const fullTxt = w
+    ? (I18N.lang === 'en'
+        ? `worst R${w.roi} ${fmt(w.pct, 2)}% → ASTM ${w.astm} / ISO ${w.iso} (total ${fmt(t.pct, 2)}% ${t.astm}, reference only)`
+        : `${window.t('res.worst')} R${w.roi}　${window.t('res.dropPct')} ${fmt(w.pct, 2)}%  →  ASTM ${w.astm}  /  ISO ${w.iso}　（${window.t('res.total')} ${fmt(t.pct, 2)}% ${t.astm}，${window.t('res.refOnly')}）`)
+    : (I18N.lang === 'en'
+        ? `${fmt(t.pct, 2)}% → ASTM ${t.astm} / ISO ${t.iso}`
+        : `${window.t('res.dropPct')} ${fmt(t.pct, 2)}%  →  ASTM ${t.astm}  /  ISO ${t.iso}`);
   sum.textContent = w
-    ? `最差 R${w.roi}　脱落 ${fmt(w.pct, 2)}%  →  ASTM ${w.astm}  /  ISO ${w.iso}　（合计 ${fmt(t.pct, 2)}% ${t.astm}，仅参考）`
-    : `脱落 ${fmt(t.pct, 2)}%  →  ASTM ${t.astm}  /  ISO ${t.iso}`;
+    ? (I18N.lang === 'en' ? `worst R${w.roi} ${fmt(w.pct, 2)}% → ${w.astm}/${w.iso}`
+                          : `${window.t('res.worst')} R${w.roi} ${fmt(w.pct, 2)}% → ${w.astm}/${w.iso}`)
+    : (I18N.lang === 'en' ? `${fmt(t.pct, 2)}% → ${t.astm}/${t.iso}`
+                          : `${fmt(t.pct, 2)}% → ${t.astm}/${t.iso}`);
+  sum.title = fullTxt;
   sum.className = 'summary' + ((G === '0B' || G === '1B') ? ' bad' : '');
   const ss = $('#sideSummary');
   if (ss) ss.textContent = w ? `R${w.roi} ${fmt(w.pct, 2)}% ${G}` : `${fmt(t.pct, 2)}% ${G}`;
   const badge = $('#resBadge');
   if (badge) { badge.textContent = G; badge.className = 'rg ' + gcls(G); }
   const pc = $('#resCardPct');
-  if (pc) pc.textContent = w ? `R${w.roi} ${fmt(w.pct, 2)}%（最差）` : `${fmt(t.pct, 2)}% 脱落`;
+  if (pc) pc.textContent = w ? `R${w.roi} ${fmt(w.pct, 2)}%（${window.t('res.worst')}）` : `${fmt(t.pct, 2)}% ${window.t('res.dropPct')}`;
   const box = $('#resCardRows');
   if (box) {
     const rows = (S.rows || []).map((r, i) =>
@@ -1489,7 +1516,7 @@ function renderResult() {
       `<span class="rg ${gcls(r.astm)}">${r.astm || '—'}</span></div>`);
     if (rows.length > 1) {
       rows.push(`<div class="rrow" style="border-top:1px dashed var(--line);margin-top:3px;padding-top:3px">` +
-        `<span>合计</span><span>${fmt(t.pct, 2)}%</span>` +
+        `<span>${window.t('res.total')}</span><span>${fmt(t.pct, 2)}%</span>` +
         `<span class="rg ${gcls(t.astm)}">${t.astm || '—'}</span></div>`);
     }
     box.innerHTML = rows.join('') || '<div class="rrow"><span>—</span></div>';
@@ -2118,7 +2145,7 @@ async function listBlocks(silent) {
     draw(); renderBlocks();
     const n = r.rois.reduce((a, x) => a + x.blocks.length, 0);
     if (!silent) setStatus(`列出 ${n} 块`);
-    else setStatus(`已自动更新：${n} 块（点块可排除）`);
+    else setStatus(tf('status.autoBlocks', n));
   } catch (err) {
     if (!silent) setStatus('列块失败：' + err.message);
   } finally {
