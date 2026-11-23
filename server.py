@@ -2438,7 +2438,11 @@ def _auto_detect(sess: Session, work, rois):
     # 脱落率直接被算成"反数"（实测 C19：白 53% 被当漆膜 → 12.14%/3B，实际 ~60%/1B）。
     # 规则：最大的那块若近乎无彩（灰/白，彩度<8），而另有一块明显有彩（≥12）→ 后者才是有色漆膜。
     if _chroma(coat_i) < 8.0:
-        cand = [i for i in range(len(groups)) if i != coat_i and _chroma(i) >= 12.0]
+        # 有“占比下限”：一小块彩色（标签、背景杂物、反光）不能把角色抢走；
+        # 面积过半优先是默认，只有在过半的那类近乎无彩（灰/白底材）时，才让占比 ≥15% 的有彩色当漆膜。
+        _n_all = max(1, int(len(lbl)))
+        cand = [i for i in range(len(groups))
+                if i != coat_i and _chroma(i) >= 12.0 and groups[i]["w"] >= 0.15 * _n_all]
         if cand:
             coat_i = max(cand, key=lambda i: groups[i]["w"])
     others = [i for i in range(len(groups)) if i != coat_i]

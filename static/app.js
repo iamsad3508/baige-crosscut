@@ -1319,10 +1319,12 @@ async function analyze() {
     return;
   }
   // 两种判法各走各的：按块数回落 → 先扫 k；按宽度 → 只等服务器的露底分布建议值，不扫 k（免得两套规则重复算）
-  if (S.exmode === 'auto' || S.exmode === 'auto_blk') await ensureKnee();
   const my = ++S.seq;
   setBusy(true);
   try {
+    // 扫 k 曲线（按块数回落）也要算进"计算中"：这一趟要 4 秒左右，之前按钮在这段时间还写着
+    // "计算"，而后台其实已经在忙，看着像没点动。按露底分布不扫 k（只用建议值），所以那边切换及时。
+    if (S.exmode === 'auto' || S.exmode === 'auto_blk') await ensureKnee();
     const r = await post('api/analyze', payload());
     if (my !== S.seq) return;
     if (!r.ok) { setResult(r.reason || T('分析失败', 'Analysis failed')); return; }
