@@ -1414,7 +1414,7 @@ async function analyze() {
     if (S.exmode === 'width' && !S.widthTouched && !S.suggRetry) {
       const hasSug = (typeof r.suggest_px === 'number' && r.suggest_px >= 1);
       const want = hasSug ? clamp(Math.round(r.suggest_px), 1, 60) : 1;   // 拒绝给建议 → 用 1 px
-      if (!S.lineManual) markLineSrc(hasSug ? 'suggest' : 'fallback');
+      if (!S.lineManual) { markLineSrc(hasSug ? 'suggest' : 'fallback'); try { renderKnee(); } catch (_) {} }
       if (want !== S.line) {
         S.suggRetry = true;
         S.line = want;
