@@ -1144,14 +1144,16 @@ function markLineSrc(src) {
     auto:   ['自动算出', 'derived'],
     keep:   ['沿用·未算出', 'inherited (not derived)'],
     manual: ['手设', 'set by hand'],
+    suggest:['建议值·按露底', 'suggested (bare thickness)'],
+    fallback:['给不出阈值·用 1 px', 'no threshold, using 1 px'],
     ruler:  ['量尺量的', 'measured'],
     record: ['记录里的', 'from record'],
     default:['默认值·未量', 'default (never measured)'],
   };
   const x = map[S.lineSrc] || map.default;
   el.textContent = '（' + T(x[0], x[1]) + '）';
-  el.style.color = (S.lineSrc === 'keep' || S.lineSrc === 'default') ? '#d29922' : '';
-  el.title = (S.lineSrc === 'keep' || S.lineSrc === 'default')
+  el.style.color = (S.lineSrc === 'keep' || S.lineSrc === 'default' || S.lineSrc === 'fallback') ? '#d29922' : '';
+  el.title = (S.lineSrc === 'keep' || S.lineSrc === 'default' || S.lineSrc === 'fallback')
     ? T('这个宽度不是算法算出来的，请到量尺页量一条刀缝，或在 k 曲线里点一档',
         'This width was not derived — measure a cut on the ruler tab, or click a row in the k curve')
     : '';
@@ -1192,7 +1194,7 @@ function renderKnee() {
   const el = $('#kneeInfo'); if (!el) return;
   if (S.exmode === 'width') {
     // 按露底分布：不铺整张表，但必须说清「扫了没有 / 定出没有」——否则用户看到 k=1 会以为算出来了
-    const ok = S.knee && S.knee.rows && S.knee.rows.length;
+    const ok = S.knee && S.knee.rows && S.knee.rows.length && S.knee.rule === 'area';
     el.innerHTML = ok
       ? '<b>' + T('k 曲线', 'k curve') + '</b>' + T('（已扫 k=1…16，按露底分布）',
           ' (scanned k=1…16, by bare area)') + '：'
@@ -1203,8 +1205,22 @@ function renderKnee() {
                 + 'scan limit) — the current ' + S.line + ' px is inherited') + '</span>')
         + T('。要看整张表或手点一档，切到「按块数回落」。', '. Switch to “by block count” to see the whole table '
             + 'or pick a row by hand.')
-      : T('k 曲线：框好选区、吸完两个颜色就会扫一次（约 4 秒）', 'k curve: it is scanned once a region is framed '
-          + 'and two colours are sampled (~4 s)');
+      : T('按露底分布这条判法不扫 k 曲线：'
+          + (S.lineSrc === 'suggest' ? '刀缝用服务器按露底厚度给的建议值 ' + S.line + ' px（可自己改）'
+             : S.lineSrc === 'fallback' ? '服务器给不出可信阈值（照建议会把真实脱落删掉），先用 ' + S.line + ' px'
+             : S.lineSrc === 'manual' ? '刀缝用你手设的 ' + S.line + ' px'
+             : S.lineSrc === 'ruler' ? '刀缝用你量尺量的 ' + S.line + ' px'
+             : '刀缝是 ' + S.line + ' px（没量过、也不是算出来的）')
+          + '；要看整张表或手点一档，切到「按块数回落」。',
+          '“By bare area” does not scan the k curve: '
+          + (S.lineSrc === 'suggest' ? 'the cut width is the server suggestion from bare thickness, '
+                + S.line + ' px (you can change it)'
+             : S.lineSrc === 'fallback' ? 'no trustworthy threshold could be derived (following it would delete '
+                + 'real removal), so ' + S.line + ' px is used'
+             : S.lineSrc === 'manual' ? 'the cut width is your hand-set ' + S.line + ' px'
+             : S.lineSrc === 'ruler' ? 'the cut width is your measured ' + S.line + ' px'
+             : 'the cut width is ' + S.line + ' px (never measured, not derived)')
+          + '. Switch to “by block count” to see the whole table or pick a row by hand.');
     try { renderKneeWarn(); } catch (_) {}
     return;
   }
@@ -1241,7 +1257,7 @@ function renderKnee() {
 function updateKneeHint() {
   const el = $('#kneeInfo'); if (!el) return;
   if (S.knee && S.knee.rows && S.knee.rows.length) { renderKnee(); return; }
-  if (S.exmode === 'width') { el.textContent = ''; return; }      // 按宽度：不显示 k 曲线
+  if (S.exmode === 'width') { renderKnee(); return; }             // 按露底分布：统一由 renderKnee 出一句“扫没扫/定没定”
   el.innerHTML = '<span style="opacity:.65">'
     + T('k 曲线：框好选区、吸完两个颜色（或打开已有记录）就会自动扫一次（约 4 秒）；'
       + '这里会列出 k=1…16 的块数和露底，点任意一档可直接用它。',
@@ -1376,6 +1392,9 @@ async function analyze() {
     if (my !== S.seq) return;
     if (!r.ok) { setResult(r.reason || T('分析失败', 'Analysis failed')); return; }
     S.rows = r.rows; S.total = r.total; S.lines = r.lines;
+    // 每次算完都刷一次 k 面板：按露底分布这条判法不进 ensureKnee()，
+    // 不刷的话面板上留的是上一次（可能是另一种判法）的说明。
+    try { renderKnee(); } catch (_) {}
     S.analysis = r.analysis || null; updateFileInfo();
     S.autoTotal = { ...r.total, worst: r.total.worst ? { ...r.total.worst } : null };
     S.autoRows = r.rows.map(x => ({ ...x }));
@@ -1395,6 +1414,7 @@ async function analyze() {
     if (S.exmode === 'width' && !S.widthTouched && !S.suggRetry) {
       const hasSug = (typeof r.suggest_px === 'number' && r.suggest_px >= 1);
       const want = hasSug ? clamp(Math.round(r.suggest_px), 1, 60) : 1;   // 拒绝给建议 → 用 1 px
+      if (!S.lineManual) markLineSrc(hasSug ? 'suggest' : 'fallback');
       if (want !== S.line) {
         S.suggRetry = true;
         S.line = want;
@@ -2254,6 +2274,8 @@ const RETIRED_MODES = { auto: 1, shape: 1, local: 1 };
 function applyExmode(v) {
   const retired = !!RETIRED_MODES[v];
   S.exmode = (v === 'auto_blk') ? v : 'width';        // 停用的判法一律回落到按宽度
+  S.kneeWarn = '';                                    // 上一条判法的告警不能留到这一条
+  try { updateKneeHint(); } catch (_) {}               // 面板立刻换成这一条判法的说明
   const el = $('#selExmode'); if (el) el.value = S.exmode;
   if (retired && S.line > 0) {
     setStatus(T('这条记录原来用的是「' + ({ auto: '按露底突增', shape: '按形状', local: '按局部宽度' }[v])
