@@ -1218,6 +1218,12 @@ def _lines_for(rows, tot, pct, tol, lo, hi, line_px, detail, diag, auto_warn="",
         lines.append(L("合计 %5.2f%%   →  ASTM %s / ISO %s",
                        "Total %5.2f%%   →  ASTM %s / ISO %s",
                        pct, cc.astm_class(pct), _iso_class(pct)))
+    if int(tot.get("sub_raw") or 0) == 0:
+        lines.append(L("· 没检出露底（0 px）：要么漆膜完好（5B），要么基材色吸错 / 容差太小。"
+                       "先看下面「未分类」——偏高就重吸一个基材点。",
+                       "· No bare area detected (0 px): either the coating is intact (5B), or the substrate "
+                       "colour is wrong / the tolerance too small. Check the unclassified share below — "
+                       "if it is high, re-sample the substrate."))
     lines.append(_margin_hint(pct).strip())
     # 未分类占比：只有两个角色以后，亮处漆膜不该被悄悄挖掉，得让用户看见
     try:
@@ -2200,7 +2206,31 @@ def knee(req: KneeReq):
                     (why_sug or L("；露底厚度分布也给不出可信阈值",
                                   "; the bare-thickness distribution gives no trustworthy threshold"))
 
+    if best_a is None and not why_a:
+        why_a = L("曲线全程露底几乎没变化（%.2f%%~%.2f%%）：选不出台阶，通常是漆膜完好，或吸色/容差不对",
+                  "the bare area hardly changes across the whole curve (%.2f%%–%.2f%%): no step to pick, "
+                  "usually an intact coating or a colour/tolerance problem",
+                  rows[0]["pct"] if rows else 0.0, rows[-1]["pct"] if rows else 0.0)
     pick = best_c if req.rule == "count" else best_a
+    # 两种判据都没定出 k 时，给一条与判法无关的常驻提示（前端顶栏黄标 + 量尺页黄条都用它）。
+    # 以前只有 rule=count 分支会写警告，而判法=按露底分布时 rule=area → 一句提示都没有。
+    no_bare = (not rows) or all((x.get("pct") or 0.0) <= 1e-9 for x in rows)
+    warn = ""
+    if pick is None:
+        if no_bare:
+            warn = L("⚠ 没检出露底（0 px）：要么漆膜完好（5B），要么基材色吸错 / 容差太小。"
+                     "先看「未分类」占比——偏高就重吸一个基材点。",
+                     "⚠ No bare area detected (0 px): either the coating is intact (5B), or the substrate "
+                     "colour is wrong / the tolerance too small. Check the unclassified share — if it is high, "
+                     "re-sample the substrate.")
+        else:
+            warn = L("⚠ 自动定不出刀缝：块数没有台阶，露底分布也没给建议。"
+                     "这类图（大面积成片脱落，或几乎没露底）请到量尺页量一条刀缝，"
+                     "或在下面 k 曲线里手点一档——同一档内 k 取多少都不改判级。",
+                     "⚠ No cut width could be derived: the block count has no step and the bare-area "
+                     "distribution gives no suggestion. For images like this (large sheet removal, or almost "
+                     "no bare area) measure a cut on the ruler tab, or click a row in the k curve — within one "
+                     "grade band the exact k does not change the grade.")
     return {"ok": True, "rows": rows, "k_from": k_from,
             "k": pick["k"] if pick else None,
             "k_px": pick["k_view"] if pick else None,
@@ -2209,7 +2239,7 @@ def knee(req: KneeReq):
             "k_area": best_a["k"] if best_a else None,
             "why_area": why_a,
             "k_count": (best_c["k"] if (best_c and k_from == "rule") else None),
-            "why_count": why_c}
+            "why_count": why_c, "warn": warn, "no_bare": bool(no_bare)}
 
 
 # --------------------------------------------------- 手绘标注口径（v1.9）
@@ -2343,13 +2373,33 @@ def _auto_detect(sess: Session, work, rois):
             if mm.any():
                 cent[k] = lab[mm].mean(0)
     counts = np.bincount(lbl, minlength=K)
-    rgb_means = {k: rgb[lbl == k].mean(0) for k in range(K)}
-
     usable = [k for k in range(K) if counts[k] >= 0.03 * len(lbl)] or list(range(K))
-    coat = max(usable, key=lambda k: counts[k])
-    others = [k for k in usable if k != coat]
+
+    # 一个簇一组。**不要**按 ab（色彩）把"同色不同光"的簇合并：灰漆膜 + 灰白基材本来就只差明度，
+    # 合并会把两类并成一类（实测 demo 图直接报"只有一类颜色"）。代表色用**中位数**——均值会被
+    # 亮/暗两侧拉偏，正是 C19 吸成 (99,131,165) 的一半原因。
+    groups = []
+    for k in usable:
+        sel = lbl == k
+        groups.append({"keys": [k], "w": int(counts[k]),
+                       "lab": np.median(lab[sel], axis=0),
+                       "rgb": np.median(rgb[sel], axis=0)})
+
+    def _chroma(i):
+        v = groups[i]["lab"]
+        return float(np.hypot(float(v[1]), float(v[2])))
+
+    coat_i = max(range(len(groups)), key=lambda i: groups[i]["w"])
+    # 角色别只按面积定：成片脱落（或框里带进背景）时白底占多数，按面积会把基材当漆膜，
+    # 脱落率直接被算成"反数"（实测 C19：白 53% 被当漆膜 → 12.14%/3B，实际 ~60%/1B）。
+    # 规则：最大的那块若近乎无彩（灰/白，彩度<8），而另有一块明显有彩（≥12）→ 后者才是有色漆膜。
+    if _chroma(coat_i) < 8.0:
+        cand = [i for i in range(len(groups)) if i != coat_i and _chroma(i) >= 12.0]
+        if cand:
+            coat_i = max(cand, key=lambda i: groups[i]["w"])
+    others = [i for i in range(len(groups)) if i != coat_i]
     if not others:
-        return None, "只有一类颜色"
+        return None, L("只有一类颜色", "only one colour")
 
     edge_frac = {}
     try:
@@ -2364,33 +2414,34 @@ def _auto_detect(sess: Session, work, rois):
     except Exception:
         edge_frac = {}
 
-    dist = {k: float(np.linalg.norm(cent[k] - cent[coat])) for k in others}
-    ranked = sorted(others, key=lambda k: -dist[k])
-    inner = [k for k in ranked if edge_frac.get(k, 0.0) <= 0.5 and dist[k] >= 10]
-    sub = inner[0] if inner else (ranked[0] if dist[ranked[0]] >= 10 else None)
-    if sub is None:
+    eg = {gi: sum(edge_frac.get(k, 0.0) for k in g["keys"]) for gi, g in enumerate(groups)}
+    dist = {i: float(np.linalg.norm(groups[i]["lab"] - groups[coat_i]["lab"])) for i in others}
+    ranked = sorted(others, key=lambda i: -dist[i])
+    inner = [i for i in ranked if eg.get(i, 0.0) <= 0.5 and dist[i] >= 10]
+    sub_i = inner[0] if inner else (ranked[0] if dist[ranked[0]] >= 10 else None)
+    if sub_i is None:
         return None, L("两类颜色差得太少（<10）", "the two colours are too close (<10)")
     warn = ""
-    if edge_frac.get(sub, 0.0) > 0.6:
+    if eg.get(sub_i, 0.0) > 0.6:
         warn = L("⚠ 选中的露底颜色占了选区边缘的大半，很可能是背景。"
                  "把框框紧一点，或取消半自动手动改色。",
                  "⚠ The colour picked as substrate covers most of the region border — it is probably the "
                  "background. Frame tighter, or turn off semi-auto and sample colours by hand.")
 
-    def to_rgb(k):
-        v = np.clip(rgb_means[k], 0, 255)
+    def to_rgb(i):
+        v = np.clip(groups[i]["rgb"], 0, 255)
         return [int(round(x)) for x in v]
 
     # 容差只按"两类颜色的间距×0.45"定太窄：亮处/暗处的漆膜离中心本来就远，会掉进「未分类」，
     # 从分母里消失 → 脱落率虚高。改成**自校准**：取选区里每个像素到最近一色的距离的 p99，
     # 让 99% 的像素都能被认下来，再用两类颜色的间距夹住（0.30~0.80×gap）防止两边串色。
-    gap = float(np.linalg.norm(cent[coat] - cent[sub]))
-    _dmin = np.minimum(np.linalg.norm(lab - cent[coat], axis=1),
-                       np.linalg.norm(lab - cent[sub], axis=1))
+    gap = float(np.linalg.norm(groups[coat_i]["lab"] - groups[sub_i]["lab"]))
+    _dmin = np.minimum(np.linalg.norm(lab - groups[coat_i]["lab"], axis=1),
+                       np.linalg.norm(lab - groups[sub_i]["lab"], axis=1))
     tol_auto = min(0.80 * gap, max(0.30 * gap, float(np.percentile(_dmin, 99.0))))
 
-    samples = [{"rgb": to_rgb(coat), "role": cc.ROLE_COAT},
-               {"rgb": to_rgb(sub), "role": cc.ROLE_SUB}]
+    samples = [{"rgb": to_rgb(coat_i), "role": cc.ROLE_COAT},
+               {"rgb": to_rgb(sub_i), "role": cc.ROLE_SUB}]
     # v1.42：**只出两个**（漆膜 + 基材）。以前这里会把第三类颜色加成「忽略」，
     # 结果亮处的漆膜常被当成"忽略"从分母里挖掉 → 脱落率虚高。现在多余的颜色一律不进 samples，
     # 它们自然落到「未分类」（既不进分子也不进分母，但明确显示在结果里）。

@@ -1147,7 +1147,7 @@ function kneeSig() {
 }
 function renderKneeWarn() {
   const el = $('#kneeWarn');
-  const t = (S.exmode === 'width') ? '' : (S.kneeWarn || '').trim();   // 按宽度时这条不适用
+  const t = (S.kneeWarn || '').trim();   // 判法无关：没检出露底 / 两种判据都没有台阶时，任何判法都要显示
   if (el) { el.textContent = t; el.style.display = t ? 'block' : 'none'; }
   // 顶栏那个常驻小黄标：判法在「量尺」标签页里，平时看不见，别让人漏掉
   const pill = $('#warnPill');
@@ -1230,7 +1230,8 @@ async function ensureKnee(force) {
     const r = await post('api/knee', { ...payload(), mode: 'width', k_max: 16, rule });
     if (!r.ok) { setStatus(r.reason || T('自动定刀缝失败', 'Automatic cut width failed')); return false; }
     S.knee = { sig, rule, k: r.k_wire || S.line, rows: r.rows || [], why: r.why || '',
-               k_area: r.k_area, k_count: r.k_count, why_area: r.why_area, why_count: r.why_count };
+               k_area: r.k_area, k_count: r.k_count, why_area: r.why_area, why_count: r.why_count,
+               warn: r.warn || '', no_bare: !!r.no_bare };
     const autoMode = (S.exmode === 'auto' || S.exmode === 'auto_blk');
     if (r.k_wire && !S.lineManual && autoMode) {
       S.line = r.k_wire;
@@ -1271,6 +1272,9 @@ async function ensureKnee(force) {
     } else if (r.k_wire) {
       S.kneeWarn = '';
     }
+    // 服务端现在会给一条「与判法无关」的告警：没检出露底 / 两种判据都没定出 k。
+    // 以前只有 rule=count 才会写提示，判法=按露底分布（rule=area）时一句都没有。
+    if (r.warn) S.kneeWarn = r.warn;
     renderKnee();
     setStatus(!autoMode
       ? T('k 曲线已扫（自动值 k=' + (r.k_wire || '—') + '，当前按你设的宽度 ' + S.line + ' 算；点曲线任意一档可改用它）',
@@ -2201,6 +2205,7 @@ function setExmode(v) {
   applyExmode(v);
   S.lineManual = false;                                  // 只要切换判法，手改标记一律作废
   S.widthTouched = false; S.suggRetry = false;            // 新判法要能覆盖你之前设的宽度
+  S.kneeWarn = '';                                        // 换判法 = 换判据，上一条黄条的理由不一定还成立
   if (v === 'auto' || v === 'auto_blk') S.knee = null;    // 重选自动判法 = 重新扫、重新套用
   else if (v === 'width') setStatus(T('按露底分布：沿用当前 ' + S.line + ' px（手改标记已清；切回按块数回落会重新按判法定 k）',
         `By bare distribution: keeping ${S.line} px (the manual flag is cleared; switching back to block count re-derives k)`));
