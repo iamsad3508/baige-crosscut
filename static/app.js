@@ -19,7 +19,7 @@ const S = {
   mode: 'rect',
   rois: [], sel: -1,
   samples: [], selSample: -1,
-  tol: 25, purity: 0.5, line: 1, exmode: 'width', widthTouched: false, suggRetry: false,
+  tol: 25, purity: 0.5, line: 1, exmode: 'width', widthTouched: false, suggRetry: false, lineSrc: 'default',
   autoTol: true, semi: true, detail: false, showOverlay: true, softOn: false, soft: null, kneeWarn: '',
   curRid: (() => { try { return localStorage.getItem('baige.curRid') || null; } catch (_) { return null; } })(),
   roiNative: true, analysis: null,
@@ -1134,6 +1134,28 @@ function refreshCalcBtn() {
   $('#btnCalc').textContent = b ? t('res.calculating') : t('btn.calc');
 }
 function setBusy(b) { S.busy = b; refreshCalcBtn(); }
+
+/* 刀缝值从哪来：自动算的 / 沿用的 / 手设的 / 量尺量的 / 记录里的。
+   “沿用”是最容易被误当成结果的一种——算不出 k 时它就是上一次的值。 */
+function markLineSrc(src) {
+  if (src) S.lineSrc = src;
+  const el = $('#lineSrc'); if (!el) return;
+  const map = {
+    auto:   ['自动算出', 'derived'],
+    keep:   ['沿用·未算出', 'inherited (not derived)'],
+    manual: ['手设', 'set by hand'],
+    ruler:  ['量尺量的', 'measured'],
+    record: ['记录里的', 'from record'],
+    default:['默认值·未量', 'default (never measured)'],
+  };
+  const x = map[S.lineSrc] || map.default;
+  el.textContent = '（' + T(x[0], x[1]) + '）';
+  el.style.color = (S.lineSrc === 'keep' || S.lineSrc === 'default') ? '#d29922' : '';
+  el.title = (S.lineSrc === 'keep' || S.lineSrc === 'default')
+    ? T('这个宽度不是算法算出来的，请到量尺页量一条刀缝，或在 k 曲线里点一档',
+        'This width was not derived — measure a cut on the ruler tab, or click a row in the k curve')
+    : '';
+}
 function setBlocksBusy(b) { S.blocksBusy = b; refreshCalcBtn(); }
 
 /* 自动定刀缝：扫 k 曲线，取“再降 1 px 露底就突增”的上侧那一档 */
@@ -1168,7 +1190,24 @@ function goRulerTab() {
 
 function renderKnee() {
   const el = $('#kneeInfo'); if (!el) return;
-  if (S.exmode === 'width') { el.textContent = ''; try { renderKneeWarn(); } catch (_) {} ; return; }   // 按宽度：k 由你定，表不会跟着动，不显示
+  if (S.exmode === 'width') {
+    // 按露底分布：不铺整张表，但必须说清「扫了没有 / 定出没有」——否则用户看到 k=1 会以为算出来了
+    const ok = S.knee && S.knee.rows && S.knee.rows.length;
+    el.innerHTML = ok
+      ? '<b>' + T('k 曲线', 'k curve') + '</b>' + T('（已扫 k=1…16，按露底分布）',
+          ' (scanned k=1…16, by bare area)') + '：'
+        + (S.knee.derived
+            ? T('定出 k=' + S.knee.k + '，当前用的就是它', `derived k=${S.knee.k}; that is what is being used`)
+            : '<span style="color:#d29922">' + T('没定出 k（曲线一路只升不降，最大档只是扫描上限）——当前 k='
+                + S.line + ' px 是沿用的值', 'no k derived (the curve only rises, so its largest step is just the '
+                + 'scan limit) — the current ' + S.line + ' px is inherited') + '</span>')
+        + T('。要看整张表或手点一档，切到「按块数回落」。', '. Switch to “by block count” to see the whole table '
+            + 'or pick a row by hand.')
+      : T('k 曲线：框好选区、吸完两个颜色就会扫一次（约 4 秒）', 'k curve: it is scanned once a region is framed '
+          + 'and two colours are sampled (~4 s)');
+    try { renderKneeWarn(); } catch (_) {}
+    return;
+  }
   if (!S.knee || !S.knee.rows) { el.textContent = ''; return; }
   const autoNow = (S.exmode === 'auto' || S.exmode === 'auto_blk');
   // 每一行都能点：点哪档就把刀缝设成哪档，边看蚂蚁线边挑
@@ -1240,6 +1279,7 @@ async function ensureKnee(force) {
                k_area: r.k_area, k_count: r.k_count, why_area: r.why_area, why_count: r.why_count,
                warn: r.warn || '', no_bare: !!r.no_bare };
     const autoMode = (S.exmode === 'auto' || S.exmode === 'auto_blk');
+    if (!S.lineManual) markLineSrc(r.k_wire ? 'auto' : 'keep');
     if (r.k_wire && !S.lineManual && autoMode) {
       S.line = r.k_wire;
       if ($('#rngLine')) $('#rngLine').value = Math.min(25, S.line);
@@ -1718,6 +1758,7 @@ async function runSemi() {
     if (typeof r.tol === 'number') S.tol = r.tol;
     if (typeof r.line_px === 'number' && !(S.exmode === 'auto' || S.exmode === 'auto_blk')) {
       S.line = r.line_px; S.widthTouched = true;      // 半自动给的就是这张图的宽度，别再被建议值顶掉
+      markLineSrc('auto');                             // 半自动按线宽估的，算“算出来的”
       if ($('#rngLine')) $('#rngLine').value = Math.min(25, S.line);
       if ($('#numLine')) $('#numLine').value = S.line;
       try { localStorage.setItem('baige.line', String(S.line)); } catch (_) {}
@@ -1915,6 +1956,7 @@ function syncParams() {
   $('#rngTol').value = S.tol; $('#numTol').value = S.tol;
   $('#rngPurity').value = S.purity; $('#numPurity').value = S.purity;
   $('#rngLine').value = S.line; $('#numLine').value = S.line;
+  try { markLineSrc(); } catch (_) {}
   if ($('#selExmode')) $('#selExmode').value = S.exmode;   // 已撤下（只剩固定宽度一种）
   $('#selRes').value = String(S.res);
   $('#chkAutoTol').checked = S.autoTol;
@@ -2628,6 +2670,7 @@ async function openRecord(rid) {
     S.tol = rec.tol != null ? rec.tol : 25;
     S.purity = rec.purity != null ? rec.purity : 0.5;
     S.line = rec.line_px != null ? rec.line_px : 1;
+  markLineSrc(rec.line_px != null ? 'record' : 'default');
     S.widthTouched = true; S.suggRetry = false;   // 记录里的宽度就是当时的定论，别被建议值顶掉
     S.kneeWarn = rec.knee_warn || '';             // 存的时候判法没定出 k 的警告，重开还在
     applyExmode(rec.mode || 'width');        // 判法也要还原：不然重开时按当前下拉算，和存下的数字对不上
@@ -2830,6 +2873,7 @@ $('#numPurity').onchange = e => setPurity(e.target.value);
 /* 刀缝阈值 */
 function setLine(v, keepSuggest) {
   S.line = clamp(Math.round(+v), 1, 60);
+  if (!keepSuggest) markLineSrc('manual');
   if (!keepSuggest && (S.exmode === 'auto' || S.exmode === 'auto_blk')) {   // 自动判法下用户自己改线宽：以他的为准
     S.lineManual = true;
     if (S.knee && S.knee.k) setStatus(T('已按你设的刀缝 ' + S.line + ' 计算（自动值 ' + S.knee.k + '，重选「自动定刀缝」可恢复）',
@@ -2876,6 +2920,7 @@ $('#rUse').onclick = () => {
     return;
   }
   const full = S.rulerLast.full_analysis || S.rulerLast.width_analysis;
+  markLineSrc('ruler');
   applyLineFromRuler(full, full, S.rulerLast.width_analysis);
 };
 $('#rMean').onclick = () => {
@@ -2885,6 +2930,7 @@ $('#rMean').onclick = () => {
   }
   const arr = S.rulerFull.length ? S.rulerFull : S.rulerHist.map(v => v * 1.8);
   const avg = arr.reduce((a, b) => a + b, 0) / arr.length;
+  markLineSrc('ruler');
   applyLineFromRuler(avg, avg);
 };
 $('#rClear').onclick = () => {

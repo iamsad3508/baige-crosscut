@@ -2247,20 +2247,40 @@ def knee(req: KneeReq):
                   "usually an intact coating or a colour/tolerance problem",
                   rows[0]["pct"] if rows else 0.0, rows[-1]["pct"] if rows else 0.0)
     pick = best_c if req.rule == "count" else best_a
+    # 按露底分布取到扫描上限（k=k_max）= 曲线一路只升不降，这个边界值不算「定出」：
+    # 否则界面上会出现一个看着像结果的 16，用户没法分辨是算出来的还是兜底的。
+    area_boundary = (req.rule != "count" and pick is not None and int(pick["k"]) >= int(req.k_max))
+    if area_boundary:
+        pick = None
     # 两种判据都没定出 k 时，给一条与判法无关的常驻提示（前端顶栏黄标 + 量尺页黄条都用它）。
     # 以前只有 rule=count 分支会写警告，而判法=按露底分布时 rule=area → 一句提示都没有。
     no_bare = (not rows) or all((x.get("pct") or 0.0) <= 1e-9 for x in rows)
     _order = {"5B": 5, "4B": 4, "3B": 3, "2B": 2, "1B": 1, "0B": 0}
     class_span = sorted({cc.astm_class(x["pct"]) for x in rows}, key=lambda c: -_order.get(c, 0))
     same_band = len(class_span) <= 1
+    _rule_name = (L("按块数回落", "by block count") if req.rule == "count"
+                  else L("按露底分布", "by bare area"))
+    _scan = L("已扫 k=1…%d（%s）", "scanned k=1…%d (%s)", int(req.k_max), _rule_name)
     warn = ""
     if pick is None:
+        _pk, _last = None, None
+        _rows_n = [x for x in rows if isinstance(x.get("n"), (int, float))]
+        if _rows_n:
+            _pk = max(_rows_n, key=lambda x: x["n"])
+            _last = _rows_n[-1]
         if no_bare:
-            warn = L("⚠ 没检出露底（0 px）：要么漆膜完好（5B），要么基材色吸错 / 容差太小。"
-                     "先看「未分类」占比——偏高就重吸一个基材点。",
-                     "⚠ No bare area detected (0 px): either the coating is intact (5B), or the substrate "
-                     "colour is wrong / the tolerance too small. Check the unclassified share — if it is high, "
-                     "re-sample the substrate.")
+            warn = L("⚠ %s：没检出露底（0 px）——要么漆膜完好（5B），要么基材色吸错 / 容差太小。"
+                     "先看「未分类」占比，偏高就重吸一个基材点。", 
+                     "⚠ %s: no bare area detected (0 px) — either the coating is intact (5B), or the substrate "
+                     "colour is wrong / the tolerance too small. Check the unclassified share; if it is high, "
+                     "re-sample the substrate.", _scan)
+        elif area_boundary:
+            warn = L("⚠ %s：露底曲线一路只升不降，最大档 k=%d 只是扫描上限、不算台阶 → 没定出 k。"
+                     "现在沿用 k=%s px；这类图（大面积成片脱落）到量尺页量一条刀缝更稳。",
+                     "⚠ %s: the bare-area curve only rises, so the largest k=%d is just the scan limit, not a "
+                     "step — no k was derived. Keeping k=%s px; for images like this (large sheet removal) "
+                     "measuring a cut on the ruler tab is safer.",
+                     _scan, int(req.k_max), int(req.line_px))
         else:
             _span = (L("k=1…%d 全程都是 %s，k 取哪个都不改判级", "every k from 1 to %d stays %s, so the exact k "
                                                               "does not change the grade",
@@ -2268,12 +2288,17 @@ def knee(req: KneeReq):
                      else L("这条曲线跨 %s~%s（k=1…%d），k 必须用量尺定，别凭猜",
                             "the curve spans %s–%s (k=1…%d), so k has to be measured",
                             class_span[0], class_span[-1], rows[-1]["k"] if rows else 0))
-            warn = L("⚠ 自动定不出刀缝：块数没有台阶，露底分布也没给建议。"
-                     "这类图（大面积成片脱落，或几乎没露底）请到量尺页量一条刀缝，或在下面 k 曲线里手点一档——%s。",
-                     "⚠ No cut width could be derived: the block count has no step and the bare-area "
-                     "distribution gives no suggestion. For images like this (large sheet removal, or almost no "
-                     "bare area) measure a cut on the ruler tab, or click a row in the k curve — %s.",
-                     _span)
+            _cnt = (L("块数峰值 %d 块（k=%d），到 k=%d 还有 %d 块，要 ≤%d 才算回落；露底分布也没给出建议",
+                      "block count peaks at %d (k=%d) and is still %d at k=%d (needs ≤%d to count as a fall); "
+                      "the bare distribution gives no suggestion",
+                      _pk["n"], _pk["k"], _last["k"], _last["n"], max(1, int(round(_pk["n"] * 0.25)))
+                      if isinstance(_pk, dict) and _last else 0)
+                    if (_pk and _last) else
+                    L("块数一直没回落，露底分布也没给出建议", "no fall in block count, no bare suggestion"))
+            warn = L("⚠ %s：%s → 没定出 k。现在沿用 k=%s px；请到量尺页量一条刀缝，或在 k 曲线里手点一档——%s。",
+                     "⚠ %s: %s — no k was derived. Keeping k=%s px; measure a cut on the ruler tab, or click a "
+                     "row in the k curve — %s.",
+                     _scan, _cnt, int(req.line_px), _span)
     return {"ok": True, "rows": rows, "k_from": k_from,
             "k": pick["k"] if pick else None,
             "k_px": pick["k_view"] if pick else None,
