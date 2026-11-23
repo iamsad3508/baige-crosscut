@@ -1591,11 +1591,11 @@ function renderResult() {
   if (box) {
     const rows = (S.rows || []).map((r, i) =>
       `<div class="rrow"><span>R${i + 1}</span><span>${fmt(r.pct, 2)}%</span>` +
-      `<span class="rg ${gcls(r.astm)}">${r.astm || '—'}</span></div>`);
+      `<span class="rg ${unrel ? 'gq' : gcls(r.astm)}">${unrel ? '—' : (r.astm || '—')}</span></div>`);
     if (rows.length > 1) {
       rows.push(`<div class="rrow" style="border-top:1px dashed var(--line);margin-top:3px;padding-top:3px">` +
         `<span>${window.t('res.total')}</span><span>${fmt(t.pct, 2)}%</span>` +
-        `<span class="rg ${gcls(t.astm)}">${t.astm || '—'}</span></div>`);
+        `<span class="rg ${unrel ? 'gq' : gcls(t.astm)}">${unrel ? '—' : (t.astm || '—')}</span></div>`);
     }
     box.innerHTML = rows.join('') || '<div class="rrow"><span>—</span></div>';
   }
