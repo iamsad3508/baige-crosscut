@@ -274,9 +274,11 @@ function drawBlockAnts() {
   ctx.setLineDash([4, 4]);
   B.rois.forEach((r, ri) => {
     r.blocks.forEach(b => {
-      const ol = b.outline;
-      if (!ol || ol.length < 2) return;
       const ex = B.excluded[ri].has(b.i);
+      // 外轮廓 + 每个孔：只画外圈的话，成片脱落里那些“没掉干净的岛”一个都不描（用户说的"覆盖不到洞"）
+      const polys = [b.outline].concat(b.holes || []);
+      polys.forEach(ol => {
+      if (!ol || ol.length < 2) return;
       const sp = ol.map(p => toScreen(p[0], p[1]));
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       for (const q of sp) { x0 = Math.min(x0, q.x); y0 = Math.min(y0, q.y); x1 = Math.max(x1, q.x); y1 = Math.max(y1, q.y); }
@@ -298,6 +300,7 @@ function drawBlockAnts() {
       ctx.strokeStyle = ex ? 'rgba(200,200,206,.55)' : 'rgba(255,255,255,.95)';
       ctx.lineDashOffset = -S.ants + 4;
       ctx.stroke();
+      });                                    // polys.forEach
     });
   });
   ctx.restore();

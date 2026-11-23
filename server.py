@@ -1931,38 +1931,63 @@ def _poly_area(loop):
     return abs(s) / 2.0
 
 
-def _trace_outline(mask, eps=None):
-    """块的**外轮廓**（mask 局部坐标，浮点，首尾不重复）。
+HOLE_MIN_AREA = 40.0     # 视图口径像素²：比这更小的孔描出来全是噪点，画上去只会糊成一片
+HOLE_MAX = int(os.environ.get("BAIGE_HOLE_MAX", "200"))  # 每块最多描这么多孔（按面积从大到小取；实测 40→200 只多 5 KB）
 
-    轮廓只用来画蚂蚁线，不参与任何数值计算；但形状要对：沿像素边描，
-    多边形面积与「块像素数 − 孔洞像素数」严格相等，所以蚂蚁线正好压在块边界上。
-    """
-    ys, xs = np.nonzero(mask)
-    if not len(ys):
-        return []
-    if eps is None:      # 小块要准（屏幕上就几十像素），大块可以粗（点数少一半，画得快）
-        eps = 1.0 if len(ys) < 5000 else 1.8
-    loops = _crack_loops(mask)
-    if not loops:
-        return [(float(xs.min()), float(ys.min())), (float(xs.max() + 1), float(ys.min())),
-                (float(xs.max() + 1), float(ys.max() + 1)), (float(xs.min()), float(ys.max() + 1))]
-    best = max(loops, key=_poly_area)
-    pts = [(float(x), float(y)) for (x, y) in best]
+
+def _simplify_pts(pts, eps):
+    """折线抽稀（RDP）。首尾不重复；抽完太小就返回空。"""
+    pts = [(float(x), float(y)) for (x, y) in pts]
     if len(pts) > 3 and pts[0] == pts[-1]:
         pts = pts[:-1]
     if len(pts) < 3:
-        return [(float(xs.min()), float(ys.min())), (float(xs.max() + 1), float(ys.min())),
-                (float(xs.max() + 1), float(ys.max() + 1)), (float(xs.min()), float(ys.max() + 1))]
-    k = min(len(pts) // 2, max(1, int(np.argmax([abs(p[0] - pts[0][0]) + abs(p[1] - pts[0][1]) for p in pts]))))
+        return []
+    k = min(len(pts) // 2, max(1, int(np.argmax([abs(q[0] - pts[0][0]) + abs(q[1] - pts[0][1])
+                                                 for q in pts]))))
     out = _rdp(pts[:k + 1], eps)[:-1] + _rdp(pts[k:], eps)
-    _bx = [p[0] for p in out]; _by = [p[1] for p in out]
-    if len(out) < 3 or (max(_bx) - min(_bx)) < 1.5 or (max(_by) - min(_by)) < 1.5:
-        return [(float(xs.min()), float(ys.min())), (float(xs.max() + 1), float(ys.min())),
-                (float(xs.max() + 1), float(ys.max() + 1)), (float(xs.min()), float(ys.max() + 1))]
-    if os.environ.get("BAIGE_TRACE_DEBUG"):
-        print("TRACE loops=%d raw=%d rdp=%d px=%d poly=%.0f" %
-              (len(loops), len(pts), len(out), int(mask.sum()), _poly_area(best)), flush=True)
+    bx = [q[0] for q in out]; by = [q[1] for q in out]
+    if len(out) < 3 or (max(bx) - min(bx)) < 1.5 or (max(by) - min(by)) < 1.5:
+        return []
     return [(round(float(x), 1), round(float(y), 1)) for x, y in out]
+
+
+def _trace_loops(mask, eps=None):
+    """块的全套轮廓：(外轮廓, [孔轮廓...])，mask 局部坐标、浮点、首尾不重复。
+
+    以前只回外轮廓——一块成片脱落里那几十上百个“没掉干净的岛”，蚂蚁线只在外圈绕一圈，
+    中间的洞一个都不描（用户看着就是“覆盖不到那些洞”）。
+    `_crack_loops` 本来就把所有环都算出来了，孔是白捡的：多花的只是抽稀 + 序列化。
+    """
+    ys, xs = np.nonzero(mask)
+    if not len(ys):
+        return [], []
+    if eps is None:      # 小块要准（屏幕上就几十像素），大块可以粗（点数少一半，画得快）
+        eps = 1.0 if len(ys) < 5000 else 1.8
+    loops = _crack_loops(mask)
+    box = [(float(xs.min()), float(ys.min())), (float(xs.max() + 1), float(ys.min())),
+           (float(xs.max() + 1), float(ys.max() + 1)), (float(xs.min()), float(ys.max() + 1))]
+    if not loops:
+        return [(round(x, 1), round(y, 1)) for x, y in box], []
+    loops = sorted(loops, key=_poly_area, reverse=True)
+    outer = _simplify_pts(loops[0], eps) or [(round(x, 1), round(y, 1)) for x, y in box]
+    holes = []
+    if os.environ.get("BAIGE_NO_HOLES"):     # 对比实测用：关掉孔洞，只留外轮廓
+        return outer, []
+    for lp in loops[1:HOLE_MAX + 1]:
+        if _poly_area(lp) < HOLE_MIN_AREA:
+            break                                  # 已按面积降序：后面的更小，直接停
+        simple = _simplify_pts(lp, eps)
+        if simple:
+            holes.append(simple)
+    if os.environ.get("BAIGE_TRACE_DEBUG"):
+        print("TRACE loops=%d outer=%d holes=%d hole_pts=%d px=%d" %
+              (len(loops), len(outer), len(holes), sum(len(h) for h in holes), int(mask.sum())), flush=True)
+    return outer, holes
+
+
+def _trace_outline(mask, eps=None):
+    """只要外轮廓（旧接口，导出/兼容用）。"""
+    return _trace_loops(mask, eps)[0]
 
 
 def _contour_png(keep, samples, view, req):
@@ -2064,12 +2089,16 @@ def blocks(req: BlocksReq):
                 bx0, by0 = view.to_wire(x0 + c0, y0 + r0)
                 bx1, by1 = view.to_wire(x1 + 1 + c0, y1 + 1 + r0)
                 sub_b = kept[y0:y1 + 1, x0:x1 + 1]
-                ol = [view.to_wire(px + x0 + c0, py + y0 + r0)
-                      for (px, py) in _trace_outline(sub_b)]
+                _outer, _holes = _trace_loops(sub_b)
+                ol = [view.to_wire(px + x0 + c0, py + y0 + r0) for (px, py) in _outer]
+                holes_w = [[[round(x, 1), round(y, 1)]
+                            for (x, y) in [view.to_wire(px + x0 + c0, py + y0 + r0)
+                                           for (px, py) in h]] for h in _holes]
                 bl.append({"i": i, "area": a, "cx": round(wx, 1), "cy": round(wy, 1),
                            "box": [int(round(bx0)), int(round(by0)),
                                    int(round(bx1)), int(round(by1))],
-                           "outline": [[round(x, 1), round(y, 1)] for (x, y) in ol]})
+                           "outline": [[round(x, 1), round(y, 1)] for (x, y) in ol],
+                           "holes": holes_w})
             if _prof: print("PROF roi %.0f ms (含 trace/outline)" % ((time.time() - _th) * 1000), flush=True)
             out.append({"A": int(m.sum()), "kept": int(kept.sum()), "denom": coat_px + sub_raw,
                         "coat": coat_px, "sub_raw": sub_raw,
