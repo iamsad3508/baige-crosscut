@@ -1179,8 +1179,13 @@ function renderKnee() {
       + (on ? '▶ ' : '&nbsp;&nbsp;') + 'k=' + String(r.k).padStart(2) + T('   块 ', '  blocks ')
       + String(r.n).padStart(3) + T('   露底 ', '  bare ') + r.pct.toFixed(2) + '%</div>';
   }).join('');
+  const label = (S.exmode === 'auto_blk') ? T('按块数回落', 'By block count') : T('按露底分布', 'By bare area');
   el.innerHTML = (autoNow
-      ? '<b>' + T('按块数回落：k=', 'By block count: k=') + S.knee.k + '</b>' + T('（', ' (') + (S.knee.why || '') + T('）', ')')
+      ? (S.knee.derived
+          ? '<b>' + label + T('：k=', ': k=') + S.knee.k + '</b>' + T('（', ' (') + (S.knee.why || '') + T('）', ')')
+          : '<b style="color:#d29922">' + label + T('：没定出 k</b>', ': no k could be derived</b>')
+            + T('（', ' (') + (S.knee.why || '') + T('）—— 下面 ▶ 是沿用的 ' + S.line + ' px，不是算出来的',
+                ') — the ▶ row below is the inherited ' + S.line + ' px, not a derived value'))
       : '<b>' + T('k 曲线', 'k curve') + '</b>' + T('（自动值 k=' + (S.knee.k || '—') + '，当前按你设的宽度 ' + S.line + ' 算；点下面任意一档就改用它）',
           ` (auto k=${S.knee.k || '—'}, currently using your width ${S.line}; click any row below to switch to it)`))
     + '<div style="margin-top:6px;font-size:11.5px;line-height:1.5">' + rows + '</div>'
@@ -1229,7 +1234,9 @@ async function ensureKnee(force) {
     setStatus(T('自动定刀缝：正在扫 k=1…15（约 4 秒）…', 'Auto cut width: scanning k=1…15 (~4 s)…'));
     const r = await post('api/knee', { ...payload(), mode: 'width', k_max: 16, rule });
     if (!r.ok) { setStatus(r.reason || T('自动定刀缝失败', 'Automatic cut width failed')); return false; }
-    S.knee = { sig, rule, k: r.k_wire || S.line, rows: r.rows || [], why: r.why || '',
+    // derived=false 表示算法没定出 k：这时表里 ▶ 那档只是"当前沿用"的宽度，
+    // 别把它印成"按块数回落：k=8"，否则看着像算出来的（用户就是被这个骗到）。
+    S.knee = { sig, rule, k: r.k_wire || null, derived: !!r.k_wire, rows: r.rows || [], why: r.why || '',
                k_area: r.k_area, k_count: r.k_count, why_area: r.why_area, why_count: r.why_count,
                warn: r.warn || '', no_bare: !!r.no_bare };
     const autoMode = (S.exmode === 'auto' || S.exmode === 'auto_blk');
