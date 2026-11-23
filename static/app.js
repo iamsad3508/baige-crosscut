@@ -1551,6 +1551,7 @@ function renderResult() {
   const w = t.worst;
   const G = w ? w.astm : t.astm;
   const B = w ? w.iso : t.iso;
+  const unrel = (t.credible === false);     // 参数不可信：不给等级（未分类>12% 或漆膜<5%）
   // 顶栏胶囊只放最关键的：最差选区 + 等级；完整句子进 title（避免窄屏被省略号截断）
   const fullTxt = w
     ? (I18N.lang === 'en'
@@ -1559,19 +1560,33 @@ function renderResult() {
     : (I18N.lang === 'en'
         ? `${fmt(t.pct, 2)}% → ASTM ${t.astm} / ISO ${t.iso}`
         : `${window.t('res.dropPct')} ${fmt(t.pct, 2)}%  →  ASTM ${t.astm}  /  ISO ${t.iso}`);
-  sum.textContent = w
+  const baseSum = w
     ? (I18N.lang === 'en' ? `worst R${w.roi} ${fmt(w.pct, 2)}% → ${w.astm}/${w.iso}`
                           : `${window.t('res.worst')} R${w.roi} ${fmt(w.pct, 2)}% → ${w.astm}/${w.iso}`)
     : (I18N.lang === 'en' ? `${fmt(t.pct, 2)}% → ${t.astm}/${t.iso}`
                           : `${fmt(t.pct, 2)}% → ${t.astm}/${t.iso}`);
-  sum.title = fullTxt;
+  sum.textContent = unrel ? T('⚠ 参数不可信（' + fmt(t.pct, 2) + '%，等级仅供参考）',
+                              '⚠ Parameters unreliable (' + fmt(t.pct, 2) + '%, grade for reference only)')
+                          : baseSum;
+  sum.title = (unrel && t.unreliable) ? (t.unreliable + '\n' + fullTxt) : fullTxt;
   sum.className = 'summary' + ((G === '0B' || G === '1B') ? ' bad' : '');
   const ss = $('#sideSummary');
-  if (ss) ss.textContent = w ? `R${w.roi} ${fmt(w.pct, 2)}% ${G}` : `${fmt(t.pct, 2)}% ${G}`;
+  if (ss) ss.textContent = unrel ? T('参数不可信', 'unreliable')
+                                 : (w ? `R${w.roi} ${fmt(w.pct, 2)}% ${G}` : `${fmt(t.pct, 2)}% ${G}`);
+  // 保险一：输入不可信（未分类过高 / 漆膜占比过低）→ 徽章不给等级，免得 0B 被当真（unrel 在函数上方声明）
   const badge = $('#resBadge');
-  if (badge) { badge.textContent = G; badge.className = 'rg ' + gcls(G); }
+  if (badge) {
+    if (unrel) {
+      badge.textContent = '—';
+      badge.className = 'rg gq';
+      badge.title = t.unreliable || T('参数不可信', 'unreliable parameters');
+    } else {
+      badge.textContent = G; badge.className = 'rg ' + gcls(G); badge.title = '';
+    }
+  }
   const pc = $('#resCardPct');
-  if (pc) pc.textContent = w ? `R${w.roi} ${fmt(w.pct, 2)}%（${window.t('res.worst')}）` : `${fmt(t.pct, 2)}% ${window.t('res.dropPct')}`;
+  if (pc) pc.textContent = (w ? `R${w.roi} ${fmt(w.pct, 2)}%（${window.t('res.worst')}）` : `${fmt(t.pct, 2)}% ${window.t('res.dropPct')}`)
+    + (unrel ? T('　· 参数不可信', ' · unreliable parameters') : '');
   const box = $('#resCardRows');
   if (box) {
     const rows = (S.rows || []).map((r, i) =>

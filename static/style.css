@@ -191,6 +191,7 @@ button{white-space:nowrap}
 .rg.g3{color:#a97b00}
 .rg.g2{color:#c2410c}
 .rg.g1,.rg.g0{color:#d1242f}
+.rg.gq{color:#6b7280}                      /* 参数不可信：不给等级颜色 */
 /* 顶栏胶囊：宽屏显示；窄屏直接收起来，完整信息看结果卡（侧栏常驻） */
 #summary{max-width:min(52vw,560px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media (max-width:1180px){ #summary{display:none} }

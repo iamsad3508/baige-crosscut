@@ -1207,6 +1207,34 @@ def _margin_hint(pct):
     return L(cc.margin_hint(pct), _margin_hint_en(pct))
 
 
+UNREL_UNASSIGNED = 12.0      # 未分类超过这个比例（占选区面积）→ 判级不可信
+UNREL_COAT_SHARE = 5.0       # 漆膜占「漆膜+露底」低于这个比例 → 判级不可信
+
+
+def _credibility(tot):
+    """输入是否可信。返回 (ok, 理由)。
+
+    两类情况会让等级看着"有个数"但根本没意义：
+    · 未分类太高：吸的漆膜色没覆盖住真实漆膜（亮/暗档没吸全），分母里只剩基材；
+    · 漆膜占比太低：多半是基材色吸到了背景，整片背景都算成露底。
+    这时宁可不给等级，也别在徽章上写一个 0B 让人当真。
+    """
+    area = max(1, int(tot.get("area") or 0))
+    un = 100.0 * float(tot.get("unassigned") or 0) / area
+    cnt = float(tot.get("coat_px") or 0) + float(tot.get("sub_raw") or 0)
+    coat_share = 100.0 * float(tot.get("coat_px") or 0) / max(1.0, cnt)
+    bad = []
+    if un > UNREL_UNASSIGNED:
+        bad.append(L("未分类 %.0f%%（上限 %.0f%%）", "unclassified %.0f%% (limit %.0f%%)", un, UNREL_UNASSIGNED))
+    if coat_share < UNREL_COAT_SHARE:
+        bad.append(L("漆膜只占 %.0f%%（下限 %.0f%%）", "coating is only %.0f%% (floor %.0f%%)", coat_share, UNREL_COAT_SHARE))
+    if not bad:
+        return True, ""
+    return False, L("、".join(bad) + "——多半是吸色不准或容差太小，先重吸一个颜色再判级",
+                    "; ".join(bad) + " — the colour samples or tolerance are probably wrong; "
+                    "re-sample a colour before trusting the grade")
+
+
 def _lines_for(rows, tot, pct, tol, lo, hi, line_px, detail, diag, auto_warn="", purity=0.75):
     """复刻 GUI compute() 的输出文字"""
     lines = []
@@ -1224,6 +1252,10 @@ def _lines_for(rows, tot, pct, tol, lo, hi, line_px, detail, diag, auto_warn="",
                        "· No bare area detected (0 px): either the coating is intact (5B), or the substrate "
                        "colour is wrong / the tolerance too small. Check the unclassified share below — "
                        "if it is high, re-sample the substrate."))
+    _ok, _why = _credibility(tot)
+    if not _ok:
+        lines.insert(0, L("⚠ 参数不可信：%s", "⚠ Parameters unreliable: %s", _why))
+        lines.insert(1, "")
     lines.append(_margin_hint(pct).strip())
     # 未分类占比：只有两个角色以后，亮处漆膜不该被悄悄挖掉，得让用户看见
     try:
@@ -1540,6 +1572,7 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
     if coat and sub:
         span = min(float(np.linalg.norm(c - s)) for c in coat for s in sub)
 
+    _ok, _why = _credibility(tot)
     out = {
         "ok": True,
         "meta": _meta(sess, side),
@@ -1555,6 +1588,7 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
                        "downscaling (k still in canvas/6MP units)",
                        view.work["size"][0] * view.work["size"][1] / 1e6)) if view.native else "",
         },
+        "credible": _ok, "unreliable": _why,
         "rows": [_row_out(st) | {"astm": cc.astm_class(st["pct"]),
                                  "iso": _iso_class(st["pct"]),
                                  "margin": _margin_info(st["pct"]),
@@ -1572,6 +1606,7 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
             "groove_share": 100.0 * (tot["sub_raw"] - tot["sub_open"]) / max(1, tot["coat_px"] + tot["sub_raw"]),
             "margin": _margin_info(pct),
             "worst": worst,
+            "credible": _ok, "unreliable": _why,
         },
         "thist": tot.get("thist"),
         "sensitivity": {"lo": lo, "hi": hi, "lo_cls": cc.astm_class(lo), "hi_cls": cc.astm_class(hi)},
@@ -2215,6 +2250,9 @@ def knee(req: KneeReq):
     # 两种判据都没定出 k 时，给一条与判法无关的常驻提示（前端顶栏黄标 + 量尺页黄条都用它）。
     # 以前只有 rule=count 分支会写警告，而判法=按露底分布时 rule=area → 一句提示都没有。
     no_bare = (not rows) or all((x.get("pct") or 0.0) <= 1e-9 for x in rows)
+    _order = {"5B": 5, "4B": 4, "3B": 3, "2B": 2, "1B": 1, "0B": 0}
+    class_span = sorted({cc.astm_class(x["pct"]) for x in rows}, key=lambda c: -_order.get(c, 0))
+    same_band = len(class_span) <= 1
     warn = ""
     if pick is None:
         if no_bare:
@@ -2224,13 +2262,18 @@ def knee(req: KneeReq):
                      "colour is wrong / the tolerance too small. Check the unclassified share — if it is high, "
                      "re-sample the substrate.")
         else:
+            _span = (L("k=1…%d 全程都是 %s，k 取哪个都不改判级", "every k from 1 to %d stays %s, so the exact k "
+                                                              "does not change the grade",
+                       rows[-1]["k"] if rows else 0, class_span[0]) if same_band
+                     else L("这条曲线跨 %s~%s（k=1…%d），k 必须用量尺定，别凭猜",
+                            "the curve spans %s–%s (k=1…%d), so k has to be measured",
+                            class_span[0], class_span[-1], rows[-1]["k"] if rows else 0))
             warn = L("⚠ 自动定不出刀缝：块数没有台阶，露底分布也没给建议。"
-                     "这类图（大面积成片脱落，或几乎没露底）请到量尺页量一条刀缝，"
-                     "或在下面 k 曲线里手点一档——同一档内 k 取多少都不改判级。",
+                     "这类图（大面积成片脱落，或几乎没露底）请到量尺页量一条刀缝，或在下面 k 曲线里手点一档——%s。",
                      "⚠ No cut width could be derived: the block count has no step and the bare-area "
-                     "distribution gives no suggestion. For images like this (large sheet removal, or almost "
-                     "no bare area) measure a cut on the ruler tab, or click a row in the k curve — within one "
-                     "grade band the exact k does not change the grade.")
+                     "distribution gives no suggestion. For images like this (large sheet removal, or almost no "
+                     "bare area) measure a cut on the ruler tab, or click a row in the k curve — %s.",
+                     _span)
     return {"ok": True, "rows": rows, "k_from": k_from,
             "k": pick["k"] if pick else None,
             "k_px": pick["k_view"] if pick else None,
@@ -2239,7 +2282,8 @@ def knee(req: KneeReq):
             "k_area": best_a["k"] if best_a else None,
             "why_area": why_a,
             "k_count": (best_c["k"] if (best_c and k_from == "rule") else None),
-            "why_count": why_c, "warn": warn, "no_bare": bool(no_bare)}
+            "why_count": why_c, "warn": warn, "no_bare": bool(no_bare),
+            "class_span": class_span, "same_band": bool(same_band)}
 
 
 # --------------------------------------------------- 手绘标注口径（v1.9）
@@ -2678,6 +2722,9 @@ def _csv_bytes(sess, req):
                      cc.astm_class(st["pct"]), _iso_class(st["pct"]), src])
     wr.writerow([L("合计", "Total"), "", "", "", "", tot["area"], tot["coat_px"], tot["sub_raw"],
                  "", "", round(pct, 2), cc.astm_class(pct), _iso_class(pct), src])
+    _ok, _why = _credibility(tot)
+    if not _ok:                                    # 输入不可信：CSV 末尾留一行注释（13 列结构不变）
+        wr.writerow([L("# ⚠ 参数不可信：", "# WARNING unreliable parameters: ") + _why])
     return ("\ufeff" + out.getvalue()).encode("utf-8")
 
 
@@ -2801,6 +2848,9 @@ def _annotated_png(sess, req):
              for i, st in enumerate(rows, 1)]
     # 第一行只放结论（用户要求：不要 ISO、不要块数）
     txt = "removed %.2f%%  ASTM %s" % (pct, cls)
+    if not _credibility(tot)[0]:
+        # 导出图的字体没有中文字形（写中文会变成方块豆腐），这条**只能英文**，别包 L()
+        txt += "   (params unreliable)"
     # 第二行：复现参数（刀缝宽度 k / 判法 / 容差 / 露底纯度）+ 漆膜、基材色样
     f2 = cc._pil_font(max(11, int(fs * 0.74)))
     sw = max(9, int(fs * 0.52))
