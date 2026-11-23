@@ -289,6 +289,12 @@ def classify_parts_chunked(lab: np.ndarray, sample_labs, roles):
     return best, mind, (None if t_none else t)
 
 
+def _role_name(role):
+    """角色名（按请求语言）——/api/pick 等接口直接回给前端显示，别用 cc.ROLE_NAME 的中文"""
+    return {"coat": L("漆膜", "coating"), "sub": L("基材", "substrate"),
+            "ignore": L("忽略", "ignored")}.get(role, str(role))
+
+
 def _sample_labs(samples):
     return [cc.rgb_to_lab(np.array(s["rgb"], np.float32)) for s in samples]
 
@@ -2204,11 +2210,6 @@ def knee(req: KneeReq):
             "why_area": why_a,
             "k_count": (best_c["k"] if (best_c and k_from == "rule") else None),
             "why_count": why_c}
-    return {"ok": True, "rows": rows,
-            "k": best_k["k"] if best_k else None,
-            "k_px": best_k["k_view"] if best_k else None,
-            "k_wire": best_k["k"] if best_k else None,
-            "why": why}
 
 
 # --------------------------------------------------- 手绘标注口径（v1.9）
