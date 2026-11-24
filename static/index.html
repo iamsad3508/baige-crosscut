@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>百格分析 — ASTM D3359 / ISO 2409（用 DeepSeek API 开发）</title>
-<link rel="stylesheet" href="style.css?v=245">
+<link rel="stylesheet" href="style.css?v=246">
 </head>
 <body>
 <div class="topbar">
@@ -91,6 +91,10 @@
         </div>
       </div>
 
+      <div class="row tight" style="margin-top:2px">
+        <label class="chk"><input type="checkbox" id="chkGmShow"> <span data-i18n="gm.show">显示格网实验功能（自动找格子 / 模型格网）</span></label>
+      </div>
+      <div id="gmWrap" hidden>
       <div class="sect">
         <h4 data-i18n="grid.h">格网（实验）</h4>
         <div class="muted" data-i18n="grid.tip">在选区范围里自动找格子：适合激光划格、刀割百格这种规则阵列。
@@ -103,10 +107,7 @@
         <div class="muted" id="gridInfo" style="margin-top:6px"></div>
       </div>
 
-      <div class="row tight" style="margin-top:2px">
-        <label class="chk"><input type="checkbox" id="chkGmShow"> <span data-i18n="gm.show">显示模型格网（旧图用·实验）</span></label>
-      </div>
-      <div class="sect" id="gmWrap" hidden>
+      <div class="sect">
         <h4 data-i18n="gm.h">模型格网（旧图用）</h4>
         <div class="muted" data-i18n="gm.tip">自动找不到线时走这条：列数、行数、歪角、刀宽都由你定。
           扣掉这条带，**框选区里其余非漆膜像素都算被拉掉的**，结果只给一个数（整框脱落%）。
@@ -120,6 +121,8 @@
           <span class="lab" data-i18n="gm.angle">歪角</span>
           <input id="gmAng" type="number" step="0.1" min="-20" max="20" value="0"><span class="muted">°</span>
           <button id="btnGmAngle" data-i18n="gm.autoang">自动定角</button>
+        </div>
+        <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
           <button id="btnGmSnap" data-i18n="gm.snap" title="每根线各自吸附到最近的那道暗缝：透视照/刀走偏时用">自动对线</button>
           <button id="btnGmColor" data-i18n="gm.color" title="按亮度自动给一对色样（亮=漆膜、暗=露底）；分错了图上点一下就能改">自动分色</button>
         </div>
@@ -133,13 +136,14 @@
           <input id="gmPitch" type="number" step="0.1" min="0" value="0"><span class="muted">mm</span>
           <label class="chk"><input type="checkbox" id="chkGmArea"> <span data-i18n="gm.area">每格</span></label>
         </div>
-        <div class="row tight">
+        <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
           <button id="btnGmRun" data-i18n="gm.run">铺格并统计</button>
           <button id="btnGmReset" data-i18n="gm.reset" title="把拖过的线位与整体偏移归零">线位归零</button>
           <button id="btnGmOff" data-i18n="grid.clear">去掉格网</button>
         </div>
         <div class="muted" id="gmInfo" style="margin-top:6px"></div>
       </div>
+      </div><!-- /#gmWrap -->
 
       <div class="sect" style="display:none" aria-hidden="true">
         <h4>分析分辨率</h4>
@@ -331,7 +335,7 @@
     </div>
   </aside>
 </main>
-<script src="i18n.js?v=245"></script>
-<script src="app.js?v=245"></script>
+<script src="i18n.js?v=246"></script>
+<script src="app.js?v=246"></script>
 </body>
 </html>

@@ -3209,7 +3209,13 @@ if ($('#btnGmAngle')) $('#btnGmAngle').onclick = gmAutoAngle;
 function applyGmShow(on) {
   const w = $('#gmWrap');
   if (w) w.hidden = !on;
-  if (!on) { S.gm = null; S.gmDrag = null; if ($('#gmInfo')) $('#gmInfo').textContent = ''; }
+  if (!on) {                                  // 收起时两块都要清：自动找格子 + 模型格网
+    S.gm = null; S.gmDrag = null;
+    S.grid = null; S.gridCells = false;
+    if ($('#gmInfo')) $('#gmInfo').textContent = '';
+    if ($('#gridInfo')) $('#gridInfo').textContent = '';
+    if ($('#chkGridCells')) $('#chkGridCells').checked = false;
+  }
   if (typeof draw === 'function') draw();
 }
 if ($('#chkGmShow')) {
