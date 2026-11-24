@@ -32,7 +32,7 @@ const S = {
   annot: { tool: 1, r: 15, strokes: [], cur: null, res: null },
   blocks: null, blocksOn: true, blocksTimer: null, ants: 0,
   blocksSeq: 0,
-  grid: null,
+  grid: null, gridCells: false,
 };
 
 /* ------------------------------------------------------------------ 工具 */
@@ -237,36 +237,66 @@ function drawGrid() {
   if (!S.grid) return;
   const s = scale();
   ctx.save();
+  // 格线：只当参考线（细、半透明），不再是“每格一个等级”
   ctx.lineWidth = 1;
-  for (const c of S.grid.cells) {
-    const p0 = toScreen(c.box[0], c.box[1]), p1 = toScreen(c.box[2], c.box[3]);
-    const w = p1.x - p0.x, h = p1.y - p0.y;
-    ctx.fillStyle = gridColor(c.pct) + '0.16)';
-    ctx.fillRect(p0.x, p0.y, w, h);
-    ctx.strokeStyle = 'rgba(255,62,165,.85)';
-    ctx.strokeRect(p0.x + 0.5, p0.y + 0.5, w - 1, h - 1);
-    if (w > 34 && h > 20) {
-      ctx.font = '600 11px system-ui, sans-serif';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      const txt = c.pct.toFixed(1) + '%';
-      ctx.fillStyle = 'rgba(0,0,0,.55)';
-      ctx.fillText(txt, p0.x + w / 2 + 1, p0.y + 13);
-      ctx.fillStyle = '#fff';
-      ctx.fillText(txt, p0.x + w / 2, p0.y + 12);
+  ctx.strokeStyle = 'rgba(255,62,165,.45)';
+  for (const x of S.grid.xs) {
+    const p0 = toScreen(x, 0), p1 = toScreen(x, S.h);
+    ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
+  }
+  for (const y of S.grid.ys) {
+    const p0 = toScreen(0, y), p1 = toScreen(S.w, y);
+    ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
+  }
+  // 整片视场一个框 + 一个数
+  const b = S.grid.box;
+  const a0 = toScreen(b[0], b[1]), a1 = toScreen(b[2], b[3]);
+  const w = a1.x - a0.x, h = a1.y - a0.y;
+  const col = gridColor(S.grid.total.pct);
+  ctx.fillStyle = col + '0.10)';
+  ctx.fillRect(a0.x, a0.y, w, h);
+  ctx.strokeStyle = col + '0.95)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(a0.x, a0.y, w, h);
+  if (S.gridCells) {               // 诊断：每格上色 + 百分比（默认关）
+    for (const c of S.grid.cells) {
+      const p0 = toScreen(c.box[0], c.box[1]), p1 = toScreen(c.box[2], c.box[3]);
+      const cw = p1.x - p0.x, ch = p1.y - p0.y;
+      ctx.fillStyle = gridColor(c.pct) + '0.18)';
+      ctx.fillRect(p0.x, p0.y, cw, ch);
+      if (cw > 40 && ch > 24) {
+        ctx.font = '600 11px system-ui, sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const txt = c.pct.toFixed(1) + '%';
+        ctx.fillStyle = 'rgba(0,0,0,.55)';
+        ctx.fillText(txt, p0.x + cw / 2 + 1, p0.y + ch / 2 + 1);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(txt, p0.x + cw / 2, p0.y + ch / 2);
+      }
     }
   }
+  // 总量写在框的上沿
+  ctx.font = '700 15px system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+  const lab = T('视场脱落 ', 'field removal ') + S.grid.total.pct.toFixed(2) + '%';
+  const tw = ctx.measureText(lab).width;
+  ctx.fillStyle = 'rgba(0,0,0,.66)';
+  ctx.fillRect(a0.x, a0.y - 24, tw + 16, 22);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(lab, a0.x + 8, a0.y - 4);
   ctx.restore();
 }
 
 function gridSummary(g) {
   const n = g.cells.length;
   if (!n) return T('没找到格子', 'No cell found');
-  const worst = g.cells.reduce((a, b) => (b.pct > a.pct ? b : a));
   const cols = new Set(g.cells.map(c => c.i)).size, rows = new Set(g.cells.map(c => c.j)).size;
-  return T(`${cols} 列 × ${rows} 行 · 共 ${n} 格 · 周期 ${Math.round(g.period_x)}px · 槽宽 ${Math.round(g.k_x)}px · 合计 `,
-           `${cols} × ${rows} · ${n} cells · pitch ${Math.round(g.period_x)}px · groove ${Math.round(g.k_x)}px · total `)
-    + g.total.pct.toFixed(2) + '% (' + g.total.astm + ') · '
-    + T('最差 ', 'worst ') + worst.pct.toFixed(1) + '%';
+  const worst = g.cells.reduce((a, b) => (b.pct > a.pct ? b : a));
+  let s = T(`视场 ${cols} 列 × ${rows} 行 · 周期 ${Math.round(g.period_x)}px · 槽宽 ${Math.round(g.k_x)}px · 脱落 `,
+            `field ${cols} × ${rows} · pitch ${Math.round(g.period_x)}px · groove ${Math.round(g.k_x)}px · removal `)
+    + g.total.pct.toFixed(2) + '%';
+  s += ' · ' + T('格内最多 ', 'worst cell ') + worst.pct.toFixed(1) + '%';
+  return s;
 }
 
 async function runGrid() {
@@ -2888,6 +2918,7 @@ async function refreshRecCount() {
 $('#btnRec3').onclick = applyRecommended;
 if ($('#btnGrid')) $('#btnGrid').onclick = runGrid;
 if ($('#btnGridOff')) $('#btnGridOff').onclick = () => { S.grid = null; $('#gridInfo').textContent = ''; draw(); };
+if ($('#chkGridCells')) $('#chkGridCells').onchange = (e) => { S.gridCells = e.target.checked; draw(); };
 async function applyRecommended() {
   if (!S.id) { setStatus(T('先打开图片', 'Open an image first')); return; }
   if (S.samples.length < 2) { setStatus(T('先吸两个颜色：漆膜 + 基材', 'Sample two colours first: coating + substrate')); return; }

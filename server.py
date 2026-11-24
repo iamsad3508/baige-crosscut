@@ -3498,7 +3498,9 @@ def api_grid(req: GridReq):
         tot_a += a
         tot_r += rem
     total = 100.0 * tot_r / max(1.0, tot_a)
+    box = [r["xs"][0], r["ys"][0], r["xs"][-1], r["ys"][-1]]
     return {"ok": True, "warn": r.get("warn") or "", "angle": r.get("angle", 0.0),
+            "box": box, "scope": L("视场", "field"),
             "period_x": r.get("period_x", 0.0), "period_y": r.get("period_y", 0.0),
             "resid_x": r.get("resid_x", 0.0), "resid_y": r.get("resid_y", 0.0),
             "k_x": r.get("k_x", 0.0), "k_y": r.get("k_y", 0.0),
