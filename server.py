@@ -3870,6 +3870,7 @@ def _rec_brief(rid: str) -> dict | None:
         "manual": len([i for a in (res.get("excl") or []) for i in (a or [])]),
         "auto_pct": res.get("auto_pct"),
         "tol": d.get("tol"), "line_px": d.get("line_px"),
+        "sep": os.path.exists(os.path.join(_rec_dir(rid), "separated.jpg")),
         "bytes": sum(os.path.getsize(os.path.join(_rec_dir(rid), f))
                      for f in os.listdir(_rec_dir(rid))
                      if os.path.isfile(os.path.join(_rec_dir(rid), f))),
@@ -4005,6 +4006,15 @@ def records_thumb(rid: str):
     if not os.path.exists(p):
         raise HTTPException(404, L("没有缩略图", "No thumbnail"))
     return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+
+
+@app.get("/api/records/{rid}/separated.jpg")
+def records_separated(rid: str):
+    """分离结果图（刀缝 / 刀口崩边 / 格内脱落 分层标注）。没存过就 404，前端会给提示。"""
+    p = os.path.join(_rec_dir(rid), "separated.jpg")
+    if not os.path.exists(p):
+        raise HTTPException(404, L("这条记录没有分离图", "No separation image for this record"))
+    return FileResponse(p, media_type="image/jpeg")
 
 
 @app.get("/api/records/{rid}/view.jpg")
