@@ -36,6 +36,14 @@ const S = {
   gm: null, gmPitch: 0, gmArea: false, gmOff: { ox: 0, oy: 0, dx: [], dy: [] }, gmDrag: null,
 };
 
+/* 顶栏那些复选框：一律记住上次的选择。用户预期是"取消勾 → 刷新也还是取消"，
+   以前只记住了少数几个，半自动/诊断明细每次刷新都被强制回默认。 */
+const PREFKEY = { semi: 'baige.semi', detail: 'baige.detail', overlay: 'baige.overlay', roiNative: 'baige.roiNative' };
+function prefGet(k, d) {
+  try { const v = localStorage.getItem(PREFKEY[k]); return v === null ? d : v === '1'; } catch (_) { return d; }
+}
+function prefSet(k, v) { try { localStorage.setItem(PREFKEY[k], v ? '1' : '0'); } catch (_) {} }
+
 /* ------------------------------------------------------------------ 工具 */
 function post(path, body, method, signal) {
   const opt = { method: method || 'POST', headers: { 'Content-Type': 'application/json', 'X-Baige-Lang': I18N.lang } };
@@ -2611,13 +2619,15 @@ $('#btnPng').onclick = () => download('api/export/png', (S.name || T('结果', '
     if (h) apply(h);
   });
 })();
-$('#chkOverlay').onchange = e => { S.showOverlay = e.target.checked; draw(); };
+$('#chkOverlay').onchange = e => { S.showOverlay = e.target.checked; prefSet('overlay', S.showOverlay); draw(); };
 $('#chkSemi').onchange = e => {
   S.semi = e.target.checked;
+  prefSet('semi', S.semi);
   if (S.semi) runSemi();
 };
 $('#chkDetail').onchange = e => {
   S.detail = e.target.checked;
+  prefSet('detail', S.detail);
   renderResult();                                  // 先按本地数据立刻切换显示
   if (S.samples.length >= 2) analyze();            // 再让服务器按需补算/省算明细
 };
@@ -2637,7 +2647,7 @@ function setRoiNative(on) {
   S.roiNative = !!on;
   const cb = $('#chkRoiNative');
   if (cb) cb.checked = S.roiNative;
-  // 不持久化：每次打开都默认开「选区原生」
+  prefSet('roiNative', S.roiNative);          // 记住（以前每次刷新都强制回"开"，改了不生效）
   S.blocks = null;
   try { renderBlocks(); } catch (_) {}
   if (!S.id) return;
@@ -3437,8 +3447,14 @@ S.softOn = false; try { localStorage.removeItem('baige.soft'); } catch (_) {}   
 try { S.blocksOn = localStorage.getItem('baige.showBlocks') !== '0'; } catch (_) { S.blocksOn = true; }
 $('#chkBlocks').checked = S.blocksOn;
 if ($('#chkSoftR')) $('#chkSoftR').checked = false;
-S.roiNative = true; try { localStorage.removeItem('baige.roiNative'); } catch (_) {}   // 默认就开「选区原生」
+S.roiNative = prefGet('roiNative', true);        // 默认开「选区原生」，但记住用户改过的
 $('#chkRoiNative').checked = S.roiNative;
+S.semi = prefGet('semi', true);                  // 半自动：记住"取消勾"
+$('#chkSemi').checked = S.semi;
+S.detail = prefGet('detail', false);
+$('#chkDetail').checked = S.detail;
+S.showOverlay = prefGet('overlay', true);
+$('#chkOverlay').checked = S.showOverlay;
 try {
   const keep = localStorage.getItem('baige.exmode');
   // 旧的 auto 被 auto_blk 取代；shape/local 已撤下，统一回落到新的第一顺位
