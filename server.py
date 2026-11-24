@@ -3509,6 +3509,9 @@ def _grid_model(view, labels, roles, union, bbox, req):
     H, W = shape2
     cells, bands = [], []
     tot_a = tot_k = 0.0
+    # 没吸样就没有任何"漆膜/露底"像素：这时不能把格子全丢掉——几何跟分类无关，
+    # 该照常回给前端画框，只是不给百分比（用户点了"铺格"却什么都没出现，就是这里丢的）
+    has_cls = bool((coat_r | sub_r).any())
     for i in range(cols):
         for j in range(rows):
             a0 = xb[i] + k / 2.0
@@ -3524,6 +3527,10 @@ def _grid_model(view, labels, roles, union, bbox, req):
             pp = (coat_r[ib0:ib1, ia0:ia1] | sub_r[ib0:ib1, ia0:ia1])
             area = float(pp.sum())
             if area < 1:
+                if has_cls:
+                    continue                      # 有分类但这格全落在刀带里 → 这格没有可用像素
+                cells.append({"i": i, "j": j, "quad": quad(a0, b0, a1, b1),
+                              "area": 0.0, "kept": 0.0, "pct": None})
                 continue
             kept = float((coat_r[ib0:ib1, ia0:ia1] & pp).sum())
             cells.append({"i": i, "j": j, "quad": quad(a0, b0, a1, b1),
@@ -3559,13 +3566,60 @@ def _grid_model(view, labels, roles, union, bbox, req):
             "cells": [dict(c, area=round(c["area"] * sc * sc, 1),
                            kept=round(c["kept"] * sc * sc, 1)) for c in cells],
             "line_dx": used_dx, "line_dy": used_dy, "snap_err": _snap_err,
-            "total": {"pct": 100.0 * (1.0 - tot_k / max(tot_a, 1.0)),
+            "need_samples": (not has_cls),
+            "total": {"pct": (100.0 * (1.0 - tot_k / max(tot_a, 1.0)) if has_cls else None),
                       "area": round(tot_a * sc * sc, 1),
                       "kept": round(tot_k * sc * sc, 1),
                       "cell_area": round(cell_area * sc * sc, 1),
-                      "equiv": tot_k / cell_area},
+                      "equiv": (tot_k / cell_area if has_cls else None)},
             "units": L("像素", "px")}
 
+
+
+class AutoSampleReq(BaseModel):
+    id: str
+    res: str = "full"
+    rois: list[ROI] = []
+
+
+@app.post("/api/autosample")
+def api_autosample(req: AutoSampleReq):
+    """按亮度把选区里的像素分成两簇，给出一对色样（亮=漆膜、暗=露底）。
+
+    只是起点：分错了图上点一下就能改。没有它，用户框完直接点"铺格"会一个数都拿不到。
+    """
+    sess = get_session(req.id)
+    with HEAVY_BLOCK:
+        with sess.lock:
+            work, view = _view_for(sess, req.model_dump())
+            rgb = work["rgb"]
+            rois_v = view.rois_in([r.model_dump() for r in req.rois]) if req.rois else []
+            masks = _masks(rgb.shape[:2], rois_v) if rois_v else [np.ones(rgb.shape[:2], bool)]
+            m = np.zeros(rgb.shape[:2], bool)
+            for mm in masks:
+                m |= mm
+            if not m.any():
+                raise HTTPException(400, L("先画一个选区", "Draw a region first"))
+            px = rgb[m].astype(np.float32)
+            lum = px @ np.array([0.299, 0.587, 0.114], np.float32)
+            lo, hi = float(np.percentile(lum, 1)), float(np.percentile(lum, 99))
+            thr = 0.5 * (lo + hi)                    # 先用中位幅度切一刀
+            for _ in range(6):                       # 再做几轮两均值迭代（一维 k-means）
+                d = lum >= thr
+                if d.all() or (~d).all():
+                    break
+                m1, m2 = float(lum[d].mean()), float(lum[~d].mean())
+                thr = 0.5 * (m1 + m2)
+            d = lum >= thr
+            if d.sum() < 50 or (~d).sum() < 50:
+                raise HTTPException(400, L("选区里只有一种颜色，分不出漆膜和底材",
+                                           "Only one colour in the region"))
+            bright = np.median(px[d], axis=0).round().astype(int).tolist()
+            dark = np.median(px[~d], axis=0).round().astype(int).tolist()
+            samples = [{"rgb": bright, "role": cc.ROLE_COAT}, {"rgb": dark, "role": cc.ROLE_SUB}]
+            sp = _span_of(samples)
+            return {"ok": True, "samples": samples, "span": sp, "auto_tol": _auto_tol_of(sp),
+                    "ratio_bright": round(float(d.mean()), 3)}
 
 
 @app.post("/api/grid")

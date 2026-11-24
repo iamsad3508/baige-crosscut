@@ -312,7 +312,9 @@ function gmPath(q) {
 
 function drawModelGrid() {
   const g = S.gm;
-  if (!g || !g.cells || !g.cells.length) return;
+  // 注意：没有格子（比如还没吸色、或格子全落在刀带里）也必须继续画刀带和框，
+  // 否则"点了铺格什么都没出现"——几何跟分类无关，该画就得画
+  if (!g) return;
   ctx.save();
   const dg = S.gmDrag || {};
   const gx = dg.kind === 'move' ? dg.gdx : 0, gy = dg.kind === 'move' ? dg.gdy : 0;
@@ -340,6 +342,7 @@ function drawModelGrid() {
       const p0 = toScreen(c.quad[0][0] + gx, c.quad[0][1] + gy), p1 = toScreen(c.quad[2][0] + gx, c.quad[2][1] + gy);
       const cw = Math.abs(p1.x - p0.x), chh = Math.abs(p1.y - p0.y);
       if (cw < 34 || chh < 20) continue;
+      if (c.pct == null) continue;                    // 没吸色就没有百分比，别印 null
       const t1 = Math.round(100 - c.pct) + '%';       // 剩余漆膜占比
       const t2 = gmAreaText(c.kept);                  // 剩余漆膜面积
       ctx.font = '700 12px system-ui, sans-serif';
@@ -362,8 +365,12 @@ function drawModelGrid() {
   }
 
   const b = g.box, a0 = toScreen(b[0] + gx, b[1] + gy);
-  const main = T('框选区脱落 ', 'region removal ') + fmt(g.total.pct, 1) + '%';
-  const sub = gmAreaText(g.total.kept) + T(' / 合计 ', ' of ') + gmAreaText(g.total.area)
+  const noSmp = g.total.pct == null;
+  const main = noSmp
+    ? T('还没吸色：点一下漆膜、再点一下露底', 'No samples yet: click coating, then bare')
+    : T('框选区脱落 ', 'region removal ') + fmt(g.total.pct, 1) + '%';
+  const sub = (noSmp ? T('格子已按你的列/行铺好', 'Grid laid out from your columns/rows')
+    : gmAreaText(g.total.kept) + T(' / 合计 ', ' of ') + gmAreaText(g.total.area))
     + ' · ' + g.cols + '×' + g.rows + ' · ' + T('刀宽 ', 'blade ') + Math.round(g.k) + 'px';
   ctx.font = '800 20px system-ui, sans-serif';
   const w1 = ctx.measureText(main).width;
@@ -372,7 +379,7 @@ function drawModelGrid() {
   const bw2 = Math.max(w1, w2) + 18;
   ctx.fillStyle = 'rgba(8,10,16,.88)';
   ctx.fillRect(a0.x, a0.y - 52, bw2, 48);
-  ctx.fillStyle = gridColor(g.total.pct) + '1)';
+  ctx.fillStyle = noSmp ? '#ffd88a' : gridColor(g.total.pct) + '1)';
   ctx.textAlign = 'left'; ctx.textBaseline = 'top';
   ctx.font = '800 20px system-ui, sans-serif';
   ctx.fillText(main, a0.x + 9, a0.y - 50);
@@ -434,12 +441,36 @@ function gmSummary(g) {
   const n = g.cells.length;
   const intact = g.cells.filter(c => c.pct <= 10).length;
   const gone = g.cells.filter(c => c.pct > 60).length;
+  if (g.total.pct == null) {
+    return T('格子已铺好（' + g.cols + '×' + g.rows + '），但还没吸色：图上点一下完好漆膜、再点一下露底，'
+      + '或按「自动分色」', 'Grid laid out (' + g.cols + '×' + g.rows + ') but no samples: '
+      + 'click coating then bare, or press "Auto colours"');
+  }
   return T('框选区脱落 ', 'removal ') + fmt(g.total.pct, 1) + '% · '
     + T('未脱落 ', 'left ') + gmAreaText(g.total.kept) + ' / ' + gmAreaText(g.total.area)
     + ' · ' + g.cols + '×' + g.rows + ' · ' + T('刀宽 ', 'blade ') + Math.round(g.k) + 'px'
     + ' · ' + T('格距 ', 'pitch ') + Math.round(g.pitch_x) + '×' + Math.round(g.pitch_y) + 'px'
     + ' · ' + T('完整格 ' + intact + '/' + n, 'intact ' + intact + '/' + n)
     + (gone ? ' · ' + T('基本掉光 ' + gone, 'gone ' + gone) : '');
+}
+
+/* 自动分色：按亮度把选区像素分两簇给一对色样。只是起点，图上点一下可改 */
+async function gmAutoSample(silent) {
+  if (!S.id || !S.rois.length) return false;
+  try {
+    const r = await post('api/autosample', {
+      id: S.id, res: S.res, rois: S.rois.map(x => ({ box: x.box, ang: x.ang || 0 })),
+    });
+    if (!r.ok) { if (!silent) setStatus(r.reason || T('自动分色失败', 'Auto colours failed')); return false; }
+    S.samples = r.samples.map(x => ({ rgb: x.rgb.slice(), role: x.role }));
+    S.selSample = -1; S.span = r.span; S.gmAuto = true;
+    if (S.autoTol && typeof r.auto_tol === 'number') S.tol = r.auto_tol;
+    syncSampleUI(); updateSpan(); draw();
+    return true;
+  } catch (e) {
+    if (!silent) setStatus(T('自动分色失败：', 'Auto colours failed: ') + e.message);
+    return false;
+  }
 }
 
 async function runModelGrid(extra) {
@@ -449,6 +480,8 @@ async function runModelGrid(extra) {
   S.busy = true;
   setStatus(T('正在铺格…', 'Laying out the grid…'));
   try {
+    // 没有色样时铺格拿不到任何百分比（几何还是会画出来）。先自动分一对，省得用户以为坏了
+    if (!S.samples.length) { S.gmAuto = false; await gmAutoSample(true); }
     const g = await post('api/grid', gmBody(extra));
     if (!g.ok) {
       S.gm = null;
@@ -464,6 +497,7 @@ async function runModelGrid(extra) {
     if (g.line_dx) S.gmOff.dx = g.line_dx.slice();
     if (g.line_dy) S.gmOff.dy = g.line_dy.slice();
     if (g.overlay_url) loadOverlay(g.overlay_url);
+    if (S.gmAuto) g.auto_samples = true;
     S.gmPitch = +$('#gmPitch').value || 0;
     $('#gmInfo').textContent = gmSummary(g);
     setStatus(T('格网已铺好：橙带=你设的刀宽（扣掉不算），逐格是剩余漆膜；线不齐可直接拖那一根', 'Grid laid out — orange = the blade width you excluded'));
@@ -3162,6 +3196,10 @@ const gmRerun = debounce(() => { if (S.gm) runModelGrid(); }, 420);
 if ($('#btnGmRun')) $('#btnGmRun').onclick = () => runModelGrid();
 if ($('#btnGmAngle')) $('#btnGmAngle').onclick = gmAutoAngle;
 if ($('#btnGmSnap')) $('#btnGmSnap').onclick = () => runModelGrid({ snap: true });
+if ($('#btnGmColor')) $('#btnGmColor').onclick = async () => {
+  const ok = await gmAutoSample(false);
+  if (ok) await runModelGrid();
+};
 if ($('#btnGmOff')) $('#btnGmOff').onclick = () => { S.gm = null; S.gmDrag = null; S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] }; $('#gmInfo').textContent = ''; draw(); };
 if ($('#btnGmReset')) $('#btnGmReset').onclick = () => {
   S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] };
