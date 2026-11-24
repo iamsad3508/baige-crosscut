@@ -1395,6 +1395,17 @@ async function analyze() {
     if (my !== S.seq) return;
     if (!r.ok) { setResult(r.reason || T('分析失败', 'Analysis failed')); return; }
     S.rows = r.rows; S.total = r.total; S.lines = r.lines;
+    // 存档值 vs 当前算法：改了吸色/判级规则以后，重开旧记录的数字会漂，必须当场说，别让人以为记错了
+    if (!S.driftChecked && S.recPct != null && Math.abs(r.total.pct - S.recPct) > 0.05) {
+      const _d = r.total.pct - S.recPct;
+      const _f = (x) => (x >= 0 ? '+' : '') + x.toFixed(2);
+      S.lines.unshift(T(`· 存档 ${S.recPct.toFixed(2)}%（算法 ${S.recAlgo || '旧版'}）≠ 现在 ${r.total.pct.toFixed(2)}%（算法 ${r.total.algo || '?'}），差 ${_f(_d)} pp —— 算法或参数改过了，以现在为准`,
+        `· Archived ${S.recPct.toFixed(2)}% (algorithm ${S.recAlgo || 'older'}) ≠ now ${r.total.pct.toFixed(2)}% `
+        + `(algorithm ${r.total.algo || '?'}), Δ ${_f(_d)} pp — the algorithm or parameters changed; the current value wins`));
+      setStatus(T('注意：这条记录的存档值和现在的算法不一致（见结果栏第一行）',
+        'Note: this record was saved with a different algorithm — see the first line of the result panel'));
+    }
+    S.driftChecked = true;
     // 每次算完都刷一次 k 面板：按露底分布这条判法不进 ensureKnee()，
     // 不刷的话面板上留的是上一次（可能是另一种判法）的说明。
     try { renderKnee(); } catch (_) {}
@@ -1694,7 +1705,7 @@ async function copyText(txt) {
 }
 
 /* 复制成 TSV（制表符分隔）：就复制眼睛看到的这几行——选区 / 脱落率 / 等级，
-   粘进 Excel 自动分列；要看面积/露底/未分类这些明细，用「导出 CSV」。 */
+   粘进 Excel 自动分列；要看面积/露底/未分类这些明细，用「导出报告」。 */
 $('#resCopy').onclick = async () => {
   if (!S.total) { setStatus(T('还没有结果可复制', 'No result to copy yet')); return; }
   const pc = v => (v === undefined || v === null) ? '' : fmt(v, 2) + '%';
@@ -1707,7 +1718,7 @@ $('#resCopy').onclick = async () => {
     btn.classList.add('ok');
     clearTimeout(btn._t);
     btn._t = setTimeout(() => { btn.textContent = T('复制', 'Copy'); btn.classList.remove('ok'); }, 1600);
-    setStatus(T(`已复制 ${out.length} 行（选区 / 脱落率 / 等级），粘到 Excel 自动分列；明细请用「导出 CSV」`,
+    setStatus(T(`已复制 ${out.length} 行（选区 / 脱落率 / 等级），粘到 Excel 自动分列；明细请用「导出报告」`,
       `Copied ${out.length} rows (region / removal / grade) — paste into Excel; use “Export CSV” for the details.`));
   } else {
     setStatus(T('复制失败：浏览器不让写剪贴板，手动选中结果框复制吧', 'Copy failed: the browser blocked clipboard access — select the result box and copy manually.'));
@@ -2172,7 +2183,7 @@ $('#fileInput').onchange = e => { upload(e.target.files[0]); e.target.value = ''
 $('#btnCalc').onclick = analyze;
 $('#btnFit').onclick = fitView;
 $('#btnOne').onclick = zoomOne;
-$('#btnCsv').onclick = () => download('api/export/csv', (S.name || T('结果', 'result')).replace(/\.[^.]+$/, '') + T('_百格.csv', '_crosscut.csv'));
+$('#btnReport').onclick = () => download('api/export/report', (S.name || T('结果', 'result')).replace(/\.[^.]+$/, '') + T('_百格报告.html', '_crosscut_report.html'));
 $('#btnPng').onclick = () => download('api/export/png', (S.name || T('结果', 'result')).replace(/\.[^.]+$/, '') + T('_标注.png', '_annotated.png'));
 
 /* ---- 结果栏高度：拖顶部把手上下调（往上 = 变高），双击复原 ----
@@ -2680,6 +2691,9 @@ async function openRecord(rid) {
     if ($('#drawer').classList.contains('on')) refreshRecords();
     clearImageState();                      // 先清上一张，再按记录恢复
     S.id = meta.id; S.name = rec.name || meta.name || T('记录', 'record');
+    S.recAlgo = rec.algo || null;                       // 存档时的算法版本（老记录没有这个字段）
+    S.recPct = (rec.result && typeof rec.result.pct === 'number') ? rec.result.pct : null;
+    S.driftChecked = false;
     S.ow = meta.ow; S.oh = meta.oh; S.res = meta.default_res || 'full'; S.rot = 0;
     S.shrunkNote = meta.shrunk_note || ''; S.origW = meta.orig_w || meta.ow; S.origH = meta.orig_h || meta.oh;
     if (stopCreep) { stopCreep(); stopCreep = null; }

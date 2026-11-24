@@ -35,7 +35,7 @@ from starlette.concurrency import run_in_threadpool
 
 import crosscut as cc
 import srvi18n
-from srvi18n import L
+from srvi18n import L, is_en
 
 
 def clamp(x, lo, hi):
@@ -60,6 +60,11 @@ KEEP_HOURS = 24
 # 「选区原生像素」模式的像素预算：只裁选区，所以正常只有 0.2~1 MP；
 # 框到整张 12 MP 图时才会触发降采样，避免一张图吃光内存。
 MAX_ROI_PIXELS = 8_000_000
+
+# 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
+# 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
+APP_VERSION = "2.15"      # 软件版本（发版时改）
+ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -1588,7 +1593,7 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
                        "downscaling (k still in canvas/6MP units)",
                        view.work["size"][0] * view.work["size"][1] / 1e6)) if view.native else "",
         },
-        "credible": _ok, "unreliable": _why,
+        "credible": _ok, "unreliable": _why, "algo": ALGO_VERSION,
         "rows": [_row_out(st) | {"astm": cc.astm_class(st["pct"]),
                                  "iso": _iso_class(st["pct"]),
                                  "margin": _margin_info(st["pct"]),
@@ -1605,6 +1610,7 @@ def _analyze_core(sess: Session, req, ruler_hist=None, auto_warn="", ruler_full=
             "groove_px": tot["sub_raw"] - tot["sub_open"],
             "groove_share": 100.0 * (tot["sub_raw"] - tot["sub_open"]) / max(1, tot["coat_px"] + tot["sub_raw"]),
             "margin": _margin_info(pct),
+            "algo": ALGO_VERSION,
             "worst": worst,
             "credible": _ok, "unreliable": _why,
         },
@@ -2950,6 +2956,188 @@ def _annotated_png(sess, req):
     return _png(out)
 
 
+REPORT_CSS = """<style>
+:root{--ink:#111827;--mut:#6b7280;--line:#e5e7eb;--band:#f3f4f6;--warn:#b45309;--warnbg:#fffbeb}
+*{box-sizing:border-box}
+body{margin:0;padding:22px 26px;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",
+     "Microsoft YaHei",sans-serif;color:var(--ink);background:#fff}
+h1{margin:0 0 2px;font-size:21px;letter-spacing:.3px}
+.sub{color:var(--mut);font-size:12.5px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px 14px;margin:0 0 16px;font-size:12.5px}
+.grid b{display:block;color:var(--mut);font-weight:500;font-size:11.5px;letter-spacing:.02em}
+.kv{padding:7px 9px;background:var(--band);border-radius:6px}
+.hero{border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:0 0 6px}
+.hero img{display:block;width:100%;height:auto}
+.cap{color:var(--mut);font-size:11.5px;margin:0 0 18px}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin:0 0 16px}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th{background:var(--band);font-weight:600;color:#374151}
+th:first-child,td:first-child{text-align:left}
+tr.tot td{font-weight:700;border-top:2px solid var(--line)}
+.grade{display:inline-block;min-width:26px;text-align:center;padding:1px 6px;border-radius:4px;
+       background:#111827;color:#fff;font-weight:700;font-size:12px}
+.grade.bad{background:#b91c1c}.grade.mid{background:#b45309}.grade.ok{background:#15803d}
+.warn{border-left:4px solid var(--warn);background:var(--warnbg);color:#78350f;padding:9px 12px;
+      border-radius:0 6px 6px 0;font-size:12.5px;margin:0 0 16px}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid #cbd5e1;
+    vertical-align:-2px;margin-right:5px}
+h2{font-size:13px;margin:20px 0 7px;color:#374151;text-transform:uppercase;letter-spacing:.06em}
+footer{margin-top:22px;padding-top:12px;border-top:1px solid var(--line);color:var(--mut);font-size:11.5px;line-height:1.7}
+@media print{body{padding:0}h2{page-break-after:avoid}.hero,table{page-break-inside:avoid}}
+</style>"""
+
+
+def _report_image_b64(sess, req, max_w=1800, quality=90):
+    """报告里放的图：标注图缩到 1800 px 宽再转 JPEG，别把 6 MB 的 PNG 塞进 HTML。"""
+    import base64
+    png = _annotated_png(sess, req)
+    im = Image.open(io.BytesIO(png)).convert("RGB")
+    if im.width > max_w:
+        im = im.resize((max_w, max(1, int(round(im.height * max_w / im.width)))), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=quality, optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("ascii"), im.size
+
+
+def _report_html(sess, req):
+    """一页式报告（自包含 HTML，可直接打印成 PDF）。数字与 CSV 同一套口径。"""
+    import base64
+    import html as _h
+    work, view = _view_for(sess, req)
+    samples = [s.model_dump() for s in req.samples]
+    roles = _roles(samples)
+    rois = [r.model_dump() for r in req.rois]
+    rois_v = view.rois_in(rois) if rois else []
+    px_out = view.len_out(1.0)
+    k_view = max(1, int(round(view.len_in(req.line_px))))
+    shape2 = work["lab"].shape[:2]
+    masks = _masks(shape2, rois_v) if rois_v else [np.ones(shape2, bool)]
+    labels, _, _, _ = _labels_for(sess, work, req.tol, req.purity, samples, masks,
+                                  _msig(rois_v), view.key)
+    rows, tot, pct = _stats(labels, masks, roles, k_view, req.mode, False, px_out,
+                            req.loc_tile, req.loc_factor)
+    img_b64, img_size = _report_image_b64(sess, req)
+    ok, why = _credibility(tot)
+    units = L("原生", "native") if view.native else L("分析图", "analysis")
+    mode_name = {"auto_blk": L("按块数回落", "by block count"),
+                 "width": L("按露底分布", "by bare area")}.get(req.mode, req.mode)
+    name = (req.name or sess.name or L("未命名", "untitled")).strip()
+    now = time.strftime("%Y-%m-%d %H:%M")
+    role_name = {"coat": L("漆膜", "coating"), "sub": L("基材", "substrate"),
+                 "ignore": L("忽略", "ignored")}
+
+    def grade_cls(g):
+        return "bad" if g in ("0B", "1B") else ("mid" if g in ("2B", "3B") else "ok")
+
+    trs = []
+    for i, st in enumerate(rows, 1):
+        g = cc.astm_class(st["pct"])
+        trs.append(
+            "<tr><td>R%d</td><td>%.2f%%</td><td><span class=\"grade %s\">%s</span></td>"
+            "<td>%s</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%.2f%%</td></tr>"
+            % (i, st["pct"], grade_cls(g), g, _iso_class(st["pct"]), st["area"],
+               st["coat_px"], st["sub_raw"], st["unassigned"], st["pct_raw"]))
+    gt = cc.astm_class(pct)
+    _raw_tot = 100.0 * tot["sub_raw"] / max(1, tot["coat_px"] + tot["sub_raw"])
+    trs.append(
+        "<tr class=\"tot\"><td>%s</td><td>%.2f%%</td><td><span class=\"grade %s\">%s</span></td>"
+        "<td>%s</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%.2f%%</td></tr>"
+        % (L("合计", "Total"), pct, grade_cls(gt), gt, _iso_class(pct), tot["area"],
+           tot["coat_px"], tot["sub_raw"], tot["unassigned"], _raw_tot))
+
+    sw = []
+    for smp in samples[:6]:
+        rgb = smp["rgb"]
+        sw.append("<span style=\"margin-right:16px;white-space:nowrap\"><i class=\"sw\" "
+                  "style=\"background:rgb(%d,%d,%d)\"></i>%s %d,%d,%d</span>"
+                  % (rgb[0], rgb[1], rgb[2], role_name.get(smp["role"], smp["role"]),
+                     rgb[0], rgb[1], rgb[2]))
+
+    warn_html = ""
+    if not ok:
+        warn_html = "<div class=\"warn\">%s</div>" % _h.escape(
+            L("参数不可信：%s。下面的判级仅供参考，请重吸色或调整容差后重新生成报告。",
+              "Parameters are unreliable: %s. The grade below is for reference only — re-sample the "
+              "colours or adjust the tolerance, then regenerate.", why))
+
+    parts = [
+        "<!doctype html><html lang=\"%s\"><head><meta charset=\"utf-8\">" % ("en" if is_en() else "zh"),
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+        "<title>%s</title>" % _h.escape(L("百格附着力测试报告", "Cross-cut adhesion test report")),
+        REPORT_CSS,
+        "</head><body>",
+        "<h1>%s</h1>" % _h.escape(L("百格附着力测试报告", "Cross-cut adhesion test report")),
+        "<div class=\"sub\">%s · ASTM D3359 %s · ISO 2409</div>"
+        % (_h.escape(name), L("方法 B", "Method B")),
+        warn_html,
+        "<div class=\"grid\">",
+        "<div class=\"kv\"><b>%s</b>%s</div>" % (L("样品", "Sample"), _h.escape(name)),
+        "<div class=\"kv\"><b>%s</b>BG-%s</div>" % (L("报告编号", "Report no."), time.strftime("%Y%m%d-%H%M")),
+        "<div class=\"kv\"><b>%s</b>%s</div>" % (L("报告时间", "Report time"), now),
+        "<div class=\"kv\"><b>%s</b>%d×%d → %d×%d</div>"
+        % (L("图片 / 分析尺寸", "Image / analysis size"), sess.size[0], sess.size[1],
+           int(shape2[1]), int(shape2[0])),
+        "<div class=\"kv\"><b>%s</b>%s</div>" % (L("判法", "k method"), mode_name),
+        "<div class=\"kv\"><b>%s</b>%d px</div>" % (L("刀缝宽度 k", "Cut width k"), int(req.line_px)),
+        "<div class=\"kv\"><b>%s</b>%.1f</div>" % (L("颜色容差", "Colour tolerance"), req.tol),
+        "<div class=\"kv\"><b>%s</b>%.2f</div>" % (L("露底纯度", "Bare purity"), req.purity),
+        "<div class=\"kv\"><b>%s</b>v%s</div>" % (L("算法版本", "Algorithm"), ALGO_VERSION),
+        "</div>",
+        "<div class=\"hero\"><img alt=\"%s\" src=\"data:image/jpeg;base64,%s\"></div>"
+        % (_h.escape(L("标注图", "Annotated image")), img_b64),
+        "<div class=\"cap\">%s</div>" % _h.escape(
+            L("红色为判定脱落区（已剔除刻线刀缝 %d px），绿色为漆膜保留区；框内编号对应下表 R1…Rn。",
+              "Red = removed coating (cut grooves of %d px excluded), green = coating kept; the numbers "
+              "in the boxes match R1…Rn below.", int(req.line_px))),
+        "<h2>%s</h2>" % _h.escape(L("各选区结果", "Results per region")),
+        "<table><thead><tr>",
+        "<th>%s</th>" % L("选区", "Region"),
+        "<th>%s</th>" % L("脱落率（已剔除刀缝）", "Removal % (grooves excluded)"),
+        "<th>ASTM</th><th>ISO</th>",
+        "<th>%s</th>" % L("选区面积 px", "Region area px"),
+        "<th>%s</th>" % L("漆膜 px", "Coating px"),
+        "<th>%s</th>" % L("基材 px", "Substrate px"),
+        "<th>%s</th>" % L("未分类 px", "Unclassified px"),
+        "<th>%s</th>" % L("原始脱落率", "Removal % (raw)"),
+        "</tr></thead><tbody>", "".join(trs), "</tbody></table>",
+        "<h2>%s</h2>" % _h.escape(L("色样与口径", "Colour samples and basis")),
+        "<div style=\"font-size:12.5px;line-height:1.9\">%s</div>" % "".join(sw),
+        "<div class=\"cap\" style=\"margin-top:6px\">%s</div>" % _h.escape(
+            L("面积单位：%s像素（分析图 = 长边 6 MP）。分母为「漆膜 + 露底」；未分类像素不计入。"
+              "「原始脱落率」未剔除刻线刀缝，仅作对照。",
+              "Area unit: %s pixels (analysis image = 6 MP on the long side). The denominator is "
+              "coating + bare area; unclassified pixels are excluded. “Raw” does not exclude the cut "
+              "grooves and is shown for comparison only.", units)),
+        "<footer>",
+        "%s<br>" % _h.escape(
+            L("判级依据 ASTM D3359（方法 B）/ ISO 2409；数值由图像自动分析得出，边界样品建议人工复核。",
+              "Grading follows ASTM D3359 (Method B) / ISO 2409. Values are produced by automated image "
+              "analysis; borderline samples should be reviewed by hand.")),
+        "%s<br>" % _h.escape(L("软件：百格附着力分析 v%s（算法 %s）· AGPL-3.0-or-later · © 2026 iamsad3508",
+                               "Software: Baige cross-cut analyser v%s (algorithm %s) · AGPL-3.0-or-later · "
+                               "© 2026 iamsad3508", APP_VERSION, ALGO_VERSION)),
+        "</footer></body></html>",
+    ]
+    return "".join(parts).encode("utf-8")
+
+
+@app.post("/api/export/report")
+async def export_report(req: ExportReq):
+    """一页式报告（取代原来的 CSV 导出按钮）。CSV 接口保留给脚本用。"""
+    sess = get_session(req.id)
+
+    def run():
+        with HEAVY_BLOCK:
+            with sess.lock:
+                return _report_html(sess, req)
+
+    data = await run_in_threadpool(run)
+    name = (req.name or "结果").rsplit(".", 1)[0] + "_百格报告.html"
+    return Response(data, media_type="text/html; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename*=UTF-8''%s"
+                             % __import__("urllib.parse").parse.quote(name)})
+
+
 @app.post("/api/export/csv")
 async def export_csv(req: ExportReq):
     sess = get_session(req.id)
@@ -3127,6 +3315,7 @@ def records_save(req: SaveReq):
         "ow": sess.size[0], "oh": sess.size[1],
         "res": req.res,
         "samples": [s.model_dump() for s in req.samples],
+        "algo": ALGO_VERSION,
         "tol": req.tol, "purity": req.purity, "line_px": req.line_px, "mode": req.mode,
         "roi_native": bool(req.roi_native),
         "rois": [{"box": list(r.box), "ang": r.ang} for r in req.rois],
