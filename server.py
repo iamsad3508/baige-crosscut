@@ -3418,6 +3418,134 @@ class GridReq(AnalyzeReq):
     inset: float = 0.0           # 格子内缩（px，分析图口径）
     line_xs: list[float] = []    # 手动给定线位（回放/调试用，坐标为分析图口径）
     line_ys: list[float] = []
+    # ---- 模型格网（v2.26）：不猜周期、不猜相位，格数/角度/刀缝宽由人给 ----
+    model: bool = False
+    cols: int = 0
+    rows: int = 0
+    angle: float = 0.0           # 格网倾角（度，逆时针为正，与 PIL rotate 同向）
+    k_band: float = 0.0          # 刀缝带宽（wire px）；0 = 用 line_px
+    auto_angle: bool = False     # 让服务端先估一个角度回来（只给建议，不改请求）
+    ox: float = 0.0              # 整格网平移（wire px，图像坐标）
+    oy: float = 0.0
+    line_dx: list[float] = []    # 每根竖线的单独微调（wire px，沿格网 u 方向）
+    line_dy: list[float] = []
+
+
+def _grid_model(view, labels, roles, union, bbox, req):
+    """模型格网：选区外接框按 cols×rows 等分，逐格统计「格内剩余漆膜面积」。
+
+    与自动拟合的分工：自动拟合去猜周期/相位（规则阵列好用，旧翻拍图上常直接失败）；
+    这里格数、角度、刀缝宽都从请求来，工具只做两件事——把线画出来、把每格里的
+    漆膜像素数出来。面积口径与主分析一致：只数被分成「漆膜」的像素，刀缝带按
+    k/2 从每边扣掉（扣掉的既不算脱落、也不进分母）。
+    """
+    x0, y0, x1, y1 = [float(v) for v in bbox]
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    bw, bh = max(4.0, x1 - x0), max(4.0, y1 - y0)
+    cols, rows = max(2, int(req.cols)), max(2, int(req.rows))
+    ang = float(req.angle or 0.0)
+    kw = float(req.k_band) if req.k_band else float(req.line_px or 1)
+    k = max(1.0, float(view.len_in(kw)))          # 视图 px
+    shape2 = union.shape
+
+    coat = np.zeros(shape2, bool)
+    sub = np.zeros(shape2, bool)
+    for j, role in enumerate(roles):
+        if role == cc.ROLE_COAT:
+            coat |= (labels == j)
+        elif role == cc.ROLE_SUB:
+            sub |= (labels == j)
+
+    def _rot(a):
+        im = Image.fromarray((a * 255).astype(np.uint8))
+        if abs(ang) > 0.01:
+            im = im.rotate(ang, resample=Image.NEAREST, center=(cx, cy), fillcolor=0)
+        return np.asarray(im) > 127
+
+    coat_r, sub_r = _rot(coat), _rot(sub)
+
+    per_x, per_y = bw / cols, bh / rows
+    u0, v0 = cx - bw / 2.0, cy - bh / 2.0
+    th = math.radians(-ang)
+    ct, st = math.cos(th), math.sin(th)
+
+    # 整体平移：图像空间 (ox,oy) → 格网坐标 (du,dv) = R(ang)·(ox,oy)
+    _ox, _oy = float(view.len_in(req.ox or 0.0)), float(view.len_in(req.oy or 0.0))
+    _ca, _sa = math.cos(math.radians(ang)), math.sin(math.radians(ang))
+    du, dv = _ox * _ca - _oy * _sa, _ox * _sa + _oy * _ca
+
+    # 逐线微调（刀走偏 / 不垂直时用）：每根内线沿自身法线各自平移
+    _dx = [float(view.len_in(v)) for v in (req.line_dx or [])]
+    _dy = [float(view.len_in(v)) for v in (req.line_dy or [])]
+    xb = [u0 + du + i * per_x + (_dx[i - 1] if 0 < i <= len(_dx) else 0.0) for i in range(cols + 1)]
+    yb = [v0 + dv + j * per_y + (_dy[j - 1] if 0 < j <= len(_dy) else 0.0) for j in range(rows + 1)]
+    u0, v0 = xb[0], yb[0]
+    bw = xb[-1] - xb[0]
+    bh = yb[-1] - yb[0]
+
+    def to_orig(u, v):
+        du, dv = u - cx, v - cy
+        x, y = cx + du * ct - dv * st, cy + du * st + dv * ct
+        return [round(v2, 1) for v2 in view.to_wire(x, y)]
+
+    def quad(a0, b0, a1, b1):
+        return [to_orig(a0, b0), to_orig(a1, b0), to_orig(a1, b1), to_orig(a0, b1)]
+
+    H, W = shape2
+    cells, bands = [], []
+    tot_a = tot_k = 0.0
+    for i in range(cols):
+        for j in range(rows):
+            a0 = xb[i] + k / 2.0
+            a1 = xb[i + 1] - k / 2.0
+            b0 = yb[j] + k / 2.0
+            b1 = yb[j + 1] - k / 2.0
+            ia0, ia1 = max(0, int(round(a0))), min(W, int(round(a1)))
+            ib0, ib1 = max(0, int(round(b0))), min(H, int(round(b1)))
+            if ia1 - ia0 < 2 or ib1 - ib0 < 2:
+                continue
+            # 分母只算「漆膜 + 露底」：过渡带/未分类的像素两头都不算，
+            # 否则调高露底纯度会让 pct 反而变大（实测 0.50→0.75 从 36.6% 跳到 62.8%）
+            pp = (coat_r[ib0:ib1, ia0:ia1] | sub_r[ib0:ib1, ia0:ia1])
+            area = float(pp.sum())
+            if area < 1:
+                continue
+            kept = float((coat_r[ib0:ib1, ia0:ia1] & pp).sum())
+            cells.append({"i": i, "j": j, "quad": quad(a0, b0, a1, b1),
+                          "area": area, "kept": kept,
+                          "pct": 100.0 * (1.0 - kept / area)})
+            tot_a += area
+            tot_k += kept
+
+    # 每根内线单独回传「轴线号 + 法线方向」：前端靠它知道拖的是哪根、往哪边算偏移
+    n_x = [ct, st]        # 格网 u 方向在图像坐标里的单位向量
+    n_y = [-st, ct]       # v 方向
+    for i in range(1, cols):
+        u = xb[i]
+        bands.append({"axis": "x", "idx": i, "n": [round(n_x[0], 6), round(n_x[1], 6)],
+                      "quad": quad(u - k / 2.0, v0, u + k / 2.0, v0 + bh)})
+    for j in range(1, rows):
+        v = yb[j]
+        bands.append({"axis": "y", "idx": j, "n": [round(n_y[0], 6), round(n_y[1], 6)],
+                      "quad": quad(u0, v - k / 2.0, u0 + bw, v + k / 2.0)})
+
+    cell_area = (tot_a / len(cells)) if cells else max(1.0, (per_x - k) * (per_y - k))
+    sc = view.len_out(1.0)                       # wire px / 视图 px；面积要平方
+    return {"ok": True, "warn": "", "model": True, "angle": ang,
+            "cols": cols, "rows": rows, "k": float(view.len_out(k)),
+            "pitch_x": float(view.len_out(per_x)), "pitch_y": float(view.len_out(per_y)),
+            "box": [float(view.to_wire(x0, y0)[0]), float(view.to_wire(x0, y0)[1]),
+                    float(view.to_wire(x1, y1)[0]), float(view.to_wire(x1, y1)[1])],
+            "bands": bands,
+            "cells": [dict(c, area=round(c["area"] * sc * sc, 1),
+                           kept=round(c["kept"] * sc * sc, 1)) for c in cells],
+            "total": {"pct": 100.0 * (1.0 - tot_k / max(tot_a, 1.0)),
+                      "area": round(tot_a * sc * sc, 1),
+                      "kept": round(tot_k * sc * sc, 1),
+                      "cell_area": round(cell_area * sc * sc, 1),
+                      "equiv": tot_k / cell_area},
+            "units": L("像素", "px")}
+
 
 
 @app.post("/api/grid")
@@ -3454,6 +3582,12 @@ def api_grid(req: GridReq):
     if gray.ndim == 3:
         gray = gray.mean(2)
     sub = np.ascontiguousarray(gray[gy0:gy1, gx0:gx1]).clip(0, 255).astype(np.uint8)
+
+    if req.model and req.cols >= 2 and req.rows >= 2:
+        out = _grid_model(view, labels, roles, union, (gx0, gy0, gx1, gy1), req)
+        if req.auto_angle:
+            out["angle_est"] = gf.estimate_angle(sub)
+        return out
 
     if req.line_xs and req.line_ys:
         r = {"ok": True, "warn": "", "angle": 0.0, "k_x": float(req.line_px), "k_y": float(req.line_px),

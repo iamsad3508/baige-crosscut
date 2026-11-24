@@ -189,3 +189,36 @@ def cells(xs, ys, k_x, k_y, inset=0.0):
                 continue
             cs.append({"i": i, "j": j, "box": [x0, y0, x1, y1], "area": (x1 - x0) * (y1 - y0)})
     return cs
+
+
+def estimate_angle(gray, span=8.0, max_dim=700, coarse=0.5, fine=0.05):
+    """估格网倾角（度）：旋转到「投影最尖锐」的那个角度。
+
+    翻拍/手摆的照片常歪 2~8°，轴对齐的 fit() 在这种图上会直接报 nolines
+    （实测一张 1280×960 的旧翻拍图歪 5.75°，fit 返回 nolines，转正后周期
+    123.6×117.6 px 一目了然）。只用来给人一个初值，最终角度仍由人定。
+    """
+    from PIL import ImageFilter
+    g = np.asarray(gray).astype(np.float32)
+    h0, w0 = g.shape
+    f = 1.0
+    if max(h0, w0) > max_dim:
+        f = float(max_dim) / max(h0, w0)
+        g = np.asarray(Image.fromarray(g.astype(np.uint8)).resize(
+            (max(1, int(w0 * f)), max(1, int(h0 * f))), Image.LANCZOS)).astype(np.float32)
+    bg = _gauss_bg(g, max(9.0, 0.05 * min(g.shape)))
+    raw = np.clip(bg - g, 0, None)
+
+    def score(ang):
+        a = np.asarray(Image.fromarray(raw, mode="F").rotate(
+            ang, resample=Image.BILINEAR, fillcolor=0.0))
+        y0, y1 = int(a.shape[0] * .08), int(a.shape[0] * .92)
+        x0, x1 = int(a.shape[1] * .08), int(a.shape[1] * .92)
+        a = a[y0:y1, x0:x1]
+        px = np.clip(_detrend(_smooth1d(a.mean(0), 2.0), 120), 0, None)
+        py = np.clip(_detrend(_smooth1d(a.mean(1), 2.0), 120), 0, None)
+        return float(np.var(np.diff(px)) + np.var(np.diff(py)))
+
+    best = max(((score(a), a) for a in np.arange(-span, span + 1e-9, coarse)))
+    best = max((score(a), a) for a in np.arange(best[1] - coarse, best[1] + coarse + 1e-9, fine))
+    return round(float(best[1]), 2)

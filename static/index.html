@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>百格分析 — ASTM D3359 / ISO 2409（用 DeepSeek API 开发）</title>
-<link rel="stylesheet" href="style.css?v=239">
+<link rel="stylesheet" href="style.css?v=240">
 </head>
 <body>
 <div class="topbar">
@@ -101,6 +101,38 @@
           <label class="chk"><input type="checkbox" id="chkGridCells"> <span data-i18n="grid.cells">每格上色（诊断）</span></label>
         </div>
         <div class="muted" id="gridInfo" style="margin-top:6px"></div>
+      </div>
+
+      <div class="sect">
+        <h4 data-i18n="gm.h">模型格网（旧图用）</h4>
+        <div class="muted" data-i18n="gm.tip">自动找不到线时走这条：列数、行数、歪角、刀宽都由你定，
+          工具把刀路按给定宽度画在屏幕上，并逐格报「格内还剩多少漆膜」——扣掉这条带，其余都算被拉掉的。
+          先在图上框住整片百格；线位不对时可直接在画布上拖那一根线，或拖框内空白处整体平移。</div>
+        <div class="row tight">
+          <span class="lab" data-i18n="gm.cols">列数</span><input id="gmCols" type="number" min="2" max="40" value="9">
+          <span class="lab" data-i18n="gm.rows">行数</span><input id="gmRows" type="number" min="2" max="40" value="7">
+        </div>
+        <div class="row tight">
+          <span class="lab" data-i18n="gm.angle">歪角</span>
+          <input id="gmAng" type="number" step="0.1" min="-20" max="20" value="0"><span class="muted">°</span>
+          <button id="btnGmAngle" data-i18n="gm.autoang">自动定角</button>
+        </div>
+        <div class="row tight">
+          <span class="lab" data-i18n="gm.k">刀宽</span>
+          <input id="gmK" type="range" min="2" max="80" step="1" value="17" style="flex:1;max-width:150px">
+          <span class="val" id="gmKv">17</span><span class="muted">px</span>
+        </div>
+        <div class="row tight">
+          <span class="lab" data-i18n="gm.pitch">格距</span>
+          <input id="gmPitch" type="number" step="0.1" min="0" value="0"><span class="muted">mm</span>
+          <label class="chk"><input type="checkbox" id="chkGmArea" checked> <span data-i18n="gm.area">标面积</span></label>
+        </div>
+        <div class="row tight">
+          <button id="btnGmRun" data-i18n="gm.run">铺格并统计</button>
+          <button id="btnGmReset" data-i18n="gm.reset" title="把拖过的线位与整体偏移归零">线位归零</button>
+          <button id="btnGmOff" data-i18n="grid.clear">去掉格网</button>
+        </div>
+        <div class="muted" id="gmInfo" style="margin-top:6px"></div>
       </div>
 
       <div class="sect" style="display:none" aria-hidden="true">
@@ -293,7 +325,7 @@
     </div>
   </aside>
 </main>
-<script src="i18n.js?v=239"></script>
-<script src="app.js?v=239"></script>
+<script src="i18n.js?v=240"></script>
+<script src="app.js?v=240"></script>
 </body>
 </html>

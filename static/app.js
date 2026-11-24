@@ -33,6 +33,7 @@ const S = {
   blocks: null, blocksOn: true, blocksTimer: null, ants: 0,
   blocksSeq: 0,
   grid: null, gridCells: false,
+  gm: null, gmPitch: 0, gmArea: true, gmOff: { ox: 0, oy: 0, dx: [], dy: [] }, gmDrag: null,
 };
 
 /* ------------------------------------------------------------------ 工具 */
@@ -204,6 +205,7 @@ function draw() {
   drawBlocks();
   drawRois();
   drawGrid();
+  drawModelGrid();
   drawRuler();
   if (S.drag && S.drag.kind === 'new') {
     const { a, b } = S.drag;
@@ -285,6 +287,186 @@ function drawGrid() {
   ctx.fillStyle = '#fff';
   ctx.fillText(lab, a0.x + 8, a0.y - 4);
   ctx.restore();
+}
+
+/* --- 模型格网（旧图/翻拍图）：刀路按人给的宽度画，逐格统计格内剩余漆膜面积 --- */
+function gmAreaText(px2) {
+  const g = S.gm;
+  if (S.gmPitch > 0 && g && g.pitch_x > 0) {          // 给了格距就换算成 mm²
+    const f = S.gmPitch / g.pitch_x;
+    return fmt(px2 * f * f, 2) + ' mm²';
+  }
+  if (px2 >= 1e6) return fmt(px2 / 1e6, 2) + 'M px²';
+  if (px2 >= 1e3) return fmt(px2 / 1e3, 1) + 'k px²';
+  return Math.round(px2) + ' px²';
+}
+
+function gmPath(q) {
+  ctx.beginPath();
+  q.forEach((p, i) => {
+    const s = toScreen(p[0], p[1]);
+    if (i) ctx.lineTo(s.x, s.y); else ctx.moveTo(s.x, s.y);
+  });
+  ctx.closePath();
+}
+
+function drawModelGrid() {
+  const g = S.gm;
+  if (!g || !g.cells || !g.cells.length) return;
+  ctx.save();
+  const dg = S.gmDrag || {};
+  const gx = dg.kind === 'move' ? dg.gdx : 0, gy = dg.kind === 'move' ? dg.gdy : 0;
+  const sh = q => (gx || gy) ? q.map(p => [p[0] + gx, p[1] + gy]) : q;
+  for (const b of (g.bands || [])) {                  // 刀缝带：给定宽度，所见即所扣
+    let q = b.quad || b;
+    const dragging = dg.kind === 'line' && dg.axis === b.axis && dg.idx === b.idx;
+    if (dragging) q = q.map(p => [p[0] + dg.ldx, p[1] + dg.ldy]);
+    gmPath(sh(q));
+    ctx.fillStyle = dragging ? 'rgba(255,190,70,.55)' : 'rgba(255,150,40,.30)';
+    ctx.fill();
+    ctx.strokeStyle = dragging ? '#fff3c4' : 'rgba(255,205,120,.9)';
+    ctx.lineWidth = dragging ? 2 : 1;
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(70,225,255,.55)';
+  ctx.lineWidth = 1;
+  for (const c of g.cells) { gmPath(sh(c.quad)); ctx.stroke(); }
+
+  if (S.gmArea) {
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const c of g.cells) {
+      const cx2 = (c.quad[0][0] + c.quad[2][0]) / 2 + gx, cy2 = (c.quad[0][1] + c.quad[2][1]) / 2 + gy;
+      const s = toScreen(cx2, cy2);
+      const p0 = toScreen(c.quad[0][0] + gx, c.quad[0][1] + gy), p1 = toScreen(c.quad[2][0] + gx, c.quad[2][1] + gy);
+      const cw = Math.abs(p1.x - p0.x), chh = Math.abs(p1.y - p0.y);
+      if (cw < 34 || chh < 20) continue;
+      const t1 = Math.round(100 - c.pct) + '%';       // 剩余漆膜占比
+      const t2 = gmAreaText(c.kept);                  // 剩余漆膜面积
+      ctx.font = '700 12px system-ui, sans-serif';
+      const w1 = ctx.measureText(t1).width;
+      ctx.font = '600 10px system-ui, sans-serif';
+      const w2 = ctx.measureText(t2).width;
+      const bw = Math.max(w1, w2) + 8;
+      const two = chh > 40;
+      ctx.fillStyle = 'rgba(8,10,16,.70)';
+      ctx.fillRect(s.x - bw / 2, s.y - (two ? 15 : 9), bw, two ? 30 : 18);
+      ctx.font = '700 12px system-ui, sans-serif';
+      ctx.fillStyle = c.pct <= 10 ? '#8dffa8' : (c.pct <= 60 ? '#ffe36e' : '#ff8b7d');
+      ctx.fillText(t1, s.x, s.y - (two ? 7 : 0));
+      if (two) {
+        ctx.font = '600 10px system-ui, sans-serif';
+        ctx.fillStyle = 'rgba(230,240,255,.92)';
+        ctx.fillText(t2, s.x, s.y + 7);
+      }
+    }
+  }
+
+  const b = g.box, a0 = toScreen(b[0] + gx, b[1] + gy);
+  const txt = T('未脱落 ', 'coating left ') + gmAreaText(g.total.kept)
+    + ' · ' + g.cols + '×' + g.rows + ' · ' + T('刀宽 ', 'blade ') + Math.round(g.k) + 'px'
+    + ' · ' + T('格内脱落 ', 'removal ') + fmt(g.total.pct, 1) + '%';
+  ctx.font = '700 14px system-ui, sans-serif';
+  const tw = ctx.measureText(txt).width;
+  ctx.fillStyle = 'rgba(8,10,16,.84)';
+  ctx.fillRect(a0.x, a0.y - 26, tw + 16, 24);
+  ctx.fillStyle = '#ffd88a';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+  ctx.fillText(txt, a0.x + 8, a0.y - 6);
+  ctx.restore();
+}
+
+function distSeg(px, py, a, b) {
+  const vx = b.x - a.x, vy = b.y - a.y, L2 = vx * vx + vy * vy;
+  let t = L2 ? ((px - a.x) * vx + (py - a.y) * vy) / L2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (a.x + t * vx), py - (a.y + t * vy));
+}
+
+/* 画布上抓格网：靠近某根刀缝带 → 拖这一根；在框内空白处 → 整体平移 */
+function gmHitAt(ex, ey) {
+  const g = S.gm;
+  if (!g || !g.bands) return null;
+  for (const b of g.bands) {
+    const q = (b.quad || b).map(p => toScreen(p[0], p[1]));
+    const a = { x: (q[0].x + q[3].x) / 2, y: (q[0].y + q[3].y) / 2 };
+    const c = { x: (q[1].x + q[2].x) / 2, y: (q[1].y + q[2].y) / 2 };
+    if (distSeg(ex, ey, a, c) < 10) return { axis: b.axis, idx: b.idx, n: b.n || [1, 0] };
+  }
+  const bx = g.box;
+  if (bx) {
+    const p0 = toScreen(bx[0], bx[1]), p1 = toScreen(bx[2], bx[3]);
+    if (ex > Math.min(p0.x, p1.x) && ex < Math.max(p0.x, p1.x)
+      && ey > Math.min(p0.y, p1.y) && ey < Math.max(p0.y, p1.y)) return { move: true };
+  }
+  return null;
+}
+
+function gmBody(extra) {
+  return Object.assign({
+    id: S.id, res: S.res, rois: S.rois.map(r => ({ box: r.box, ang: r.ang })),
+    samples: S.samples.map(x => ({ rgb: x.rgb, role: x.role })),
+    tol: S.tol, purity: S.purity, line_px: S.line, mode: S.exmode,
+    loc_tile: 64, loc_factor: 1.6, roi_native: S.roiNative,
+    model: true,
+    cols: +$('#gmCols').value || 0, rows: +$('#gmRows').value || 0,
+    angle: +$('#gmAng').value || 0, k_band: +$('#gmK').value || 0,
+    ox: S.gmOff.ox, oy: S.gmOff.oy,
+    line_dx: S.gmOff.dx.slice(), line_dy: S.gmOff.dy.slice(),
+  }, extra || {});
+}
+
+function gmSummary(g) {
+  const n = g.cells.length;
+  const intact = g.cells.filter(c => c.pct <= 10).length;
+  const gone = g.cells.filter(c => c.pct > 60).length;
+  return g.cols + '×' + g.rows + ' · ' + T('刀宽 ', 'blade ') + Math.round(g.k) + 'px'
+    + ' · ' + T('格距 ', 'pitch ') + Math.round(g.pitch_x) + '×' + Math.round(g.pitch_y) + 'px'
+    + ' · ' + T('未脱落 ', 'left ') + gmAreaText(g.total.kept)
+    + ' · ' + T('格内脱落 ', 'removal ') + fmt(g.total.pct, 1) + '%'
+    + ' · ' + T('完整格 ' + intact + '/' + n, 'intact ' + intact + '/' + n)
+    + (gone ? ' · ' + T('基本掉光 ' + gone, 'gone ' + gone) : '');
+}
+
+async function runModelGrid(extra) {
+  if (!S.id) { setStatus(T('先打开一张图', 'Open an image first')); return; }
+  if (!S.rois.length) { setStatus(T('先在图上拖一个选区，把整片百格框住', 'Draw a region around the grid first')); return; }
+  if (S.busy) return;
+  S.busy = true;
+  setStatus(T('正在铺格…', 'Laying out the grid…'));
+  try {
+    const g = await post('api/grid', gmBody(extra));
+    if (!g.ok) {
+      S.gm = null;
+      const msg = T('铺格失败：先在图上框住整片百格，再填列数/行数', 'Grid failed — frame the whole grid first');
+      $('#gmInfo').textContent = msg; setStatus(msg); draw(); return;
+    }
+    S.gm = g;
+    if (S.gmOff.dx.length !== Math.max(0, g.cols - 1) || S.gmOff.dy.length !== Math.max(0, g.rows - 1)) {
+      S.gmOff.dx = new Array(Math.max(0, g.cols - 1)).fill(0);
+      S.gmOff.dy = new Array(Math.max(0, g.rows - 1)).fill(0);
+    }
+    S.gmPitch = +$('#gmPitch').value || 0;
+    $('#gmInfo').textContent = gmSummary(g);
+    setStatus(T('格网已铺好：橙带=你设的刀宽（扣掉不算），逐格是剩余漆膜；线不齐可直接拖那一根', 'Grid laid out — orange = the blade width you excluded'));
+    draw();
+  } catch (e) {
+    setStatus(String(e.message || e));
+  } finally {
+    S.busy = false;
+  }
+}
+
+async function gmAutoAngle() {
+  if (!S.id || !S.rois.length) { setStatus(T('先框住整片百格', 'Frame the grid first')); return; }
+  setStatus(T('正在估歪角…', 'Estimating tilt…'));
+  try {
+    const g = await post('api/grid', gmBody({ auto_angle: true, cols: 2, rows: 2 }));
+    const a = (g && g.angle_est);
+    if (a === undefined || a === null) { setStatus(T('估不出角度', 'Could not estimate')); return; }
+    $('#gmAng').value = a;
+    setStatus(T('估到歪角 ' + a + '°，可以再手调', 'Tilt ≈ ' + a + '° — adjust if needed'));
+    await runModelGrid();
+  } catch (e) { setStatus(String(e.message || e)); }
 }
 
 function gridSummary(g) {
@@ -725,6 +907,18 @@ cv.addEventListener('pointerdown', e => {
     S.rulerSeg = [p.x, p.y, p.x, p.y];
     return;
   }
+  // 模型格网：先判是不是在抓某根线 / 整体拖
+  if (S.mode === 'rect' && S.gm) {
+    const gh = gmHitAt(ex, ey);
+    if (gh) {
+      const pi = toImg(ex, ey);
+      S.drag = gh.move
+        ? { kind: 'gmmove', p0x: pi.x, p0y: pi.y }
+        : { kind: 'gmline', axis: gh.axis, idx: gh.idx, n: gh.n, p0x: pi.x, p0y: pi.y, off: 0 };
+      cv.style.cursor = 'move';
+      return;
+    }
+  }
   // rect 模式
   const hit = hitAt(ex, ey);
   const p = toImg(ex, ey);
@@ -784,6 +978,17 @@ cv.addEventListener('pointermove', e => {
   const d = S.drag;
   if (d.kind === 'pan') { S.panX = d.px + (ex - d.ex); S.panY = d.py + (ey - d.ey); clampPan(); drawSoon(); return; }
   const p = toImg(ex, ey);
+
+  if (d.kind === 'gmline') {
+    const off = (p.x - d.p0x) * d.n[0] + (p.y - d.p0y) * d.n[1];   // 沿这根线的法线投位移
+    d.off = off;
+    S.gmDrag = { kind: 'line', axis: d.axis, idx: d.idx, ldx: off * d.n[0], ldy: off * d.n[1] };
+    drawSoon(); return;
+  }
+  if (d.kind === 'gmmove') {
+    S.gmDrag = { kind: 'move', gdx: p.x - d.p0x, gdy: p.y - d.p0y };
+    drawSoon(); return;
+  }
 
   if (d.kind === 'annot') {
     const c = S.annot.cur;
@@ -875,6 +1080,20 @@ cv.addEventListener('pointerup', e => {
   cv.style.cursor = 'crosshair';
   if (!d) { draw(); return; }
   if (d.kind === 'pan') { draw(); return; }
+  if (d.kind === 'gmline') {
+    S.gmDrag = null;
+    if (!d.off) { draw(); return; }
+    if (d.axis === 'x') S.gmOff.dx[d.idx - 1] = (S.gmOff.dx[d.idx - 1] || 0) + d.off;
+    else S.gmOff.dy[d.idx - 1] = (S.gmOff.dy[d.idx - 1] || 0) + d.off;
+    runModelGrid(); return;
+  }
+  if (d.kind === 'gmmove') {
+    const dd = S.gmDrag || { gdx: 0, gdy: 0 };
+    S.gmDrag = null;
+    if (!dd.gdx && !dd.gdy) { draw(); return; }
+    S.gmOff.ox += dd.gdx; S.gmOff.oy += dd.gdy;
+    runModelGrid(); return;
+  }
   if (d.kind === 'annot') {
     const c = S.annot.cur;
     S.annot.cur = null;
@@ -2078,6 +2297,7 @@ function clearImageState() {
   S.suggest = null; S.suggestSrc = ''; S.span = null;
   S.autoTotal = null; S.autoRows = null; S.autoLines = null;
   S.blocks = null; S.soft = null;
+  S.gm = null; S.grid = null; S.gmDrag = null; S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] };
   S.rulerHist = []; S.rulerFull = []; S.rulerLast = null; S.rulerSeg = null; S.rulerDone = null;
   S.suggestHold = null;
   clearTimeout(S.rulerFadeT);
@@ -2918,6 +3138,20 @@ async function refreshRecCount() {
 $('#btnRec3').onclick = applyRecommended;
 if ($('#btnGrid')) $('#btnGrid').onclick = runGrid;
 if ($('#btnGridOff')) $('#btnGridOff').onclick = () => { S.grid = null; $('#gridInfo').textContent = ''; draw(); };
+/* 模型格网（旧图）：列/行/歪角/刀缝宽都由人给 */
+const gmRerun = debounce(() => { if (S.gm) runModelGrid(); }, 420);
+if ($('#btnGmRun')) $('#btnGmRun').onclick = () => runModelGrid();
+if ($('#btnGmAngle')) $('#btnGmAngle').onclick = gmAutoAngle;
+if ($('#btnGmOff')) $('#btnGmOff').onclick = () => { S.gm = null; S.gmDrag = null; S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] }; $('#gmInfo').textContent = ''; draw(); };
+if ($('#btnGmReset')) $('#btnGmReset').onclick = () => {
+  S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] };
+  if (S.gm) runModelGrid(); else draw();
+};
+if ($('#gmK')) $('#gmK').oninput = (e) => { $('#gmKv').textContent = e.target.value; gmRerun(); };
+['#gmCols', '#gmRows', '#gmAng', '#gmPitch'].forEach(s => {
+  if ($(s)) $(s).onchange = () => { if (S.gm || s === '#gmPitch') gmRerun(); };
+});
+if ($('#chkGmArea')) $('#chkGmArea').onchange = (e) => { S.gmArea = e.target.checked; draw(); };
 if ($('#chkGridCells')) $('#chkGridCells').onchange = (e) => { S.gridCells = e.target.checked; draw(); };
 async function applyRecommended() {
   if (!S.id) { setStatus(T('先打开图片', 'Open an image first')); return; }
