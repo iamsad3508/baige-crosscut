@@ -34,6 +34,7 @@ from typing import Optional
 from starlette.concurrency import run_in_threadpool
 
 import crosscut as cc
+import gridfit as gf
 import srvi18n
 from srvi18n import L, is_en
 
@@ -3411,6 +3412,98 @@ def _report_pdf(D):
                              "Software: Baige cross-cut analyser v%s (algorithm %s) · AGPL-3.0-or-later · "
                              "© 2026 iamsad3508", D["app"], D["algo"]))
     return bytes(pdf.output())
+
+
+class GridReq(AnalyzeReq):
+    inset: float = 0.0           # 格子内缩（px，分析图口径）
+    line_xs: list[float] = []    # 手动给定线位（回放/调试用，坐标为分析图口径）
+    line_ys: list[float] = []
+
+
+@app.post("/api/grid")
+def api_grid(req: GridReq):
+    """实验：在选区范围内自动拟合格网，逐格算脱落率。
+
+    只为「规则阵列」设计（激光划格 / 刀割百格）：先在大核背景差图上做投影，
+    用自相关定周期、最小二乘拟合相位，再按实测槽宽切出格子。
+    失败时返回 warn（格网.歪了 / 找不到线），前端提示用户先转正或手画选区。
+    """
+    sess = get_session(req.id)
+    with HEAVY_BLOCK:
+        with sess.lock:
+            work, view = _view_for(sess, req)
+            samples = [s.model_dump() for s in req.samples]
+            roles = _roles(samples)
+            rois_ = [r.model_dump() for r in req.rois]
+            rois_v = view.rois_in(rois_) if rois_ else []
+            shape2 = work["lab"].shape[:2]
+            masks = _masks(shape2, rois_v) if rois_v else [np.ones(shape2, bool)]
+            labels, *_ = _labels_for(sess, work, req.tol, req.purity, samples, masks,
+                                     _msig(rois_v), view.key)
+
+    union = np.zeros(shape2, bool)
+    for m in masks:
+        union |= m
+    ys_i, xs_i = np.where(union)
+    if xs_i.size == 0:
+        raise HTTPException(400, L("先画一个选区再拟合格网", "Draw a region before fitting the grid"))
+    gx0, gx1 = int(xs_i.min()), int(xs_i.max()) + 1
+    gy0, gy1 = int(ys_i.min()), int(ys_i.max()) + 1
+    rgb = work["rgb"]
+    gray = np.asarray(rgb).astype(np.float32)
+    if gray.ndim == 3:
+        gray = gray.mean(2)
+    sub = np.ascontiguousarray(gray[gy0:gy1, gx0:gx1]).clip(0, 255).astype(np.uint8)
+
+    if req.line_xs and req.line_ys:
+        r = {"ok": True, "warn": "", "angle": 0.0, "k_x": float(req.line_px), "k_y": float(req.line_px),
+             "period_x": float(np.median(np.diff(req.line_xs))) if len(req.line_xs) > 1 else 0.0,
+             "period_y": float(np.median(np.diff(req.line_ys))) if len(req.line_ys) > 1 else 0.0,
+             "resid_x": 0.0, "resid_y": 0.0, "strength_x": 0.0, "strength_y": 0.0,
+             "xs": list(req.line_xs), "ys": list(req.line_ys), "scale": 1.0}
+    else:
+        r = gf.fit(sub)
+        if not r.get("ok"):
+            return {"ok": False, "warn": r.get("warn") or "grid.nolines",
+                    "angle": r.get("angle", 0.0), "dark_frac": r.get("dark_frac", 0.0)}
+        r["xs"] = [gx0 + v for v in r["xs"]]
+        r["ys"] = [gy0 + v for v in r["ys"]]
+
+    cells = gf.cells(r["xs"], r["ys"], r["k_x"], r["k_y"], inset=float(req.inset))
+
+    sub_all = np.zeros(shape2, bool)
+    for j, role in enumerate(roles):
+        if role == cc.ROLE_SUB:
+            sub_all |= (labels == j)
+    sub_all &= union
+    k_view = max(1, int(round(view.len_in(req.line_px))))
+    kept, *_ = cc.keep_mask(sub_all, k_view, req.mode, int(req.loc_tile), float(req.loc_factor))
+
+    out, tot_a, tot_r = [], 0.0, 0.0
+    for c in cells:
+        bx0, by0, bx1, by1 = [int(round(v)) for v in c["box"]]
+        bx0, by0 = max(0, bx0), max(0, by0)
+        bx1, by1 = min(shape2[1], bx1), min(shape2[0], by1)
+        if bx1 <= bx0 or by1 <= by0:
+            continue
+        u = union[by0:by1, bx0:bx1]
+        a = float(u.sum())
+        if a <= 0:
+            continue
+        rem = float((kept[by0:by1, bx0:bx1] & u).sum())
+        pct = 100.0 * rem / max(1.0, a)
+        out.append({"i": int(c["i"]), "j": int(c["j"]),
+                    "box": [round(float(v), 1) for v in c["box"]],
+                    "area": a, "removed": rem, "pct": pct, "astm": cc.astm_class(pct)})
+        tot_a += a
+        tot_r += rem
+    total = 100.0 * tot_r / max(1.0, tot_a)
+    return {"ok": True, "warn": r.get("warn") or "", "angle": r.get("angle", 0.0),
+            "period_x": r.get("period_x", 0.0), "period_y": r.get("period_y", 0.0),
+            "resid_x": r.get("resid_x", 0.0), "resid_y": r.get("resid_y", 0.0),
+            "k_x": r.get("k_x", 0.0), "k_y": r.get("k_y", 0.0),
+            "xs": r["xs"], "ys": r["ys"], "cells": out,
+            "total": {"pct": total, "astm": cc.astm_class(total), "area": tot_a, "removed": tot_r}}
 
 
 @app.post("/api/export/report")

@@ -32,6 +32,7 @@ const S = {
   annot: { tool: 1, r: 15, strokes: [], cur: null, res: null },
   blocks: null, blocksOn: true, blocksTimer: null, ants: 0,
   blocksSeq: 0,
+  grid: null,
 };
 
 /* ------------------------------------------------------------------ 工具 */
@@ -202,6 +203,7 @@ function draw() {
   drawBlockAnts();
   drawBlocks();
   drawRois();
+  drawGrid();
   drawRuler();
   if (S.drag && S.drag.kind === 'new') {
     const { a, b } = S.drag;
@@ -221,6 +223,91 @@ function draw() {
   }
   const zl = Math.round(s * 100) + '%';
   if (zl !== lastZoomLabel) { lastZoomLabel = zl; $('#zoomLabel').textContent = zl; }
+}
+
+/* --- 格网（实验）：把自动铺出来的格子画上去，按脱落率上色 --- */
+function gridColor(pct) {
+  // 0% 绿 → 35% 黄 → 65%+ 红，和结果区的分级口径一致
+  const t = Math.max(0, Math.min(1, pct / 65));
+  const r = Math.round(60 + t * 195), g = Math.round(200 - t * 150), b = Math.round(90 - t * 40);
+  return `rgba(${r},${g},${b},`;
+}
+
+function drawGrid() {
+  if (!S.grid) return;
+  const s = scale();
+  ctx.save();
+  ctx.lineWidth = 1;
+  for (const c of S.grid.cells) {
+    const p0 = toScreen(c.box[0], c.box[1]), p1 = toScreen(c.box[2], c.box[3]);
+    const w = p1.x - p0.x, h = p1.y - p0.y;
+    ctx.fillStyle = gridColor(c.pct) + '0.16)';
+    ctx.fillRect(p0.x, p0.y, w, h);
+    ctx.strokeStyle = 'rgba(255,62,165,.85)';
+    ctx.strokeRect(p0.x + 0.5, p0.y + 0.5, w - 1, h - 1);
+    if (w > 34 && h > 20) {
+      ctx.font = '600 11px system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const txt = c.pct.toFixed(1) + '%';
+      ctx.fillStyle = 'rgba(0,0,0,.55)';
+      ctx.fillText(txt, p0.x + w / 2 + 1, p0.y + 13);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(txt, p0.x + w / 2, p0.y + 12);
+    }
+  }
+  ctx.restore();
+}
+
+function gridSummary(g) {
+  const n = g.cells.length;
+  if (!n) return T('没找到格子', 'No cell found');
+  const worst = g.cells.reduce((a, b) => (b.pct > a.pct ? b : a));
+  const cols = new Set(g.cells.map(c => c.i)).size, rows = new Set(g.cells.map(c => c.j)).size;
+  return T(`${cols} 列 × ${rows} 行 · 共 ${n} 格 · 周期 ${Math.round(g.period_x)}px · 槽宽 ${Math.round(g.k_x)}px · 合计 `,
+           `${cols} × ${rows} · ${n} cells · pitch ${Math.round(g.period_x)}px · groove ${Math.round(g.k_x)}px · total `)
+    + g.total.pct.toFixed(2) + '% (' + g.total.astm + ') · '
+    + T('最差 ', 'worst ') + worst.pct.toFixed(1) + '%';
+}
+
+async function runGrid() {
+  if (!S.id) { setStatus(T('先打开一张图', 'Open an image first')); return; }
+  if (!S.rois.length) { setStatus(T('先在图上拖一个选区，再自动找格子', 'Draw a region first')); return; }
+  if (S.busy) return;
+  S.busy = true;
+  setStatus(T('正在找格子…', 'Fitting the grid…'));
+  try {
+    const g = await post('api/grid', {
+      id: S.id, res: S.res, rois: S.rois.map(r => ({ box: r.box, ang: r.ang })),
+      samples: S.samples.map(x => ({ rgb: x.rgb, role: x.role })),
+      tol: S.tol, purity: S.purity, line_px: S.line, mode: S.exmode,
+      loc_tile: 64, loc_factor: 1.6, roi_native: S.roiNative, inset: 0,
+    });
+    if (!g.ok) {
+      S.grid = null;
+      const msg = g.warn === 'grid.tilted'
+        ? T(`照片歪了约 ${Math.abs(g.angle).toFixed(1)}°，先把图转正再找：工具-旋转`, `Image is tilted ~${Math.abs(g.angle).toFixed(1)}° — rotate it first (Tools · Rotate)`)
+        : T('没找到规则的格线：确认选区盖住了整片格子，且刀缝/烧蚀线在画面里看得清',
+            'No regular grid found: make sure the region covers the whole grid and the grooves are visible');
+      $('#gridInfo').textContent = msg;
+      setStatus(msg);
+      draw();
+      return;
+    }
+    S.grid = g;
+    let info = gridSummary(g);
+    if (S.purity < 0.70 && g.total.pct > 2) {
+      // 亮面/高光多的涂层：白色高光会被算成露底，纯度提到 0.75 基本就干净了（实测 2.56% → 0.18%）
+      info += ' · ' + T('高光可能被当成露底了：把「露底纯度」提到 0.75 再找一次',
+                        'Highlights may read as bare substrate — raise “bare purity” to 0.75 and refit');
+    }
+    $('#gridInfo').textContent = info;
+    setStatus(T('格网已铺好：每格单独算脱落率，可对照图上的百分比', 'Grid fitted — each cell is graded on its own'));
+    draw();
+  } catch (e) {
+    setStatus(String(e.message || e));
+  } finally {
+    S.busy = false;
+  }
 }
 
 /* --- 手绘三色笔：红=确认脱落，蓝=确认刀缝，黄=无法判断 --- */
@@ -2799,6 +2886,8 @@ async function refreshRecCount() {
   } catch (e) {}
 }
 $('#btnRec3').onclick = applyRecommended;
+if ($('#btnGrid')) $('#btnGrid').onclick = runGrid;
+if ($('#btnGridOff')) $('#btnGridOff').onclick = () => { S.grid = null; $('#gridInfo').textContent = ''; draw(); };
 async function applyRecommended() {
   if (!S.id) { setStatus(T('先打开图片', 'Open an image first')); return; }
   if (S.samples.length < 2) { setStatus(T('先吸两个颜色：漆膜 + 基材', 'Sample two colours first: coating + substrate')); return; }

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>百格分析 — ASTM D3359 / ISO 2409（用 DeepSeek API 开发）</title>
-<link rel="stylesheet" href="style.css?v=237">
+<link rel="stylesheet" href="style.css?v=238">
 </head>
 <body>
 <div class="topbar">
@@ -89,6 +89,17 @@
           <button id="btnClearRoi" data-i18n="roi.clear">清空全部</button>
           <span class="muted" id="roiHint" data-i18n="roi.hint">拖动框内平移 · 拖四角/四边改大小 · 右键删除</span>
         </div>
+      </div>
+
+      <div class="sect">
+        <h4 data-i18n="grid.h">格网（实验）</h4>
+        <div class="muted" data-i18n="grid.tip">在选区范围里自动找格子：适合激光划格、刀割百格这种规则阵列。
+          找到后每格单独算脱落率，可直接看出哪一格掉得最凶（不影响上面的选区结果）。</div>
+        <div class="row" style="margin-top:8px">
+          <button id="btnGrid" data-i18n="grid.run">自动找格子</button>
+          <button id="btnGridOff" data-i18n="grid.clear">去掉格网</button>
+        </div>
+        <div class="muted" id="gridInfo" style="margin-top:6px"></div>
       </div>
 
       <div class="sect" style="display:none" aria-hidden="true">
@@ -281,7 +292,7 @@
     </div>
   </aside>
 </main>
-<script src="i18n.js?v=237"></script>
-<script src="app.js?v=237"></script>
+<script src="i18n.js?v=238"></script>
+<script src="app.js?v=238"></script>
 </body>
 </html>
