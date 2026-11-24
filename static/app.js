@@ -3195,6 +3195,24 @@ if ($('#btnGridOff')) $('#btnGridOff').onclick = () => { S.grid = null; $('#grid
 const gmRerun = debounce(() => { if (S.gm) runModelGrid(); }, 420);
 if ($('#btnGmRun')) $('#btnGmRun').onclick = () => runModelGrid();
 if ($('#btnGmAngle')) $('#btnGmAngle').onclick = gmAutoAngle;
+/* 模型格网是实验功能：默认收起来，勾一下才显示（记忆在 localStorage） */
+function applyGmShow(on) {
+  const w = $('#gmWrap');
+  if (w) w.hidden = !on;
+  if (!on) { S.gm = null; S.gmDrag = null; if ($('#gmInfo')) $('#gmInfo').textContent = ''; }
+  if (typeof draw === 'function') draw();
+}
+if ($('#chkGmShow')) {
+  let on = false;
+  try { on = localStorage.getItem('baige.gmShow') === '1'; } catch (_) {}
+  $('#chkGmShow').checked = on;
+  applyGmShow(on);
+  $('#chkGmShow').onchange = () => {
+    const v = $('#chkGmShow').checked;
+    try { localStorage.setItem('baige.gmShow', v ? '1' : '0'); } catch (_) {}
+    applyGmShow(v);
+  };
+}
 if ($('#btnGmSnap')) $('#btnGmSnap').onclick = () => runModelGrid({ snap: true });
 if ($('#btnGmColor')) $('#btnGmColor').onclick = async () => {
   const ok = await gmAutoSample(false);
