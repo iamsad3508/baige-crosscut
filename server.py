@@ -63,7 +63,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.21"      # 软件版本（发版时改）
+APP_VERSION = "2.22"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3005,36 +3005,6 @@ def _block_stats(labels, masks, rois_v, roles, k, mode, req):
     return out
 
 
-def _poly_dash(dr, pts, dash=5.0, gap=5.0, color=(0, 0, 0, 235), width=1, offset=0.0):
-    """把折线画成虚线（PIL 没有 dash 支持，自己按弧长走）。
-
-    offset 让黑白两遍错开，叠起来就是 PS 那种蚂蚁线。
-    """
-    if not pts or len(pts) < 2:
-        return
-    pos = -float(offset) % (dash + gap)
-    started = False
-    for i in range(len(pts)):
-        x0, y0 = pts[i]
-        x1, y1 = pts[(i + 1) % len(pts)]
-        seg = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
-        if seg <= 0:
-            continue
-        t = 0.0
-        while t < seg:
-            phase = pos % (dash + gap)
-            step = (dash - phase) if phase < dash else (dash + gap - phase)
-            step = max(0.5, min(step, seg - t))
-            if phase < dash:
-                ax, ay = x0 + (x1 - x0) * (t / seg), y0 + (y1 - y0) * (t / seg)
-                bx, by = x0 + (x1 - x0) * ((t + step) / seg), y0 + (y1 - y0) * ((t + step) / seg)
-                dr.line([ax, ay, bx, by], fill=color, width=width)
-                started = True
-            t += step
-            pos += step
-    return started
-
-
 def _plain_png(sess, req, max_w=1500, quality=92):
     """A 图：**不加覆盖层**的原图，只描选区细框 —— 给人看“这到底长什么样”。"""
     work, view = _view_for(sess, req)
@@ -3058,9 +3028,9 @@ def _plain_png(sess, req, max_w=1500, quality=92):
 
 
 def _overlay_png(sess, req, max_w=1500, quality=92):
-    """B 图：线上画布的观感 —— 半透明红覆盖 + 1 px 细蚂蚁线（含孔洞）。
+    """B 图：分析视图 —— 判定脱落的像素盖一层半透明红，其余保持原样。
 
-    块只描框不写号（用户要求：数字会挡住画面，块号看结果表的块数即可）。
+    不描线、不写号（用户明确要求：只覆盖红色就行，蚂蚁线和块号都不要）。
     返回 (jpeg, 每选区块明细) 供表格/报告使用。
     """
     work, view = _view_for(sess, req)
@@ -3075,8 +3045,6 @@ def _overlay_png(sess, req, max_w=1500, quality=92):
                                   _msig(rois_v), view.key)
 
     base = np.asarray(work["rgb"]).astype(np.float32)
-    h, w = base.shape[:2]
-    ants = []          # [(polygon, excluded)] —— 画蚂蚁线用
     meta = []
     for ri, m in enumerate(masks):
         subc = np.zeros(labels.shape[:2], bool)
@@ -3089,38 +3057,24 @@ def _overlay_png(sess, req, max_w=1500, quality=92):
         base[kept] = base[kept] * 0.56 + np.array([235.0, 58.0, 58.0]) * 0.44   # 红覆盖
         comps, rest = _components_fast(kept, 30, 240)
         tot = max(1, int(kept.sum()))
-        bl = []
-        for bi, (ar, cx, cy, x0, y0, x1, y1) in enumerate(comps):
-            sub = kept[y0:y1 + 1, x0:x1 + 1]
-            outer, holes = _trace_loops(sub)
-            shift = (x0, y0)
-            for poly in [outer] + list(holes):
-                if poly and len(poly) >= 3:
-                    ants.append([(px + shift[0], py + shift[1]) for px, py in poly])
-            bl.append({"i": bi, "area": int(ar), "share": 100.0 * ar / tot,
-                       "cx": float(cx), "cy": float(cy)})
+        bl = [{"i": bi, "area": int(ar), "share": 100.0 * ar / tot,
+               "cx": float(cx), "cy": float(cy)}
+              for bi, (ar, cx, cy, _x0, _y0, _x1, _y1) in enumerate(comps)]
         nh, ha = _hole_stats(kept)
         meta.append({"blocks": bl, "rest": int(rest), "kept": int(kept.sum()),
                      "holes": nh, "hole_area": ha})
 
     im = Image.fromarray(np.clip(base, 0, 255).astype(np.uint8)).convert("RGB")
-    dr = ImageDraw.Draw(im, "RGBA")
-    lw = max(1, im.width // 900)
-    for poly in ants:                       # 黑一遍 + 白一遍（错开半个周期）= 蚂蚁线
-        _poly_dash(dr, poly, dash=6, gap=6, color=(0, 0, 0, 210), width=lw)
-        _poly_dash(dr, poly, dash=6, gap=6, color=(255, 255, 255, 235), width=lw, offset=6)
-    # 选区框 + R 号（青色，和外框区分）
+    dr = ImageDraw.Draw(im)
+    lw = max(2, im.width // 700)
+    font = cc._pil_font(max(16, im.width // 60))
     for i, r in enumerate(rois_v):
         pts = cc.rect_corners(tuple(r["box"]), r.get("ang", 0.0))
-        dr.line(list(pts) + [pts[0]], fill=(0, 170, 200, 255), width=max(2, lw * 2))
-    font_r = cc._pil_font(max(16, w // 60))
-    for i, r in enumerate(rois_v):
-        pts = cc.rect_corners(tuple(r["box"]), r.get("ang", 0.0))
+        dr.line(list(pts) + [pts[0]], fill=(0, 170, 200), width=lw)
         x, y = min(p[0] for p in pts), min(p[1] for p in pts)
-        dr.rectangle([x + 4, y + 4, x + 34 + font_r.size * 1.1, y + 12 + font_r.size * 1.25],
-                     fill=(0, 0, 0, 235))
-        dr.text((x + 9, y + 7), "R%d" % (i + 1), font=font_r, fill=(255, 255, 255, 255))
-
+        dr.rectangle([x + 4, y + 4, x + 34 + font.size * 1.1, y + 12 + font.size * 1.25],
+                     fill=(0, 0, 0))
+        dr.text((x + 9, y + 7), "R%d" % (i + 1), font=font, fill=(255, 255, 255))
     if im.width > max_w:
         im = im.resize((max_w, max(1, int(round(im.height * max_w / im.width)))), Image.LANCZOS)
     buf = io.BytesIO()
@@ -3277,19 +3231,17 @@ def _report_html(D):
         "<div class=\"figs\">",
         "<div class=\"fig\"><img alt=\"A\" src=\"data:image/jpeg;base64,%s\">"
         "<div class=\"t\">%s</div></div>" % (__import__("base64").b64encode(D["img_a"]).decode("ascii"),
-                                            esc(L("A 脱落判定（红=脱落，绿=保留）",
-                                                  "A · removal (red = removed, green = kept)"))),
+                                            esc(L("A 原图（不加覆盖）", "A · original, no overlay"))),
         "<div class=\"fig\"><img alt=\"B\" src=\"data:image/jpeg;base64,%s\">"
         "<div class=\"t\">%s</div></div>" % (__import__("base64").b64encode(D["img_b"]).decode("ascii"),
-                                            esc(L("B 块编号（每块一色，数字=块号）",
-                                                  "B · blocks (one colour per block, number = block id)"))),
+                                            esc(L("B 脱落判定（红=脱落）", "B · removal (red = removed)"))),
         "</div>",
         "<div class=\"cap\">%s</div>" % esc(
-            L("A 是原图，不加任何覆盖；B 是分析视图：红色半透明=判定脱落（已剔除刻线刀缝 %d px），"
-              "细蚂蚁线圈出每一片脱落及其中没掉干净的孔洞。两图同尺度。",
-              "A is the untouched photo; B is the analysis view: translucent red = removal (cut grooves of "
-              "%d px excluded), thin marching-ants outline every block and the holes inside it. Same scale.",
-              D["k"])),
+            L("A 是原图，不加任何覆盖；B 是把判定脱落的像素盖成半透明红（刻线刀缝 %d px 已剔除，"
+              "所以刀缝不上色）。两图同尺度，可直接对照。",
+              "A is the untouched photo; B tints the pixels judged as removed in translucent red (the %d px "
+              "cut grooves are excluded first, so the grooves themselves are not tinted). Same scale, so the "
+              "two can be compared directly.", D["k"])),
         "<h2>%s</h2>" % esc(L("各选区结果", "Results per region")),
         "<table><thead><tr><th>%s</th><th>%s</th><th>ASTM</th><th>ISO</th><th>%s</th><th>%s</th>"
         "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>"
@@ -3383,8 +3335,8 @@ def _report_pdf(D):
     ya = pdf.get_y()
     hs = []
     for i, (buf, cap) in enumerate((
-            (D["img_a"], L("A 脱落判定（红=脱落，绿=保留）", "A · removal (red = removed, green = kept)")),
-            (D["img_b"], L("B 块编号（每块一色，数字=块号）", "B · blocks (numbered)")))):
+            (D["img_a"], L("A 原图（不加覆盖）", "A · original, no overlay")),
+            (D["img_b"], L("B 脱落判定（红=脱落）", "B · removal (red = removed)")))):
         im = Image.open(io.BytesIO(buf))
         h = iw * im.height / max(1, im.width)
         w_use = iw
@@ -3404,11 +3356,11 @@ def _report_pdf(D):
     pdf.set_y(ya + max(hs) + 5.5)
     pdf.set_text_color(*mut)
     pdf.set_font("wqy", "", 6.8)
-    pdf.multi_cell(W, 3.6, L("A 是原图，不加覆盖；B 是分析视图：红色半透明=判定脱落（已剔除刻线刀缝 %d px），"
-                             "细蚂蚁线圈出每片脱落及其中没掉干净的孔洞。两图同尺度。",
-                             "A is the untouched photo; B is the analysis view: translucent red = removal "
-                             "(cut grooves of %d px excluded), thin marching-ants outline every block and the "
-                             "holes inside it. Same scale.", D["k"]))
+    pdf.multi_cell(W, 3.6, L("A 是原图，不加覆盖；B 把判定脱落的像素盖成半透明红（刻线刀缝 %d px 已先剔除，"
+                             "刀缝本身不上色）。两图同尺度，可直接对照。",
+                             "A is the untouched photo; B tints the pixels judged as removed in translucent "
+                             "red (the %d px cut grooves are excluded first, so the grooves are not tinted). "
+                             "Same scale, so the two can be compared directly.", D["k"]))
     pdf.ln(1)
 
     def table(head, rows, widths, aligns, total_row=False):
