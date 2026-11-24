@@ -2183,7 +2183,7 @@ $('#fileInput').onchange = e => { upload(e.target.files[0]); e.target.value = ''
 $('#btnCalc').onclick = analyze;
 $('#btnFit').onclick = fitView;
 $('#btnOne').onclick = zoomOne;
-$('#btnReport').onclick = () => download('api/export/report', (S.name || T('结果', 'result')).replace(/\.[^.]+$/, '') + T('_百格报告.pdf', '_crosscut_report.pdf');
+$('#btnReport').onclick = () => download('api/export/report', (S.name || T('结果', 'result')).replace(/\.[^.]+$/, '') + T('_百格报告.pdf', '_crosscut_report.pdf'));
 $('#btnPng').onclick = () => download('api/export/png', (S.name || T('结果', 'result')).replace(/\.[^.]+$/, '') + T('_标注.png', '_annotated.png'));
 
 /* ---- 结果栏高度：拖顶部把手上下调（往上 = 变高），双击复原 ----
