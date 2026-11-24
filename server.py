@@ -2956,6 +2956,53 @@ def _annotated_png(sess, req):
     return _png(out)
 
 
+def _hole_stats(mask):
+    """一块脱落里的“孔洞”（被露底包围的漆膜小岛）：返回 (孔洞数, 孔洞面积 px)。
+
+    做法：把外圈补成前景，背景就分成“外界（一大块） + 各孔洞”，最大那块当外界丢掉。
+    比描轮廓快得多，且不需要额外的库。
+    """
+    if not mask.any():
+        return 0, 0
+    m = np.pad(mask, 1, constant_values=True)
+    comps, _rest = _components_fast(~m, 30, 5000)
+    if len(comps) < 2:
+        return 0, 0
+    comps = sorted(comps, key=lambda t: -t[0])
+    holes = comps[1:]
+    return len(holes), int(sum(int(c[0]) for c in holes))
+
+
+def _block_stats(labels, masks, rois_v, roles, k, mode, req):
+    """报告用的块统计（只算面积/占比，不描轮廓——描轮廓留给 /api/blocks）。
+
+    口径与「块确认」页完全一致：同一套 keep_mask + 连通域 + min_area=30。
+    """
+    shape2 = labels.shape[:2]
+    out = []
+    for m in masks:
+        rr = np.flatnonzero(m.any(1)); ccx = np.flatnonzero(m.any(0))
+        if not rr.size or not ccx.size:
+            out.append({"blocks": [], "rest": 0, "kept": 0})
+            continue
+        r0, r1, c0, c1 = rr[0], rr[-1] + 1, ccx[0], ccx[-1] + 1
+        mb = m[r0:r1, c0:c1]
+        subc = np.zeros(mb.shape, bool)
+        for j, role in enumerate(roles):
+            if role == cc.ROLE_SUB:
+                subc |= (labels[r0:r1, c0:c1] == j)
+        subc &= mb
+        kept, *_ = cc.keep_mask(subc, k, mode, int(req.loc_tile), float(req.loc_factor))
+        comps, rest = _components_fast(kept, 30, 240)
+        tot = max(1, int(kept.sum()))
+        bl = [{"i": i, "area": int(a), "share": 100.0 * float(a) / tot}
+              for i, (a, _cx, _cy, _x0, _y0, _x1, _y1) in enumerate(comps)]
+        nh, ha = _hole_stats(kept)
+        out.append({"blocks": bl, "rest": int(rest), "kept": int(kept.sum()),
+                    "holes": nh, "hole_area": ha})
+    return out
+
+
 REPORT_CSS = """<style>
 :root{--ink:#111827;--mut:#6b7280;--line:#e5e7eb;--band:#f3f4f6;--warn:#b45309;--warnbg:#fffbeb}
 *{box-sizing:border-box}
@@ -3060,6 +3107,62 @@ def _report_html(sess, req):
               "Parameters are unreliable: %s. The grade below is for reference only — re-sample the "
               "colours or adjust the tolerance, then regenerate.", why))
 
+    # —— 块明细（与「块确认」页同一口径）：块号与标注图里的数字一致，
+    #    图上只编号面积 ≥150 px²、最多 30 个，所以表里也标出「图上编号」这一列。
+    _blk = _block_stats(labels, masks, rois_v, roles, k_view, req.mode, req)
+    _br = []
+    _num_left = {}
+    # 标注图的编号门槛是 wire px²（EXPORT_NUM_MIN_AREA），表里的面积是 view px²，
+    # 两者差一个缩放因子² —— 不换算的话会出现“图里没编号、表里却打勾”。
+    _num_thr = EXPORT_NUM_MIN_AREA * float(view.len_in(1.0) ** 2)
+    for ri, bs in enumerate(_blk, 1):
+        big = [b for b in bs["blocks"] if b["area"] >= _num_thr]
+        _num_left[ri] = {b["i"] for b in big[:EXPORT_NUM_CAP]}
+        if not bs["blocks"]:
+            _br.append("<tr><td>R%d</td><td colspan=\"4\" style=\"text-align:left;color:#6b7280\">%s</td></tr>"
+                       % (ri, _h.escape(L("没有可列的块（未检出成片脱落，或被刀缝阈值吃掉了）",
+                                          "no blocks (no sheet removal detected, or removed by the cut width)"))))
+            continue
+        for b in bs["blocks"]:
+            _br.append("<tr><td>R%d</td><td>%d</td><td>%d</td><td>%.1f%%</td><td>%s</td></tr>"
+                       % (ri, b["i"] + 1, b["area"], b["share"],
+                          "✓" if b["i"] in _num_left[ri] else ""))
+        if bs["rest"]:
+            _br.append("<tr><td>R%d</td><td colspan=\"4\" style=\"text-align:left;color:#6b7280\">"
+                       "%s</td></tr>" % (ri, _h.escape(L("另有 %d 个小块（面积 <30 px²）未单列",
+                                                         "%d tiny blocks (<30 px²) not listed", bs["rest"]))))
+    _str_rows = []
+    for ri, bs in enumerate(_blk, 1):
+        _big = max((b["area"] for b in bs["blocks"]), default=0)
+        _str_rows.append("<tr><td>R%d</td><td>%d</td><td>%.1f%%</td><td>%d</td><td>%.1f%%</td></tr>"
+                         % (ri, len(bs["blocks"]), 100.0 * _big / max(1, bs["kept"]),
+                            bs.get("holes", 0),
+                            100.0 * bs.get("hole_area", 0) / max(1, bs["kept"])))
+    _struct_section = "".join([
+        "<h2>%s</h2>" % _h.escape(L("脱落结构", "Removal structure")),
+        "<table><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>"
+        % (L("选区", "Region"), L("块数", "Blocks"), L("最大块占露底", "Largest block share"),
+           L("孔洞数", "Holes"), L("孔洞占露底", "Hole share")),
+        "".join(_str_rows), "</tbody></table>",
+        "<div class=\"cap\">%s</div>" % _h.escape(
+            L("孔洞 = 露底区内部没掉干净的漆膜小岛（≥30 px² 才计），用来判断“成片剥落”还是“碎屑剥落”。",
+              "A hole is an island of remaining coating inside a removed area (≥30 px²); it tells sheet "
+              "removal apart from scattered flaking.")),
+    ])
+    _blocks_section = "".join([
+        "<h2>%s</h2>" % _h.escape(L("块明细（与「块确认」页同口径）", "Block details (same basis as the block tab)")),
+        "<table><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>"
+        % (L("选区", "Region"), L("块号", "Block"), L("块面积 px", "Block area px"),
+           L("占本选区脱落", "Share of region removal"), L("图上编号", "Numbered")),
+        "".join(_br), "</tbody></table>",
+        "<div class=\"cap\">%s</div>" % _h.escape(
+            L("块 = 去掉刀缝后的连通脱落区。标注图里只给面积 ≥%d px² 的块编号（最多 %d 个），"
+              "所以只有这些块在上表「图上编号」里有 ✓；块数多时以表为准，图只是示意。",
+              "A block is one connected removed area after the cut grooves are removed. The annotated image "
+              "numbers blocks of ≥%d px² only (up to %d), so just those get a ✓ in “Numbered”; the table is "
+              "authoritative when there are many blocks.", EXPORT_NUM_MIN_AREA, EXPORT_NUM_CAP)),
+    ])
+
     parts = [
         "<!doctype html><html lang=\"%s\"><head><meta charset=\"utf-8\">" % ("en" if is_en() else "zh"),
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
@@ -3100,6 +3203,8 @@ def _report_html(sess, req):
         "<th>%s</th>" % L("未分类 px", "Unclassified px"),
         "<th>%s</th>" % L("原始脱落率", "Removal % (raw)"),
         "</tr></thead><tbody>", "".join(trs), "</tbody></table>",
+        _struct_section,
+        _blocks_section,
         "<h2>%s</h2>" % _h.escape(L("色样与口径", "Colour samples and basis")),
         "<div style=\"font-size:12.5px;line-height:1.9\">%s</div>" % "".join(sw),
         "<div class=\"cap\" style=\"margin-top:6px\">%s</div>" % _h.escape(
