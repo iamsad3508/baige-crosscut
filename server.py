@@ -3005,9 +3005,6 @@ def _block_stats(labels, masks, rois_v, roles, k, mode, req):
     return out
 
 
-BLOCK_NUM_MAX = 80       # 每个选区最多标这么多块编号（按面积从大到小），多了会糊成一片
-
-
 def _poly_dash(dr, pts, dash=5.0, gap=5.0, color=(0, 0, 0, 235), width=1, offset=0.0):
     """把折线画成虚线（PIL 没有 dash 支持，自己按弧长走）。
 
@@ -3061,8 +3058,9 @@ def _plain_png(sess, req, max_w=1500, quality=92):
 
 
 def _overlay_png(sess, req, max_w=1500, quality=92):
-    """B 图：线上画布的观感 —— 半透明红覆盖 + 1 px 细蚂蚁线（含孔洞）+ 块号。
+    """B 图：线上画布的观感 —— 半透明红覆盖 + 1 px 细蚂蚁线（含孔洞）。
 
+    块只描框不写号（用户要求：数字会挡住画面，块号看结果表的块数即可）。
     返回 (jpeg, 每选区块明细) 供表格/报告使用。
     """
     work, view = _view_for(sess, req)
@@ -3079,7 +3077,6 @@ def _overlay_png(sess, req, max_w=1500, quality=92):
     base = np.asarray(work["rgb"]).astype(np.float32)
     h, w = base.shape[:2]
     ants = []          # [(polygon, excluded)] —— 画蚂蚁线用
-    nums = []
     meta = []
     for ri, m in enumerate(masks):
         subc = np.zeros(labels.shape[:2], bool)
@@ -3102,8 +3099,6 @@ def _overlay_png(sess, req, max_w=1500, quality=92):
                     ants.append([(px + shift[0], py + shift[1]) for px, py in poly])
             bl.append({"i": bi, "area": int(ar), "share": 100.0 * ar / tot,
                        "cx": float(cx), "cy": float(cy)})
-            if bi < BLOCK_NUM_MAX:
-                nums.append((bi + 1, float(cx), float(cy)))
         nh, ha = _hole_stats(kept)
         meta.append({"blocks": bl, "rest": int(rest), "kept": int(kept.sum()),
                      "holes": nh, "hole_area": ha})
@@ -3125,15 +3120,6 @@ def _overlay_png(sess, req, max_w=1500, quality=92):
         dr.rectangle([x + 4, y + 4, x + 34 + font_r.size * 1.1, y + 12 + font_r.size * 1.25],
                      fill=(0, 0, 0, 235))
         dr.text((x + 9, y + 7), "R%d" % (i + 1), font=font_r, fill=(255, 255, 255, 255))
-    # 块号：白底圆 + 深色数字
-    fr = max(12, int(w / 95))
-    font = cc._pil_font(int(fr * 1.3))
-    for label, cx, cy in nums:
-        dr.ellipse([cx - fr, cy - fr, cx + fr, cy + fr], fill=(255, 255, 255, 240),
-                   outline=(20, 20, 20, 255), width=max(1, fr // 5))
-        t = str(label)
-        tw = dr.textlength(t, font=font)
-        dr.text((cx - tw / 2.0, cy - fr * 0.8), t, font=font, fill=(17, 24, 39, 255))
 
     if im.width > max_w:
         im = im.resize((max_w, max(1, int(round(im.height * max_w / im.width)))), Image.LANCZOS)
@@ -3193,7 +3179,6 @@ def _report_data(sess, req):
                 "raw": 100.0 * tot["sub_raw"] / max(1, tot["coat_px"] + tot["sub_raw"])},
         "struct": struct,
         "img_a": img_a, "img_b": img_b,
-        "num_max": BLOCK_NUM_MAX,
     }
 
 
@@ -3301,11 +3286,10 @@ def _report_html(D):
         "</div>",
         "<div class=\"cap\">%s</div>" % esc(
             L("A 是原图，不加任何覆盖；B 是分析视图：红色半透明=判定脱落（已剔除刻线刀缝 %d px），"
-              "细蚂蚁线圈出每一片脱落及其中没掉干净的孔洞，白圈数字=块号（每选区最多标 %d 个）。"
-              "两图同尺度。",
+              "细蚂蚁线圈出每一片脱落及其中没掉干净的孔洞。两图同尺度。",
               "A is the untouched photo; B is the analysis view: translucent red = removal (cut grooves of "
-              "%d px excluded), thin marching-ants outline every block and the holes inside it, and the "
-              "white circles carry block ids (up to %d per region). Same scale.", D["k"], D["num_max"])),
+              "%d px excluded), thin marching-ants outline every block and the holes inside it. Same scale.",
+              D["k"])),
         "<h2>%s</h2>" % esc(L("各选区结果", "Results per region")),
         "<table><thead><tr><th>%s</th><th>%s</th><th>ASTM</th><th>ISO</th><th>%s</th><th>%s</th>"
         "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>"
@@ -3421,11 +3405,10 @@ def _report_pdf(D):
     pdf.set_text_color(*mut)
     pdf.set_font("wqy", "", 6.8)
     pdf.multi_cell(W, 3.6, L("A 是原图，不加覆盖；B 是分析视图：红色半透明=判定脱落（已剔除刻线刀缝 %d px），"
-                             "细蚂蚁线圈出每片脱落及其中没掉干净的孔洞，白圈数字=块号（每选区最多标 %d 个）。两图同尺度。",
+                             "细蚂蚁线圈出每片脱落及其中没掉干净的孔洞。两图同尺度。",
                              "A is the untouched photo; B is the analysis view: translucent red = removal "
                              "(cut grooves of %d px excluded), thin marching-ants outline every block and the "
-                             "holes inside it, white circles carry block ids (up to %d per region). Same scale.",
-                             D["k"], D["num_max"]))
+                             "holes inside it. Same scale.", D["k"]))
     pdf.ln(1)
 
     def table(head, rows, widths, aligns, total_row=False):
