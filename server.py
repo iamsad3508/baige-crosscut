@@ -63,7 +63,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.15"      # 软件版本（发版时改）
+APP_VERSION = "2.21"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3005,11 +3005,54 @@ def _block_stats(labels, masks, rois_v, roles, k, mode, req):
     return out
 
 
-def _report_image_b64(sess, req, max_w=1800, quality=90):
-    """报告里放的图：标注图缩到 1800 px 宽再转 JPEG，别把 6 MB 的 PNG 塞进报告。"""
-    import base64
-    png = _annotated_png(sess, req, bar=False)
-    im = Image.open(io.BytesIO(png)).convert("RGB")
+BLOCK_NUM_MAX = 80       # 每个选区最多标这么多块编号（按面积从大到小），多了会糊成一片
+
+
+def _poly_dash(dr, pts, dash=5.0, gap=5.0, color=(0, 0, 0, 235), width=1, offset=0.0):
+    """把折线画成虚线（PIL 没有 dash 支持，自己按弧长走）。
+
+    offset 让黑白两遍错开，叠起来就是 PS 那种蚂蚁线。
+    """
+    if not pts or len(pts) < 2:
+        return
+    pos = -float(offset) % (dash + gap)
+    started = False
+    for i in range(len(pts)):
+        x0, y0 = pts[i]
+        x1, y1 = pts[(i + 1) % len(pts)]
+        seg = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+        if seg <= 0:
+            continue
+        t = 0.0
+        while t < seg:
+            phase = pos % (dash + gap)
+            step = (dash - phase) if phase < dash else (dash + gap - phase)
+            step = max(0.5, min(step, seg - t))
+            if phase < dash:
+                ax, ay = x0 + (x1 - x0) * (t / seg), y0 + (y1 - y0) * (t / seg)
+                bx, by = x0 + (x1 - x0) * ((t + step) / seg), y0 + (y1 - y0) * ((t + step) / seg)
+                dr.line([ax, ay, bx, by], fill=color, width=width)
+                started = True
+            t += step
+            pos += step
+    return started
+
+
+def _plain_png(sess, req, max_w=1500, quality=92):
+    """A 图：**不加覆盖层**的原图，只描选区细框 —— 给人看“这到底长什么样”。"""
+    work, view = _view_for(sess, req)
+    rois = [r.model_dump() for r in req.rois]
+    rois_v = view.rois_in(rois) if rois else []
+    im = Image.fromarray(np.asarray(work["rgb"])).convert("RGB")
+    dr = ImageDraw.Draw(im)
+    lw = max(2, im.width // 700)
+    font = cc._pil_font(max(16, im.width // 60))
+    for i, r in enumerate(rois_v):
+        pts = cc.rect_corners(tuple(r["box"]), r.get("ang", 0.0))
+        dr.line(list(pts) + [pts[0]], fill=(0, 170, 200), width=lw)
+        x, y = min(p[0] for p in pts), min(p[1] for p in pts)
+        dr.rectangle([x + 4, y + 4, x + 34 + font.size * 1.1, y + 12 + font.size * 1.25], fill=(0, 0, 0))
+        dr.text((x + 9, y + 7), "R%d" % (i + 1), font=font, fill=(255, 255, 255))
     if im.width > max_w:
         im = im.resize((max_w, max(1, int(round(im.height * max_w / im.width)))), Image.LANCZOS)
     buf = io.BytesIO()
@@ -3017,16 +3060,10 @@ def _report_image_b64(sess, req, max_w=1800, quality=90):
     return buf.getvalue()
 
 
-BLOCK_PALETTE = [(214, 39, 40), (31, 119, 180), (44, 160, 44), (255, 127, 14),
-                 (148, 103, 189), (23, 190, 207), (227, 119, 194), (188, 189, 34),
-                 (140, 86, 75), (127, 127, 127)]
-BLOCK_NUM_MAX = 80       # 每个选区最多标这么多块编号（按面积从大到小），多了会糊成一片
+def _overlay_png(sess, req, max_w=1500, quality=92):
+    """B 图：线上画布的观感 —— 半透明红覆盖 + 1 px 细蚂蚁线（含孔洞）+ 块号。
 
-
-def _blocks_png(sess, req, max_w=1500, quality=92):
-    """「块图」：淡化底图 + 每块填色 + 块号，专门回答“块 1 到底在哪”。
-
-    返回 (jpeg 字节, 每选区块明细)。块号与报告里的块明细表一一对应（同一套 keep_mask + 连通域）。
+    返回 (jpeg, 每选区块明细) 供表格/报告使用。
     """
     work, view = _view_for(sess, req)
     samples = [s.model_dump() for s in req.samples]
@@ -3039,9 +3076,9 @@ def _blocks_png(sess, req, max_w=1500, quality=92):
     labels, _, _, _ = _labels_for(sess, work, req.tol, req.purity, samples, masks,
                                   _msig(rois_v), view.key)
 
-    base = (work["rgb"].astype(np.float32) * 0.30 + 255.0 * 0.70).astype(np.uint8)
+    base = np.asarray(work["rgb"]).astype(np.float32)
     h, w = base.shape[:2]
-    ov = np.zeros((h, w, 4), np.uint8)
+    ants = []          # [(polygon, excluded)] —— 画蚂蚁线用
     nums = []
     meta = []
     for ri, m in enumerate(masks):
@@ -3052,50 +3089,56 @@ def _blocks_png(sess, req, max_w=1500, quality=92):
         subc &= m
         kept, *_ = cc.keep_mask(subc, k_view, req.mode,
                                 int(req.loc_tile), float(req.loc_factor))
+        base[kept] = base[kept] * 0.56 + np.array([235.0, 58.0, 58.0]) * 0.44   # 红覆盖
         comps, rest = _components_fast(kept, 30, 240)
         tot = max(1, int(kept.sum()))
         bl = []
         for bi, (ar, cx, cy, x0, y0, x1, y1) in enumerate(comps):
-            col = BLOCK_PALETTE[bi % len(BLOCK_PALETTE)]
             sub = kept[y0:y1 + 1, x0:x1 + 1]
-            tile = ov[y0:y1 + 1, x0:x1 + 1]
-            tile[sub] = (col[0], col[1], col[2], 170)
-            ov[y0:y1 + 1, x0:x1 + 1] = tile
+            outer, holes = _trace_loops(sub)
+            shift = (x0, y0)
+            for poly in [outer] + list(holes):
+                if poly and len(poly) >= 3:
+                    ants.append([(px + shift[0], py + shift[1]) for px, py in poly])
             bl.append({"i": bi, "area": int(ar), "share": 100.0 * ar / tot,
-                       "cx": float(cx), "cy": float(cy),
-                       "box": (float(x0), float(y0), float(x1), float(y1))})
+                       "cx": float(cx), "cy": float(cy)})
             if bi < BLOCK_NUM_MAX:
-                nums.append((bi + 1, float(cx), float(cy), col))
+                nums.append((bi + 1, float(cx), float(cy)))
         nh, ha = _hole_stats(kept)
         meta.append({"blocks": bl, "rest": int(rest), "kept": int(kept.sum()),
                      "holes": nh, "hole_area": ha})
 
-    im = Image.alpha_composite(Image.fromarray(base).convert("RGBA"), Image.fromarray(ov))
-    dr = ImageDraw.Draw(im)
-    # 选区框（青色）+ R 标号
-    for ri, m in enumerate(masks):
-        ys, xs = np.nonzero(m)
-        if not len(ys):
-            continue
-        x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
-        dr.rectangle([x0, y0, x1, y1], outline=(0, 160, 190, 255), width=max(2, w // 500))
-        dr.text((x0 + 8, y0 + 8), "R%d" % (ri + 1), font=cc._pil_font(max(16, w // 55)),
-                fill=(0, 110, 135, 255))
-    # 块号：白底圆点 + 数字，画在块的质心
-    fr = max(11, int(w / 95))
-    font = cc._pil_font(int(fr * 1.25))
-    for label, cx, cy, col in nums:
-        x, y = float(cx), float(cy)
-        dr.ellipse([x - fr, y - fr, x + fr, y + fr], fill=(255, 255, 255, 235),
-                   outline=(col[0], col[1], col[2], 255), width=max(1, fr // 5))
+    im = Image.fromarray(np.clip(base, 0, 255).astype(np.uint8)).convert("RGB")
+    dr = ImageDraw.Draw(im, "RGBA")
+    lw = max(1, im.width // 900)
+    for poly in ants:                       # 黑一遍 + 白一遍（错开半个周期）= 蚂蚁线
+        _poly_dash(dr, poly, dash=6, gap=6, color=(0, 0, 0, 210), width=lw)
+        _poly_dash(dr, poly, dash=6, gap=6, color=(255, 255, 255, 235), width=lw, offset=6)
+    # 选区框 + R 号（青色，和外框区分）
+    for i, r in enumerate(rois_v):
+        pts = cc.rect_corners(tuple(r["box"]), r.get("ang", 0.0))
+        dr.line(list(pts) + [pts[0]], fill=(0, 170, 200, 255), width=max(2, lw * 2))
+    font_r = cc._pil_font(max(16, w // 60))
+    for i, r in enumerate(rois_v):
+        pts = cc.rect_corners(tuple(r["box"]), r.get("ang", 0.0))
+        x, y = min(p[0] for p in pts), min(p[1] for p in pts)
+        dr.rectangle([x + 4, y + 4, x + 34 + font_r.size * 1.1, y + 12 + font_r.size * 1.25],
+                     fill=(0, 0, 0, 235))
+        dr.text((x + 9, y + 7), "R%d" % (i + 1), font=font_r, fill=(255, 255, 255, 255))
+    # 块号：白底圆 + 深色数字
+    fr = max(12, int(w / 95))
+    font = cc._pil_font(int(fr * 1.3))
+    for label, cx, cy in nums:
+        dr.ellipse([cx - fr, cy - fr, cx + fr, cy + fr], fill=(255, 255, 255, 240),
+                   outline=(20, 20, 20, 255), width=max(1, fr // 5))
         t = str(label)
         tw = dr.textlength(t, font=font)
-        dr.text((x - tw / 2.0, y - fr * 0.78), t, font=font, fill=(17, 24, 39, 255))
+        dr.text((cx - tw / 2.0, cy - fr * 0.8), t, font=font, fill=(17, 24, 39, 255))
 
     if im.width > max_w:
         im = im.resize((max_w, max(1, int(round(im.height * max_w / im.width)))), Image.LANCZOS)
     buf = io.BytesIO()
-    im.convert("RGB").save(buf, "JPEG", quality=quality, optimize=True)
+    im.save(buf, "JPEG", quality=quality, optimize=True)
     return buf.getvalue(), meta
 
 
@@ -3114,27 +3157,22 @@ def _report_data(sess, req):
                                   _msig(rois_v), view.key)
     rows, tot, pct = _stats(labels, masks, roles, k_view, req.mode, False, px_out,
                             req.loc_tile, req.loc_factor)
-    img_a = _report_image_b64(sess, req)
-    img_b, blk = _blocks_png(sess, req)
+    img_a = _plain_png(sess, req)
+    img_b, blk = _overlay_png(sess, req)
     ok, why = _credibility(tot)
     role_name = {"coat": L("漆膜", "coating"), "sub": L("基材", "substrate"),
                  "ignore": L("忽略", "ignored")}
-    blk_rows = []
-    for ri, bs in enumerate(blk, 1):
-        for b in bs["blocks"]:
-            blk_rows.append({"roi": ri, "i": b["i"] + 1, "area": b["area"], "share": b["share"]})
-    struct_rows = []
+    struct = []
     for ri, bs in enumerate(blk, 1):
         big = max((b["area"] for b in bs["blocks"]), default=0)
-        struct_rows.append({"roi": ri, "n": len(bs["blocks"]),
-                            "largest": 100.0 * big / max(1, bs["kept"]),
-                            "holes": bs["holes"],
-                            "hole_share": 100.0 * bs["hole_area"] / max(1, bs["kept"]),
-                            "rest": bs["rest"]})
+        struct.append({"roi": ri, "n": len(bs["blocks"]),
+                       "largest": 100.0 * big / max(1, bs["kept"]),
+                       "holes": bs["holes"],
+                       "hole_share": 100.0 * bs["hole_area"] / max(1, bs["kept"])})
     name = (req.name or sess.name or L("未命名", "untitled")).strip()
-    rid = time.strftime("%Y%m%d-%H%M")
     return {
-        "name": name, "rid": rid, "now": time.strftime("%Y-%m-%d %H:%M"),
+        "name": name, "rid": time.strftime("%Y%m%d-%H%M"),
+        "now": time.strftime("%Y-%m-%d %H:%M"),
         "size": (sess.size[0], sess.size[1]), "ana": (int(shape2[1]), int(shape2[0])),
         "mode": {"auto_blk": L("按块数回落", "by block count"),
                  "width": L("按露底分布", "by bare area")}.get(req.mode, req.mode),
@@ -3146,13 +3184,14 @@ def _report_data(sess, req):
         "rows": [{"i": i, "pct": st["pct"], "astm": cc.astm_class(st["pct"]),
                   "iso": _iso_class(st["pct"]), "area": st["area"],
                   "coat": st["coat_px"], "sub": st["sub_raw"],
-                  "unassigned": st["unassigned"], "raw": st["pct_raw"]}
+                  "unassigned": st["unassigned"], "raw": st["pct_raw"],
+                  "blocks": (struct[i - 1]["n"] if i - 1 < len(struct) else 0)}
                  for i, st in enumerate(rows, 1)],
         "tot": {"pct": pct, "astm": cc.astm_class(pct), "iso": _iso_class(pct),
                 "area": tot["area"], "coat": tot["coat_px"], "sub": tot["sub_raw"],
                 "unassigned": tot["unassigned"],
                 "raw": 100.0 * tot["sub_raw"] / max(1, tot["coat_px"] + tot["sub_raw"])},
-        "blocks": blk_rows, "struct": struct_rows,
+        "struct": struct,
         "img_a": img_a, "img_b": img_b,
         "num_max": BLOCK_NUM_MAX,
     }
@@ -3207,28 +3246,16 @@ def _report_html(D):
 
     trs = []
     for r in D["rows"]:
-        trs.append("<tr><td>R%d</td><td>%.2f%%</td><td>%s</td><td>%s</td><td>%d</td>"
+        trs.append("<tr><td>R%d</td><td>%.2f%%</td><td>%s</td><td>%s</td><td>%d</td><td>%d</td>"
                    "<td>%d</td><td>%d</td><td>%d</td><td>%.2f%%</td></tr>"
-                   % (r["i"], r["pct"], gtag(r["astm"]), r["iso"], r["area"], r["coat"],
+                   % (r["i"], r["pct"], gtag(r["astm"]), r["iso"], r["blocks"], r["area"], r["coat"],
                       r["sub"], r["unassigned"], r["raw"]))
     t = D["tot"]
-    trs.append("<tr class=\"tot\"><td>%s</td><td>%.2f%%</td><td>%s</td><td>%s</td><td>%d</td>"
+    trs.append("<tr class=\"tot\"><td>%s</td><td>%.2f%%</td><td>%s</td><td>%s</td><td>%d</td><td>%d</td>"
                "<td>%d</td><td>%d</td><td>%d</td><td>%.2f%%</td></tr>"
-               % (L("合计", "Total"), t["pct"], gtag(t["astm"]), t["iso"], t["area"],
+               % (L("合计", "Total"), t["pct"], gtag(t["astm"]), t["iso"],
+                  sum(r["blocks"] for r in D["rows"]), t["area"],
                   t["coat"], t["sub"], t["unassigned"], t["raw"]))
-
-    srs = []
-    for s in D["struct"]:
-        srs.append("<tr><td>R%d</td><td>%d</td><td>%.1f%%</td><td>%d</td><td>%.1f%%</td></tr>"
-                   % (s["roi"], s["n"], s["largest"], s["holes"], s["hole_share"]))
-    brs = []
-    if D["blocks"]:
-        for b in D["blocks"]:
-            brs.append("<tr><td>R%d</td><td>%d</td><td>%d</td><td>%.1f%%</td></tr>"
-                       % (b["roi"], b["i"], b["area"], b["share"]))
-    else:
-        brs.append("<tr><td colspan=\"4\" style=\"text-align:left;color:#6b7280\">%s</td></tr>"
-                   % esc(L("没有检出成片脱落的块", "no removal blocks detected")))
 
     sw = "".join("<span style=\"margin-right:16px;white-space:nowrap\"><i class=\"sw\" "
                  "style=\"background:rgb(%d,%d,%d)\"></i>%s %d,%d,%d</span>"
@@ -3273,37 +3300,20 @@ def _report_html(D):
                                                   "B · blocks (one colour per block, number = block id)"))),
         "</div>",
         "<div class=\"cap\">%s</div>" % esc(
-            L("A 图已剔除刻线刀缝 %d px；B 图把每片脱落在原图上单独着色并编号，最多标到 %d 号/选区，"
-              "其余小块见「块明细」。两图同尺度、可对照。",
-              "Image A excludes the %d px cut grooves; image B tints and numbers each removal block on the "
-              "original, up to %d per region — the rest are listed in the block table. Both images share the "
-              "same scale.", D["k"], D["num_max"])),
+            L("A 是原图，不加任何覆盖；B 是分析视图：红色半透明=判定脱落（已剔除刻线刀缝 %d px），"
+              "细蚂蚁线圈出每一片脱落及其中没掉干净的孔洞，白圈数字=块号（每选区最多标 %d 个）。"
+              "两图同尺度。",
+              "A is the untouched photo; B is the analysis view: translucent red = removal (cut grooves of "
+              "%d px excluded), thin marching-ants outline every block and the holes inside it, and the "
+              "white circles carry block ids (up to %d per region). Same scale.", D["k"], D["num_max"])),
         "<h2>%s</h2>" % esc(L("各选区结果", "Results per region")),
         "<table><thead><tr><th>%s</th><th>%s</th><th>ASTM</th><th>ISO</th><th>%s</th><th>%s</th>"
-        "<th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>"
+        "<th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>"
         % (L("选区", "Region"), L("脱落率（已剔除刀缝）", "Removal % (grooves excluded)"),
-           L("选区面积 px", "Region area px"), L("漆膜 px", "Coating px"),
+           L("块数", "Blocks"), L("选区面积 px", "Region area px"), L("漆膜 px", "Coating px"),
            L("基材 px", "Substrate px"), L("未分类 px", "Unclassified px"),
            L("原始脱落率", "Removal % (raw)")),
         "".join(trs), "</tbody></table>",
-        "<h2>%s</h2>" % esc(L("脱落结构", "Removal structure")),
-        "<table><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>"
-        % (L("选区", "Region"), L("块数", "Blocks"), L("最大块占露底", "Largest block share"),
-           L("孔洞数", "Holes"), L("孔洞占露底", "Hole share")),
-        "".join(srs), "</tbody></table>",
-        "<div class=\"cap\">%s</div>" % esc(
-            L("孔洞 = 露底区内部没掉干净的漆膜小岛（≥30 px² 才计），用来区分“成片剥落”与“碎屑剥落”。",
-              "A hole is an island of remaining coating inside a removed area (≥30 px²); it separates "
-              "sheet removal from scattered flaking.")),
-        "<h2>%s</h2>" % esc(L("块明细", "Block details")),
-        "<table><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr></thead><tbody>"
-        % (L("选区", "Region"), L("块号", "Block"), L("块面积 px", "Block area px"),
-           L("占本选区脱落", "Share of region removal")),
-        "".join(brs), "</tbody></table>",
-        "<div class=\"cap\">%s</div>" % esc(
-            L("块 = 去掉刀缝后的连通脱落区，块号与 B 图里的数字对应。", 
-              "A block is one connected removed area after the grooves are removed; its id matches the "
-              "number in image B.")),
         "<h2>%s</h2>" % esc(L("色样与口径", "Colour samples and basis")),
         "<div style=\"font-size:12.5px;line-height:1.9\">%s</div>" % sw,
         "<div class=\"cap\" style=\"margin-top:6px\">%s</div>" % esc(
@@ -3410,10 +3420,11 @@ def _report_pdf(D):
     pdf.set_y(ya + max(hs) + 5.5)
     pdf.set_text_color(*mut)
     pdf.set_font("wqy", "", 6.8)
-    pdf.multi_cell(W, 3.6, L("A 图已剔除刻线刀缝 %d px；B 图逐块着色并编号（每选区最多 %d 号），"
-                             "两图同尺度可对照；其余小块见块明细表。",
-                             "Image A excludes the %d px grooves; image B tints and numbers each block "
-                             "(up to %d per region). Same scale; remaining small blocks are in the table.",
+    pdf.multi_cell(W, 3.6, L("A 是原图，不加覆盖；B 是分析视图：红色半透明=判定脱落（已剔除刻线刀缝 %d px），"
+                             "细蚂蚁线圈出每片脱落及其中没掉干净的孔洞，白圈数字=块号（每选区最多标 %d 个）。两图同尺度。",
+                             "A is the untouched photo; B is the analysis view: translucent red = removal "
+                             "(cut grooves of %d px excluded), thin marching-ants outline every block and the "
+                             "holes inside it, white circles carry block ids (up to %d per region). Same scale.",
                              D["k"], D["num_max"]))
     pdf.ln(1)
 
@@ -3437,37 +3448,17 @@ def _report_pdf(D):
     pdf.set_font("wqy", "", 8.6)
     pdf.set_text_color(55, 65, 81)
     pdf.cell(W, 5.5, L("各选区结果", "RESULTS PER REGION"), new_x="LMARGIN", new_y="NEXT")
-    rows = [[ "R%d" % r["i"], "%.2f%%" % r["pct"], r["astm"], r["iso"], r["area"],
+    rows = [[ "R%d" % r["i"], "%.2f%%" % r["pct"], r["astm"], r["iso"], r["blocks"], r["area"],
               r["coat"], r["sub"], r["unassigned"], "%.2f%%" % r["raw"]] for r in D["rows"]]
     rows.append([L("合计", "Total"), "%.2f%%" % D["tot"]["pct"], D["tot"]["astm"], D["tot"]["iso"],
-                 D["tot"]["area"], D["tot"]["coat"], D["tot"]["sub"], D["tot"]["unassigned"],
-                 "%.2f%%" % D["tot"]["raw"]])
-    table([L("选区", "Region"), L("脱落率", "Removal"), "ASTM", "ISO", L("面积 px", "Area px"),
-           L("漆膜 px", "Coat px"), L("基材 px", "Sub px"), L("未分类 px", "Uncl. px"),
-           L("原始脱落率", "Raw %")],
-          rows, [16, 22, 14, 14, 24, 24, 24, 24, 24], ["L", "R", "C", "C", "R", "R", "R", "R", "R"],
-          total_row=True)
+                 sum(r["blocks"] for r in D["rows"]), D["tot"]["area"], D["tot"]["coat"], D["tot"]["sub"],
+                 D["tot"]["unassigned"], "%.2f%%" % D["tot"]["raw"]])
+    table([L("选区", "Region"), L("脱落率", "Removal"), "ASTM", "ISO", L("块数", "Blocks"),
+           L("面积 px", "Area px"), L("漆膜 px", "Coat px"), L("基材 px", "Sub px"),
+           L("未分类 px", "Uncl. px"), L("原始脱落率", "Raw %")],
+          rows, [15, 21, 12, 12, 13, 25, 25, 25, 19, 19],
+          ["L", "R", "C", "C", "R", "R", "R", "R", "R", "R"], total_row=True)
     pdf.ln(2)
-
-    pdf.set_text_color(55, 65, 81)
-    pdf.cell(W, 5.5, L("脱落结构", "REMOVAL STRUCTURE"), new_x="LMARGIN", new_y="NEXT")
-    srows = [["R%d" % s["roi"], s["n"], "%.1f%%" % s["largest"], s["holes"], "%.1f%%" % s["hole_share"]]
-             for s in D["struct"]]
-    table([L("选区", "Region"), L("块数", "Blocks"), L("最大块占露底", "Largest share"),
-           L("孔洞数", "Holes"), L("孔洞占露底", "Hole share")],
-          srows, [26, 30, 46, 34, 50], ["L", "R", "R", "R", "R"])
-    pdf.ln(2)
-
-    pdf.set_text_color(55, 65, 81)
-    pdf.cell(W, 5.5, L("块明细", "BLOCK DETAILS"), new_x="LMARGIN", new_y="NEXT")
-    if D["blocks"]:
-        brows = [["R%d" % b["roi"], b["i"], b["area"], "%.1f%%" % b["share"]] for b in D["blocks"]]
-    else:
-        brows = [[L("没有检出成片脱落的块", "no removal blocks detected"), "", "", ""]]
-    table([L("选区", "Region"), L("块号", "Block"), L("块面积 px", "Block area px"),
-           L("占本选区脱落", "Share of region removal")],
-          brows, [30, 30, 46, 80], ["L", "R", "R", "R"])
-    pdf.ln(3)
 
     pdf.set_font("wqy", "", 7.4)
     pdf.set_text_color(*mut)
