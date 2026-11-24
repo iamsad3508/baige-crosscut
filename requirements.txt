@@ -3,3 +3,4 @@ numpy
 fastapi
 uvicorn[standard]
 python-multipart
+fpdf2>=2.7
