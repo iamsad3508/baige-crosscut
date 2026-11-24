@@ -3720,7 +3720,24 @@ def api_grid(req: GridReq):
         tot_r += rem
     total = 100.0 * tot_r / max(1.0, tot_a)
     box = [r["xs"][0], r["ys"][0], r["xs"][-1], r["ys"][-1]]
-    return {"ok": True, "warn": r.get("warn") or "", "angle": r.get("angle", 0.0),
+    # 自动寻线只认到零星几格时，别让它当成正常结果交出去（旧图/翻拍图上很常见）：
+    # 用户看到"6 格 + 9.5%"会以为在算他那张图，其实框里大半没被格网盖住
+    _warn = r.get("warn") or ""
+    if not _warn:
+        # 判据用「格网跨度 / 选区尺寸」：正常图用户框得紧，跨度≈100%；
+        # 认错周期时格网只盖住一半，跨度明显缩水（实测 904 那张 96%+，这张只有 70~80%）
+        _rw = max(1.0, float(gx1 - gx0))
+        _rh = max(1.0, float(gy1 - gy0))
+        _sx = (r["xs"][-1] - r["xs"][0]) / _rw if len(r["xs"]) > 1 else 0.0
+        _sy = (r["ys"][-1] - r["ys"][0]) / _rh if len(r["ys"]) > 1 else 0.0
+        if len(out) < 4 or _sx < 0.85 or _sy < 0.85:
+            _warn = L("只自动铺了 %d 格，格网盖住选区的 %.0f%%×%.0f%%（框画松了也会这样）。"
+                      "要是线不对，别在这条路上耗——用下面的「模型格网」自己给列数和行数。",
+                      "Auto-fit placed only %d cells; the lattice covers %.0f%%×%.0f%% of the region "
+                      "(a loose frame does this too). If the lines look wrong, skip this path and use "
+                      "the model grid below.",
+                      len(out), 100.0 * min(1.0, _sx), 100.0 * min(1.0, _sy))
+    return {"ok": True, "warn": _warn, "angle": r.get("angle", 0.0),
             "box": box, "scope": L("视场", "field"),
             "period_x": r.get("period_x", 0.0), "period_y": r.get("period_y", 0.0),
             "resid_x": r.get("resid_x", 0.0), "resid_y": r.get("resid_y", 0.0),
