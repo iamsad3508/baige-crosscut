@@ -3429,6 +3429,7 @@ class GridReq(AnalyzeReq):
     oy: float = 0.0
     line_dx: list[float] = []    # 每根竖线的单独微调（wire px，沿格网 u 方向）
     line_dy: list[float] = []
+    snap: bool = False           # 逐根线各自吸附到最近的暗缝上（透视/刀走偏时用）
 
 
 def _grid_model(view, labels, roles, union, bbox, req):
@@ -3477,8 +3478,22 @@ def _grid_model(view, labels, roles, union, bbox, req):
     # 逐线微调（刀走偏 / 不垂直时用）：每根内线沿自身法线各自平移
     _dx = [float(view.len_in(v)) for v in (req.line_dx or [])]
     _dy = [float(view.len_in(v)) for v in (req.line_dy or [])]
-    xb = [u0 + du + i * per_x + (_dx[i - 1] if 0 < i <= len(_dx) else 0.0) for i in range(cols + 1)]
-    yb = [v0 + dv + j * per_y + (_dy[j - 1] if 0 < j <= len(_dy) else 0.0) for j in range(rows + 1)]
+    xi = [u0 + du + i * per_x for i in range(cols + 1)]      # 理想等分位置
+    yj = [v0 + dv + j * per_y for j in range(rows + 1)]
+    xb = [xi[i] + (_dx[i - 1] if 0 < i <= len(_dx) else 0.0) for i in range(cols + 1)]
+    yb = [yj[j] + (_dy[j - 1] if 0 < j <= len(_dy) else 0.0) for j in range(rows + 1)]
+    _snap_err = ""
+    if req.snap:                                             # 逐根吸附到最近的暗缝
+        try:
+            g8 = np.asarray(view.work["rgb"]).astype(np.float32)
+            if g8.ndim == 3:
+                g8 = g8.mean(2)
+            sx, sy = gf.snap_lines(g8.clip(0, 255).astype(np.uint8), ang, xb, yb,
+                                   per_x, per_y, (cx, cy))
+            xb = [xb[i] + sx[i] for i in range(cols + 1)]
+            yb = [yb[j] + sy[j] for j in range(rows + 1)]
+        except Exception as _e:                              # 别静默：对不上线时要能看到原因
+            _snap_err = repr(_e)
     u0, v0 = xb[0], yb[0]
     bw = xb[-1] - xb[0]
     bh = yb[-1] - yb[0]
@@ -3529,6 +3544,10 @@ def _grid_model(view, labels, roles, union, bbox, req):
         bands.append({"axis": "y", "idx": j, "n": [round(n_y[0], 6), round(n_y[1], 6)],
                       "quad": quad(u0, v - k / 2.0, u0 + bw, v + k / 2.0)})
 
+    # 回传每根内线相对「理想等分」的总偏移（wire px）：前端直接存，下次拖线在它上面累加
+    used_dx = [round(float(view.len_out(xb[i] - xi[i])), 2) for i in range(1, cols)]
+    used_dy = [round(float(view.len_out(yb[j] - yj[j])), 2) for j in range(1, rows)]
+
     cell_area = (tot_a / len(cells)) if cells else max(1.0, (per_x - k) * (per_y - k))
     sc = view.len_out(1.0)                       # wire px / 视图 px；面积要平方
     return {"ok": True, "warn": "", "model": True, "angle": ang,
@@ -3539,6 +3558,7 @@ def _grid_model(view, labels, roles, union, bbox, req):
             "bands": bands,
             "cells": [dict(c, area=round(c["area"] * sc * sc, 1),
                            kept=round(c["kept"] * sc * sc, 1)) for c in cells],
+            "line_dx": used_dx, "line_dy": used_dy, "snap_err": _snap_err,
             "total": {"pct": 100.0 * (1.0 - tot_k / max(tot_a, 1.0)),
                       "area": round(tot_a * sc * sc, 1),
                       "kept": round(tot_k * sc * sc, 1),
@@ -3587,6 +3607,19 @@ def api_grid(req: GridReq):
         out = _grid_model(view, labels, roles, union, (gx0, gy0, gx1, gy1), req)
         if req.auto_angle:
             out["angle_est"] = gf.estimate_angle(sub)
+        if req.overlay:
+            # 判定染色（红=露底 / 绿=漆膜）与主分析走同一条 _build_overlay，
+            # 免得「格网报 33%、覆盖层却是另一套参数」这种对不上的情况
+            try:
+                side = _res_to_side(req.res, sess.full_img())
+                out["overlay_url"] = _build_overlay(
+                    sess, work, samples, req.tol, req.purity, side,
+                    masks if rois_v else None, _msig(rois_v),
+                    view=view if view.native else None,
+                    full_size=(int(round(sess.size[0] * view.s6)), int(round(sess.size[1] * view.s6))),
+                    line_px=req.line_px, mode=getattr(req, "mode", "width"))
+            except Exception:
+                out["overlay_url"] = None
         return out
 
     if req.line_xs and req.line_ys:

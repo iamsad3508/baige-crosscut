@@ -222,3 +222,43 @@ def estimate_angle(gray, span=8.0, max_dim=700, coarse=0.5, fine=0.05):
     best = max(((score(a), a) for a in np.arange(-span, span + 1e-9, coarse)))
     best = max((score(a), a) for a in np.arange(best[1] - coarse, best[1] + coarse + 1e-9, fine))
     return round(float(best[1]), 2)
+
+def snap_lines(gray, angle, xb, yb, per_x, per_y, center, span=0.34, sigma=1.5):
+    """把每根等分线各自吸附到最近的那道暗线（刀缝）上。返回 (dx, dy)，视图 px，内部线用。
+
+    为什么不是「整片转一个角度就对」：翻拍照片有透视、刀也可能走偏，格线既不共角也不等距。
+    人给的格数 + 大致位置是对的，逐根吸附能把每根线各自挪到它那一道缝上——这才是旧图能用的
+    对位方式（一个全局角度最多只能对齐一头）。
+    """
+    g = np.asarray(gray).astype(np.uint8)
+    fill = int(np.median(g))
+    r = np.asarray(Image.fromarray(g, "L").rotate(
+        angle, resample=Image.BILINEAR, center=center, fillcolor=fill)).astype(np.float32)
+    bg = _gauss_bg(r, max(9.0, 0.06 * min(r.shape)))
+    raw = np.clip(bg - r, 0, None)
+    px = _smooth1d(raw.mean(0), sigma)
+    py = _smooth1d(raw.mean(1), sigma)
+    px = np.clip(_detrend(px, max(51, px.size // 6)), 0, None)
+    py = np.clip(_detrend(py, max(51, py.size // 6)), 0, None)
+
+    def one(prof, pos, per):
+        n = len(prof)
+        lo = int(max(1, pos - span * per))
+        hi = int(min(n - 2, pos + span * per))
+        if hi - lo < 3:
+            return 0.0
+        seg = prof[lo:hi]
+        j = lo + int(np.argmax(seg))
+        # 吸到的峰太弱就当没吸到（浅缝/无缝隙），保持等分
+        near = prof[max(0, j - int(per * 0.5)):min(n, j + int(per * 0.5))]
+        if near.size == 0 or prof[j] < 0.35 * float(near.max()) or prof[j] <= 0:
+            return 0.0
+        return float(j - pos)
+
+    dx = [0.0] * len(xb)
+    dy = [0.0] * len(yb)
+    for i in range(1, len(xb) - 1):
+        dx[i] = one(px, xb[i], per_x)
+    for j in range(1, len(yb) - 1):
+        dy[j] = one(py, yb[j], per_y)
+    return dx, dy

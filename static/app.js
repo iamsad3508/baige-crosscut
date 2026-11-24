@@ -33,7 +33,7 @@ const S = {
   blocks: null, blocksOn: true, blocksTimer: null, ants: 0,
   blocksSeq: 0,
   grid: null, gridCells: false,
-  gm: null, gmPitch: 0, gmArea: true, gmOff: { ox: 0, oy: 0, dx: [], dy: [] }, gmDrag: null,
+  gm: null, gmPitch: 0, gmArea: false, gmOff: { ox: 0, oy: 0, dx: [], dy: [] }, gmDrag: null,
 };
 
 /* ------------------------------------------------------------------ 工具 */
@@ -362,16 +362,23 @@ function drawModelGrid() {
   }
 
   const b = g.box, a0 = toScreen(b[0] + gx, b[1] + gy);
-  const txt = T('未脱落 ', 'coating left ') + gmAreaText(g.total.kept)
-    + ' · ' + g.cols + '×' + g.rows + ' · ' + T('刀宽 ', 'blade ') + Math.round(g.k) + 'px'
-    + ' · ' + T('格内脱落 ', 'removal ') + fmt(g.total.pct, 1) + '%';
-  ctx.font = '700 14px system-ui, sans-serif';
-  const tw = ctx.measureText(txt).width;
-  ctx.fillStyle = 'rgba(8,10,16,.84)';
-  ctx.fillRect(a0.x, a0.y - 26, tw + 16, 24);
-  ctx.fillStyle = '#ffd88a';
-  ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
-  ctx.fillText(txt, a0.x + 8, a0.y - 6);
+  const main = T('框选区脱落 ', 'region removal ') + fmt(g.total.pct, 1) + '%';
+  const sub = gmAreaText(g.total.kept) + T(' / 合计 ', ' of ') + gmAreaText(g.total.area)
+    + ' · ' + g.cols + '×' + g.rows + ' · ' + T('刀宽 ', 'blade ') + Math.round(g.k) + 'px';
+  ctx.font = '800 20px system-ui, sans-serif';
+  const w1 = ctx.measureText(main).width;
+  ctx.font = '600 12px system-ui, sans-serif';
+  const w2 = ctx.measureText(sub).width;
+  const bw2 = Math.max(w1, w2) + 18;
+  ctx.fillStyle = 'rgba(8,10,16,.88)';
+  ctx.fillRect(a0.x, a0.y - 52, bw2, 48);
+  ctx.fillStyle = gridColor(g.total.pct) + '1)';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = '800 20px system-ui, sans-serif';
+  ctx.fillText(main, a0.x + 9, a0.y - 50);
+  ctx.font = '600 12px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(225,235,250,.85)';
+  ctx.fillText(sub, a0.x + 9, a0.y - 25);
   ctx.restore();
 }
 
@@ -388,8 +395,15 @@ function gmHitAt(ex, ey) {
   if (!g || !g.bands) return null;
   for (const b of g.bands) {
     const q = (b.quad || b).map(p => toScreen(p[0], p[1]));
-    const a = { x: (q[0].x + q[3].x) / 2, y: (q[0].y + q[3].y) / 2 };
-    const c = { x: (q[1].x + q[2].x) / 2, y: (q[1].y + q[2].y) / 2 };
+    /* quad 顺序：0 左上、1 右上、2 右下、3 左下。
+       竖线的长轴是「上边中点 → 下边中点」，横线是「左边中点 → 右边中点」——
+       以前两种都用后者，竖线那段只有 k px 长，点哪儿都够不着，于是全都落进"整体平移"。 */
+    const a = b.axis === 'x'
+      ? { x: (q[0].x + q[1].x) / 2, y: (q[0].y + q[1].y) / 2 }
+      : { x: (q[0].x + q[3].x) / 2, y: (q[0].y + q[3].y) / 2 };
+    const c = b.axis === 'x'
+      ? { x: (q[3].x + q[2].x) / 2, y: (q[3].y + q[2].y) / 2 }
+      : { x: (q[1].x + q[2].x) / 2, y: (q[1].y + q[2].y) / 2 };
     if (distSeg(ex, ey, a, c) < 10) return { axis: b.axis, idx: b.idx, n: b.n || [1, 0] };
   }
   const bx = g.box;
@@ -412,6 +426,7 @@ function gmBody(extra) {
     angle: +$('#gmAng').value || 0, k_band: +$('#gmK').value || 0,
     ox: S.gmOff.ox, oy: S.gmOff.oy,
     line_dx: S.gmOff.dx.slice(), line_dy: S.gmOff.dy.slice(),
+    overlay: !!S.showOverlay,
   }, extra || {});
 }
 
@@ -419,10 +434,10 @@ function gmSummary(g) {
   const n = g.cells.length;
   const intact = g.cells.filter(c => c.pct <= 10).length;
   const gone = g.cells.filter(c => c.pct > 60).length;
-  return g.cols + '×' + g.rows + ' · ' + T('刀宽 ', 'blade ') + Math.round(g.k) + 'px'
+  return T('框选区脱落 ', 'removal ') + fmt(g.total.pct, 1) + '% · '
+    + T('未脱落 ', 'left ') + gmAreaText(g.total.kept) + ' / ' + gmAreaText(g.total.area)
+    + ' · ' + g.cols + '×' + g.rows + ' · ' + T('刀宽 ', 'blade ') + Math.round(g.k) + 'px'
     + ' · ' + T('格距 ', 'pitch ') + Math.round(g.pitch_x) + '×' + Math.round(g.pitch_y) + 'px'
-    + ' · ' + T('未脱落 ', 'left ') + gmAreaText(g.total.kept)
-    + ' · ' + T('格内脱落 ', 'removal ') + fmt(g.total.pct, 1) + '%'
     + ' · ' + T('完整格 ' + intact + '/' + n, 'intact ' + intact + '/' + n)
     + (gone ? ' · ' + T('基本掉光 ' + gone, 'gone ' + gone) : '');
 }
@@ -445,6 +460,10 @@ async function runModelGrid(extra) {
       S.gmOff.dx = new Array(Math.max(0, g.cols - 1)).fill(0);
       S.gmOff.dy = new Array(Math.max(0, g.rows - 1)).fill(0);
     }
+    // 服务端回传的是「相对理想等分的总偏移」，吸附过之后必须同步回来，否则下次拖线会叠错
+    if (g.line_dx) S.gmOff.dx = g.line_dx.slice();
+    if (g.line_dy) S.gmOff.dy = g.line_dy.slice();
+    if (g.overlay_url) loadOverlay(g.overlay_url);
     S.gmPitch = +$('#gmPitch').value || 0;
     $('#gmInfo').textContent = gmSummary(g);
     setStatus(T('格网已铺好：橙带=你设的刀宽（扣掉不算），逐格是剩余漆膜；线不齐可直接拖那一根', 'Grid laid out — orange = the blade width you excluded'));
@@ -3142,6 +3161,7 @@ if ($('#btnGridOff')) $('#btnGridOff').onclick = () => { S.grid = null; $('#grid
 const gmRerun = debounce(() => { if (S.gm) runModelGrid(); }, 420);
 if ($('#btnGmRun')) $('#btnGmRun').onclick = () => runModelGrid();
 if ($('#btnGmAngle')) $('#btnGmAngle').onclick = gmAutoAngle;
+if ($('#btnGmSnap')) $('#btnGmSnap').onclick = () => runModelGrid({ snap: true });
 if ($('#btnGmOff')) $('#btnGmOff').onclick = () => { S.gm = null; S.gmDrag = null; S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] }; $('#gmInfo').textContent = ''; draw(); };
 if ($('#btnGmReset')) $('#btnGmReset').onclick = () => {
   S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] };
