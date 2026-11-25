@@ -627,9 +627,9 @@ async function runModelGrid(extra) {
     // 刀宽比实测缝宽小太多时提醒：缝里露白的部分会被算进“格内脱落”（这张二值化图实测缝宽 24px，
     // 填 3px 会把大半个缝算成脱落，读数虚高）
     let wNote = '';
-    if (tr && tr.w_x && S.gm && +$('#gmK').value && +$('#gmK').value < 0.6 * tr.w_x) {
-      wNote = T(`｜刀缝实测宽 ${Math.round(tr.w_x)} px，你现在填 ${+$('#gmK').value} px，缝里露白的部分会被算成脱落`,
-                ` | detected cut width ${Math.round(tr.w_x)} px vs your ${+$('#gmK').value} px`);
+    if (tr && tr.w_x && S.gm && S.line > 0 && S.line < 0.6 * tr.w_x) {
+      wNote = T(`｜刀缝实测宽 ${Math.round(tr.w_x)} px，你现在填 ${S.line} px，缝里露白的部分会被算成脱落`,
+                ` | detected cut width ${Math.round(tr.w_x)} px vs your ${S.line} px`);
     }
     if (trNote || wNote) $('#gmTrace').textContent = trNote + wNote;
     setStatus((extra && extra.snap)
@@ -1892,6 +1892,9 @@ async function analyze() {
   if (!S.id) return;
   if (!S.rois.length) {                       // 选区全删了：不许拿整图凑数（会得 0B）
     S.rows = null; S.total = null; S.autoTotal = null; S.autoRows = null;
+    S.gm = null; S.gmDrag = null; S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] };   // 格网也跟着走
+    if ($('#gmInfo')) $('#gmInfo').textContent = '';
+    if ($('#gmTrace')) $('#gmTrace').textContent = '';
     S.lines = []; S.soft = null;
     setResult(t('res.noRoi'));
     const sum0 = $('#summary');
@@ -2144,6 +2147,9 @@ function updateTolHint(r) {
 }
 
 function renderResult() {
+  // 判法=格网 时结果卡只认格网的数：像素判法算完会再刷一次卡，会把格网的数字盖掉
+  // （截图里出现过：卡上 45.62%、画布上 47.5%，两个数并排没法看）
+  if (S.exmode === 'grid' && S.gm) { try { setGridCard(S.gm); return; } catch (_) {} }
   if (S.blocks) applyBlocks();
   if (!S.total) return;
   const t = S.total;
@@ -2622,6 +2628,9 @@ function dropOverlay() {
 function clearAllRois() {
   if (!S.rois.length) return;
   S.rois = []; S.sel = -1;
+  S.gm = null; S.gmDrag = null; S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] };   // 没选区了，格网不该还挂在那儿
+  if ($('#gmInfo')) $('#gmInfo').textContent = '';
+  if ($('#gmTrace')) $('#gmTrace').textContent = '';
   dropOverlay();
   refreshRoiList(); syncRoiAngle(); draw();
   analyze();                       // 没选区 → 走"清空结果"分支
@@ -2714,7 +2723,7 @@ function syncRoiAngle() {
 /* ------------------------------------------------------------------ 事件绑定 */
 $('#btnOpen').onclick = () => $('#fileInput').click();
 $('#fileInput').onchange = e => { upload(e.target.files[0]); e.target.value = ''; };
-$('#btnCalc').onclick = analyze;
+$('#btnCalc').onclick = () => { analyze(); if (S.exmode === 'grid') scheduleGm(60); };
 $('#btnFit').onclick = fitView;
 $('#btnOne').onclick = zoomOne;
 $('#btnReport').onclick = () => download('api/export/report', (S.name || T('结果', 'result')).replace(/\.[^.]+$/, '') + T('_百格报告.pdf', '_crosscut_report.pdf'));
@@ -2839,10 +2848,7 @@ function applyExmode(v) {
   const info = $('#exmodeInfo');
   if (info) info.textContent = exmodeTxt(S.exmode);
   // 判法=刀缝格网 → 格网块（列/行/歪角）直接露出来，这就是半自动的操作面
-  if (S.exmode === 'grid') {
-    const cb = $('#chkGmShow');
-    if (cb && !cb.checked) { cb.checked = true; if (cb.onchange) cb.onchange({ target: cb }); }
-  }
+  try { syncGmWrap(); } catch (_) {}          // 判法=grid 才把格网参数露出来
   try { refreshGmK(); } catch (_) {}
   try { updateKneeHint(); } catch (_) {}     // 换判法立刻刷新/隐藏 k 曲线
 }
@@ -3289,7 +3295,6 @@ async function openRecord(rid) {
     if (S.gmRec) {
       if ($('#gmCols')) $('#gmCols').value = S.gmRec.cols;
       if ($('#gmRows')) $('#gmRows').value = S.gmRec.rows;
-      syncGmK(Math.max(2, Math.min(80, Math.round(S.gmRec.k_wire || 17))), false);
       if ($('#gmAng')) $('#gmAng').value = S.gmRec.angle || 0;
       S.gmOff = { ox: S.gmRec.ox || 0, oy: S.gmRec.oy || 0,
                   dx: (S.gmRec.line_dx || []).slice(), dy: (S.gmRec.line_dy || []).slice() };
@@ -3328,8 +3333,7 @@ async function openRecord(rid) {
       if (S.gmRec) {
         // 记录里带格网 → 用同一组参数把它铺回去（格数/刀宽/歪角/线位都一致），
         // 否则“打开记录”只回到主分析，格网那层就丢了（用户报的“格子没记下来”）
-        const cs = document.querySelector('#chkGmShow');
-        if (cs && !cs.checked) { cs.checked = true; cs.dispatchEvent(new Event('change')); }
+        try { syncGmWrap(); } catch (_) {}
         await runModelGrid({ snap: false });
         const gp0 = (S.gmRec.total || {}).pct, gp1 = (S.gm && S.gm.total || {}).pct;
         const gmOff = (gp0 != null && gp1 != null && Math.abs(gp0 - gp1) > 0.05);
@@ -3407,17 +3411,9 @@ function applyGmShow(on) {
   }
   if (typeof draw === 'function') draw();
 }
-if ($('#chkGmShow')) {
-  let on = false;
-  try { on = localStorage.getItem('baige.gmShow') === '1'; } catch (_) {}
-  $('#chkGmShow').checked = on;
-  applyGmShow(on);
-  $('#chkGmShow').onchange = () => {
-    const v = $('#chkGmShow').checked;
-    try { localStorage.setItem('baige.gmShow', v ? '1' : '0'); } catch (_) {}
-    applyGmShow(v);
-  };
-}
+/* 格网块现在挂在「量尺 → 刀缝判法」第三项后面：判法=grid 才出现，没有勾选框了 */
+function syncGmWrap() { applyGmShow(S.exmode === 'grid'); }
+try { syncGmWrap(); } catch (_) {}
 if ($('#btnGmSnap')) $('#btnGmSnap').onclick = () => runModelGrid({ snap: true });
 if ($('#btnSep')) $('#btnSep').onclick = () => runSep();
 if ($('#btnGmColor')) $('#btnGmColor').onclick = async () => {
@@ -3565,7 +3561,7 @@ function setLine(v, keepSuggest) {
       `Using your cut width ${S.line} (auto was ${S.knee.k}; re-select “automatic” to restore it)`));
   }
   $('#rngLine').value = Math.min(25, S.line); $('#numLine').value = S.line;
-  try { refreshGmK(); } catch (_) {}          // 格网块里那行“刀宽 沿用 = N px”要跟着变
+  try { scheduleGm(400); } catch (_) {}       // 改阈值＝改刀宽，格网立刻重算，不用再点按钮
   try { localStorage.setItem('baige.line', String(S.line)); } catch (_) {}
   if (!keepSuggest) { S.suggestHold = null; S.widthTouched = true; }   // 用户自己改的：本图内不再用建议值覆盖
   debouncedAnalyze();
