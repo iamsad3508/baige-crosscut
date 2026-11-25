@@ -295,25 +295,62 @@ def snap_lines(gray, angle, xb, yb, per_x, per_y, center, span=0.30, sigma=1.5):
 
 # ---------------------------------------------------------------- 认缝 → 按缝铺线
 def _profiles(raw, thr_frac=0.35):
-    """沿两个方向各给一对剖面：(连续性, 典型暗度)。
+    """沿两个方向各给一对剖面：(连续性, 典型偏离量)。`raw` 必须已经裁成「单向」偏差（≥0）。
 
-    连续性 = 这一列/行里暗像素占的比例。刀缝是**长条**（从一头贯到另一头，接近 1），
-    漆膜是**孤岛**（成块但不连续，通常 0.1~0.3）；这一条就是区分「缝」和「阴影块」的根本。
+    连续性 = 这一列/行里出现该偏差的像素占比：
+      * 刀缝是**长条**（从一头贯到另一头）→ 接近 1
+      * 漆膜上的阴影/斑块是**孤岛** → 0.1~0.3
+    注意：整块漆膜同样能给出接近 1 的连续性（它也是一整列），宽度那一条由 `_centroids` 兜。
     """
-    p95 = float(np.percentile(raw, 95))
-    if p95 <= 0:
+    q = float(np.percentile(raw, 95))
+    if q <= 0:
         return None, None
-    thr = thr_frac * p95
-    dark = raw > thr
-    return (dark.mean(axis=0), np.percentile(raw, 75, axis=0)), \
-           (dark.mean(axis=1), np.percentile(raw, 75, axis=1))
+    hit = raw > thr_frac * q
+    return (hit.mean(axis=0), np.percentile(raw, 75, axis=0)), \
+           (hit.mean(axis=1), np.percentile(raw, 75, axis=1))
 
 
-def _centroids(cont, dark, score, lo, hi):
-    """把一段剖面里的峰找出来，返回 [(位置, 得分)]，峰位用平台重心（沟有宽度）。"""
+def _axis_dev(dev, axis, n_need, pitch0, lo, hi):
+    """在一个方向上认缝。`dev` 是单向偏差（≥0，二维）。返回 (线位, 间距, 质量分)。
+
+    axis=0 按列统计（找竖缝），axis=1 按行统计（找横缝）。
+    """
+    q = float(np.percentile(dev, 95))
+    if q <= 0:
+        return [], 0.0, -1.0
+    hit = dev > 0.35 * q
+    cont = hit.mean(axis=axis)
+    dark = np.percentile(dev, 75, axis=axis)
+    score = _smooth1d(cont * dark, 1.0)
+    cands = [c for c in _centroids(cont, dark, score, 1, score.size - 1, pitch0)
+             if cont[int(round(c[0]))] >= 0.45]
+    keep, last = [], -1e9
+    for c in sorted(cands):
+        if c[0] - last >= 0.45 * pitch0:
+            keep.append(c)
+            last = c[0]
+    centers, pitch = _walk(keep, n_need, lo, hi, pitch0)
+    if len(centers) != n_need:
+        return centers, pitch, -1.0
+    d = np.diff(centers)
+    uni = 1.0 - float(np.std(d) / max(1e-6, np.mean(d)))
+    peak = max(1e-6, float(score.max()))
+    ctr = float(np.median([score[int(round(c))] for c in centers])) / peak
+    return centers, pitch, uni * (0.25 + ctr)
+
+
+def _centroids(cont, dark, score, lo, hi, pitch):
+    """把一段剖面里的「窄峰」找出来，返回 [(位置, 得分, 宽度)]。
+
+    峰位用平台重心（沟有宽度，取最暗/最亮那一列会在沟里左右抖）。
+    **宽度是命门**：孤岛（漆膜块）和刀道都是一整列同向偏离、连续性都接近 1，
+    只有宽度不同——刀道窄（≈刀宽）、整块漆膜宽（≈格距）。宽度超过 0.55 格距的一律当
+    漆膜块丢掉，否则线会整整错开半格压在漆膜中心（实测过）。
+    """
     out = []
     n = score.size
     lo, hi = int(max(1, lo)), int(min(n - 2, hi))
+    max_w = max(3.0, 0.55 * pitch)
     i = lo
     while i < hi:
         if score[i] <= 0 or cont[i] < 0.45:
@@ -326,9 +363,12 @@ def _centroids(cont, dark, score, lo, hi):
                 a -= 1
             while b < hi and score[b + 1] >= thr:
                 b += 1
+            if b - a + 1 > max_w:            # 太宽 = 漆膜块，不是刀道
+                i = b + 1
+                continue
             w = score[a:b + 1]
             cen = float((w * np.arange(a, b + 1)).sum() / w.sum()) if w.sum() > 0 else float(i)
-            out.append((cen, float(score[i])))
+            out.append((cen, float(score[i]), float(b - a + 1)))
             i = b + 1
         else:
             i += 1
@@ -336,18 +376,18 @@ def _centroids(cont, dark, score, lo, hi):
 
 
 def _walk(cands, n_need, lo, hi, pitch):
-    """从最强的一条缝开始，按「上一条 + 间距」预测下一条，一条条往两边走。
+    """从最强的一条缝开始，按「上一条 + 实测间距」预测下一条，一条条往两边走。
 
-    为什么不用等分：等分把误差全堆在最后几根上，透视/刀走偏时越走越歪，再靠吸附去救，
-    很容易滑到隔壁的阴影块里（就是「对到格子中间」）。逐条跟踪时每一步的搜索窗只有
-    0.35 个格距，前一条的位置是准的，下一条就不会跑偏。
+    不用等分的原因：等分把误差全堆到最后几根，透视/刀走偏时越走越歪，再靠吸附去救很容易
+    滑到隔壁（用户看到的就是「对到格子中间」）。逐条跟踪时每一步的搜索窗只有 0.35 格距，
+    前一条是准的，下一条就不会跑偏。
     """
     if not cands:
         return [], 0.0
     cands = sorted(cands, key=lambda c: -c[1])
     anchor = cands[0][0]
-    pos = {round(c[0]): c[0] for c in cands}
     pts = sorted(c[0] for c in cands)
+    strength = {round(c[0]): c[1] for c in cands}
     centers = [anchor]
     for d in (-1, 1):
         cur = anchor
@@ -358,12 +398,10 @@ def _walk(cands, n_need, lo, hi, pitch):
                 step = pitch
             pred = cur + d * step
             w = 0.35 * abs(step)
-            a, b = pred - w, pred + w
-            hit = [c for c in pts if a <= c <= b]
+            hit = [c for c in pts if pred - w <= c <= pred + w]
             if not hit:
                 break
-            # 取窗口里最强的那个
-            best = max(hit, key=lambda c: dict((round(k), v) for k, v in cands).get(round(c), 0.0))
+            best = max(hit, key=lambda c: strength.get(round(c), 0.0))
             if d * (best - cur) <= 0:
                 break
             prev, cur = cur, best
@@ -371,7 +409,6 @@ def _walk(cands, n_need, lo, hi, pitch):
             if cur < lo or cur > hi:
                 break
     centers.sort()
-    # 去重（同一条缝被两个峰表示）
     ded = []
     for c in centers:
         if not ded or abs(c - ded[-1]) >= 0.45 * pitch:
@@ -393,10 +430,9 @@ def trace_grid(gray, angle, center, box, cols, rows):
     r = np.asarray(Image.fromarray(g, "L").rotate(
         angle, resample=Image.BILINEAR, center=center, fillcolor=fill)).astype(np.float32)
     bg = _gauss_bg(r, max(9.0, 0.06 * min(r.shape)))
-    # 用带符号的「比背景暗多少」：试过取绝对值以兼容亮缝，结果背景/漆膜本身的明暗边界
-    # 也会成千上万像素地连续，剖面全是峰（一张仪器截图直接退化成 1 条）。刀缝在本工具处理的
-    # 图里都表现为暗沟，就按暗沟认。
-    raw = np.clip(bg - r, 0, None)
+    # 带符号的暗场：正=比背景暗（暗沟），负=比背景亮（露白底材的刀缝）。
+    # 早期版本只留正的，遇到「亮缝+暗漆膜」的图会把整块漆膜误判成缝，正好错开半格。
+    raw = bg - r
 
     # 往外多留一圈：框画得紧时，最外那两条缝正好压在框边上，剖面里贴边的峰会被告警掉
     # （实测 1.0 倍能认 11 条，缩到 0.5 倍只认 10 条，就是最外一条被裁掉了）
@@ -417,21 +453,42 @@ def trace_grid(gray, angle, center, box, cols, rows):
     if long_side and (long_side < 520 or long_side > 1500):
         norm = 900.0 / long_side
         tw, th = max(8, int(round(sub.shape[1] * norm))), max(8, int(round(sub.shape[0] * norm)))
-        sub = np.asarray(Image.fromarray(np.clip(sub, 0, 255).astype(np.uint8))
-                         .resize((tw, th), Image.LANCZOS)).astype(np.float32)
+        # 注意：sub 是带符号的暗场，负值代表「亮缝」。这里曾经用 uint8 装它，
+        # 负值被 clip 成 0 → 亮缝整类被抹掉，只剩「压暗」一支能出候选（半格偏移就是这么来的）。
+        sub = np.asarray(Image.fromarray(np.ascontiguousarray(sub, dtype=np.float32), mode="F")
+                         .resize((tw, th), Image.BICUBIC), dtype=np.float32)
 
-    px, py = _profiles(sub)
     out = {"ok_x": False, "ok_y": False, "xb": [], "yb": [], "msg": ""}
-    if px is None:
-        out["msg"] = "没有暗场"
-        return out
+
+    # 极性未知：有的图是暗沟（沟比漆膜暗），有的是亮缝（露出白底材，缝比漆膜亮）。
+    # 两个方向各自试两种极性，谁认出来的格子更规整、对比更强就用谁——不猜、不做全局假设。
+    for tag, axis, n_need, off, blo, bhi in (
+            ("x", 0, cols + 1, ix0, ix0, ix1),
+            ("y", 1, rows + 1, iy0, iy0, iy1)):
+        pitch0 = (bhi - blo) * norm / max(1, n_need - 1)
+        lo, hi = (blo - off) * norm, (bhi - off) * norm
+        best = None
+        for sign in (1.0, -1.0):
+            dev = np.clip(sign * sub, 0, None)
+            centers, pitch, qual = _axis_dev(dev, axis, n_need, pitch0, lo, hi)
+            if best is None or qual > best[2]:
+                best = (centers, pitch, qual, sign)
+        centers, pitch, qual, sign = best
+        ok = len(centers) == n_need
+        out["ok_" + tag] = ok
+        out[("xb" if tag == "x" else "yb")] = [c / norm + off for c in centers] if ok else []
+        out["n_" + tag] = len(centers)
+        out["pitch_" + tag] = round(pitch / norm, 1)
+        out["sign_" + tag] = "dark" if sign > 0 else "bright"
+        out["qual_" + tag] = round(qual, 2)
+    return out
 
     for tag, (cont, dark), n_need, off, span, blo, bhi in (
             ("x", px, cols + 1, ix0, ix1 - ix0, ix0, ix1),
             ("y", py, rows + 1, iy0, iy1 - iy0, iy0, iy1)):
         score = _smooth1d(cont * dark, 1.0)
         pitch0 = span / max(1, n_need - 1)
-        cands = _centroids(cont, dark, score, 1, score.size - 1)
+        cands = _centroids(cont, dark, score, 1, score.size - 1, pitch0)
         # 只留连续性够的、且不至于挤在一起
         cands = [c for c in cands if cont[int(round(c[0]))] >= 0.45]
         keep, last = [], -1e9

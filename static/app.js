@@ -569,7 +569,10 @@ async function runModelGrid(extra) {
       ? (trOk
         ? T(`刀缝追踪：竖 ${tr.n_x || 0} 条 / 横 ${tr.n_y || 0} 条（间距 ${Math.round(tr.pitch_x || 0)}×${Math.round(tr.pitch_y || 0)} px）`,
             `Seams traced: ${tr.n_x || 0} vertical / ${tr.n_y || 0} horizontal (pitch ${Math.round(tr.pitch_x || 0)}×${Math.round(tr.pitch_y || 0)} px)`)
-        : T(`没认全刀缝（竖 ${tr.n_x || 0}/${S.gm.cols + 1}、横 ${tr.n_y || 0}/${S.gm.rows + 1}）→ 这一版先按等分铺`,
+        : T(`没认全刀缝（竖 ${tr.n_x || 0}/${S.gm.cols + 1}、横 ${tr.n_y || 0}/${S.gm.rows + 1}）→ 这一版先按等分铺`
+            // 只在“几乎认全、只差一两条”时提示格数可能填错了；只认出 4 条那种是彻底没认出来，别误导
+            + ((tr.n_x >= S.gm.cols - 1 && tr.n_x !== S.gm.cols + 1) ? `｜竖着认到 ${tr.n_x} 条缝，按它算应是 ${tr.n_x - 1} 列` : '')
+            + ((tr.n_y >= S.gm.rows - 1 && tr.n_y !== S.gm.rows + 1) ? `、横着 ${tr.n_y} 条 → ${tr.n_y - 1} 行` : ''),
             `Could not trace all cuts (${tr.n_x || 0}/${S.gm.cols + 1} and ${tr.n_y || 0}/${S.gm.rows + 1}) — fell back to even division`))
       : '';
     if (trNote) $('#gmTrace').textContent = trNote;
