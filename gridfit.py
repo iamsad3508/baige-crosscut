@@ -223,7 +223,7 @@ def estimate_angle(gray, span=8.0, max_dim=700, coarse=0.5, fine=0.05):
     best = max((score(a), a) for a in np.arange(best[1] - coarse, best[1] + coarse + 1e-9, fine))
     return round(float(best[1]), 2)
 
-def snap_lines(gray, angle, xb, yb, per_x, per_y, center, span=0.34, sigma=1.5):
+def snap_lines(gray, angle, xb, yb, per_x, per_y, center, span=0.22, sigma=1.5):
     """把每根等分线各自吸附到最近的那道暗线（刀缝）上。返回 (dx, dy)，视图 px，内部线用。
 
     为什么不是「整片转一个角度就对」：翻拍照片有透视、刀也可能走偏，格线既不共角也不等距。
@@ -251,7 +251,9 @@ def snap_lines(gray, angle, xb, yb, per_x, per_y, center, span=0.34, sigma=1.5):
         j = lo + int(np.argmax(seg))
         # 吸到的峰太弱就当没吸到（浅缝/无缝隙），保持等分
         near = prof[max(0, j - int(per * 0.5)):min(n, j + int(per * 0.5))]
-        if near.size == 0 or prof[j] < 0.35 * float(near.max()) or prof[j] <= 0:
+        # 峰太弱就保持等分：0.5 而不是 0.35——旧图上 0.35 常常吸到隔壁那道弱缝，
+        # 一次对线就把整排线拉歪（用户看到的「自动对线不准」多半是这一跳）
+        if near.size == 0 or prof[j] < 0.5 * float(near.max()) or prof[j] <= 0:
             return 0.0
         return float(j - pos)
 

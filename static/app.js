@@ -484,6 +484,17 @@ async function runSep() {
   } finally { S.busy = false; }
 }
 
+/* 列/行填的是「格子」数，刀线 = 格子数 + 1；把这层换算直接写在界面上，免得填反 */
+function updateGmLines() {
+  const el = $('#gmLines');
+  if (!el) return;
+  const c = +($('#gmCols') ? $('#gmCols').value : 0) || 0;
+  const r = +($('#gmRows') ? $('#gmRows').value : 0) || 0;
+  if (c < 2 || r < 2) { el.textContent = ''; return; }
+  el.textContent = T(`→ 竖刀线 ${c + 1} 条 ／ 横刀线 ${r + 1} 条（刀线比格子多 1）`,
+                     `→ ${c + 1} vertical cuts / ${r + 1} horizontal cuts (one more than cells)`);
+}
+
 function gmSummary(g) {
   const n = g.cells.length;
   const intact = g.cells.filter(c => c.pct <= 10).length;
@@ -545,9 +556,18 @@ async function runModelGrid(extra) {
     if (g.line_dy) S.gmOff.dy = g.line_dy.slice();
     if (g.overlay_url) loadOverlay(g.overlay_url);
     if (S.gmAuto) g.auto_samples = true;
-    S.gmPitch = +$('#gmPitch').value || 0;
+    S.gmPitch = $('#gmPitch') ? (+$('#gmPitch').value || 0) : 0;   // 格距( mm )输入已撤，面积一律 px²
     $('#gmInfo').textContent = gmSummary(g);
-    setStatus(T('格网已铺好：橙带=你设的刀宽（扣掉不算），逐格是剩余漆膜；线不齐可直接拖那一根', 'Grid laid out — orange = the blade width you excluded'));
+    const snapD = [].concat(g.line_dx || [], g.line_dy || []).map(Math.abs);
+    const snapMax = snapD.length ? Math.max(...snapD) : 0;
+    setStatus((extra && extra.snap)
+      ? (snapMax >= 1
+        ? T('对线完成：线最多挪了 ' + snapMax.toFixed(1) + ' px；挪太多说明格数/框位不对',
+            'Snapped — largest line shift ' + snapMax.toFixed(1) + ' px')
+        : T('对线完成：线本来就贴住了，没挪（数字不变是对的）',
+            'Snapped — nothing moved, the lines were already on the cuts'))
+      : T('格网已铺好：橙带=你设的刀宽（扣掉不算），逐格是剩余漆膜；线不齐可直接拖那一根',
+          'Grid laid out — orange = the blade width you excluded'));
     draw();
   } catch (e) {
     setStatus(String(e.message || e));
@@ -3284,10 +3304,20 @@ if ($('#btnGmReset')) $('#btnGmReset').onclick = () => {
   S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] };
   if (S.gm) runModelGrid(); else draw();
 };
-if ($('#gmK')) $('#gmK').oninput = (e) => { $('#gmKv').textContent = e.target.value; gmRerun(); };
-['#gmCols', '#gmRows', '#gmAng', '#gmPitch'].forEach(s => {
-  if ($(s)) $(s).onchange = () => { if (S.gm || s === '#gmPitch') gmRerun(); };
+/* 刀宽：滑块和数字框双向同步（手拖不好对小数时直接填） */
+function syncGmK(v, rerun) {
+  const k = Math.min(80, Math.max(2, Math.round(+v || 17)));
+  if ($('#gmK')) $('#gmK').value = k;
+  if ($('#gmKn')) $('#gmKn').value = k;
+  if ($('#gmKv')) $('#gmKv').textContent = k;
+  if (rerun) gmRerun();
+}
+if ($('#gmK')) $('#gmK').oninput = (e) => syncGmK(e.target.value, true);
+if ($('#gmKn')) $('#gmKn').onchange = (e) => syncGmK(e.target.value, true);
+['#gmCols', '#gmRows', '#gmAng'].forEach(s => {
+  if ($(s)) $(s).onchange = () => { updateGmLines(); if (S.gm) gmRerun(); };
 });
+updateGmLines();
 if ($('#chkGmArea')) $('#chkGmArea').onchange = (e) => { S.gmArea = e.target.checked; draw(); };
 if ($('#chkGridCells')) $('#chkGridCells').onchange = (e) => { S.gridCells = e.target.checked; draw(); };
 async function applyRecommended() {

@@ -3449,7 +3449,13 @@ def _model_geom(view, bbox, req):
     k = max(1.0, float(view.len_in(kw)))          # 视图 px
     per_x, per_y = bw / cols, bh / rows
     u0, v0 = cx - bw / 2.0, cy - bh / 2.0
-    th = math.radians(-ang)
+    # 坐标系约定（合成图实测钉死的，别改符号）：
+    #   _rot 用 PIL rotate(ang) 把「原图」转成「格网坐标」；PIL 的 +角度把 (du,dv) 送到
+    #   (du·cos+dv·sin, -du·sin+dv·cos)，所以「原图→格网」= u=du·ct+dv·st、v=-du·st+dv·ct，
+    #   「格网→原图」= x=cx+du·ct-dv·st、y=cy+du·st+dv·ct。两者都用 (ct,st)=(cos ang, sin ang)。
+    #   这里以前写的是 radians(-ang)，等于把回算用成了正向矩阵 → 分析是对的、画出来的线却往
+    #   反方向歪（用户看到的就是「自动定角给 -1.35，实际 +1.35 才像」）。
+    th = math.radians(ang)
     ct, st = math.cos(th), math.sin(th)
     _ox, _oy = float(view.len_in(req.ox or 0.0)), float(view.len_in(req.oy or 0.0))
     _ca, _sa = math.cos(math.radians(ang)), math.sin(math.radians(ang))
