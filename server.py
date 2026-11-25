@@ -64,7 +64,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.47"      # 软件版本（发版时改）
+APP_VERSION = "2.48"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3496,7 +3496,9 @@ def _model_geom(view, bbox, req):
             ok2 = int(bool(T2.get("ok_x"))) + int(bool(T2.get("ok_y")))
             q1 = float(T.get("qual_x") or -1) + float(T.get("qual_y") or -1)
             q2 = float(T2.get("qual_x") or -1) + float(T2.get("qual_y") or -1)
-            if ok2 > ok1 or (ok2 == ok1 and q2 > q1 + 0.02):
+            if ok2 > ok1 or (ok2 == ok1 and (q2 > q1 + 0.02 or ok2 == 0)):
+                # ok2==ok1==0：两边都认不全，但估出来的角度是投影量出来的，比硬用 0° 更接近真实
+                # （实测用户那张 CrossScan 截图：0° 一条缝都认不出，−1.35° 才铺得正）
                 T, trace = T2, tr2
                 ang = auto_ang
                 th = math.radians(ang)          # 只在“按这个角度认得更全”时才改角度
@@ -4037,9 +4039,11 @@ def api_grid(req: GridReq):
         want_r = req.auto_counts or req.auto_rows
         if want_c or want_r or req.cols < 2 or req.rows < 2:
             cnt = _count_estimate(gray, (gx0, gy0, gx1, gy1))
-            # 只有「认缝复核过」的格数才拿来改几何；只量到格距（conf='period'）时只报告、不改，
-            # 否则会拿一个没验证过的格数把用户的框重排，数字直接翻车（实测 8% → 30%）。
-            if cnt and cnt.get("conf") == "trace":
+            # 格数采用策略：认缝复核过（trace）直接用；只量到格距（period）也先用上——
+            # 用户要的是"框完就自动"，而格距是自相关量出来的、残差过闸的，比默认 9×7 靠谱得多。
+            # 面板必须写明这是按格距算的、可以改。实测用户那张 CrossScan 截图：按格距 11×11 +
+            # −1.35° 得 35.9%（厂家软件自己显示 33.4%），而 9×7 是 52.5%。
+            if cnt:
                 req = req.model_copy(update={
                     "cols": cnt["cols"] if (want_c or req.cols < 2) else req.cols,
                     "rows": cnt["rows"] if (want_r or req.rows < 2) else req.rows})

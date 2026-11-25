@@ -331,14 +331,41 @@ def _axis_dev(dev, axis, n_need, pitch0, lo, hi):
         _sp = float(np.median(np.diff([c[0] for c in sorted(raw)])))
         max_w = 0.5 * _sp if _sp > 4 else 0.55 * pitch0
     else:
+        _sp = pitch0
         max_w = 0.55 * pitch0
     cands = [c for c in raw if c[2] <= max_w]
-    keep, last = [], -1e9
-    for c in sorted(cands):
-        if c[0] - last >= 0.45 * pitch0:
-            keep.append(c)
-            last = c[0]
-    centers, pitch = _walk(keep, n_need, lo, hi, pitch0)
+    # 步进间距不能只用「框宽/格数」：框画得松（比格阵大一圈）时 pitch0 会大 10% 以上，
+    # _walk 走到第 10 条就累计偏出界，整轴认不出来（实测 860 px 的框装着 771 px 的格阵：
+    # pitch0=86 vs 实测 77，竖缝 12 条候选全在、结果 0 条）。候选自己的中位间距更准，
+    # 两个都试，取认全且最规整的那组。
+    tries = [pitch0]
+    if abs(_sp - pitch0) > 0.02 * max(pitch0, 1.0):
+        tries.append(_sp)
+    best = None
+    for p0 in tries:
+        p0 = float(p0)
+        if p0 <= 1:
+            continue
+        keep, last = [], -1e9
+        for c in sorted(cands):
+            if c[0] - last >= 0.45 * p0:
+                keep.append(c)
+                last = c[0]
+        ctrs, pit = _walk(keep, n_need, lo, hi, p0)
+        if len(ctrs) > n_need:
+            ctrs = _trim(ctrs, n_need, lo, hi)
+        if len(ctrs) != n_need:
+            continue
+        d = np.diff(ctrs)
+        uni = 1.0 - float(np.std(d) / max(1e-6, np.mean(d)))
+        peak = max(1e-6, float(score.max()))
+        ctr = float(np.median([score[int(round(c))] for c in ctrs])) / peak
+        sc = uni * (0.25 + ctr)
+        if best is None or sc > best[0]:
+            best = (sc, ctrs, pit)
+    if best is None:
+        return [], pitch0, -1.0, 0.0
+    _sc, centers, pitch = best
     # 认出多于 n_need 条时（框把格外的缝也圈进来了），取最规整的那 n_need 条
     if len(centers) > n_need:
         centers = _trim(centers, n_need, lo, hi)

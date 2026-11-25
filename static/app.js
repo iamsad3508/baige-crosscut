@@ -638,18 +638,18 @@ async function runModelGrid(extra) {
       autoNote = T('漆膜/基材已按格内面积对调（刀缝露白面积大时“面积大=漆膜”会判反）',
                    'Coating/substrate swapped by in-cell area (a wide exposed cut can invert the area rule)');
     }
-    if (g.counts_est && (wantC || wantR) && g.counts_est.conf === 'trace') {
+    if (g.counts_est && (wantC || wantR)) {
       // 逐轴写回：只改没被手改过的那一边（用户只改行时，列照样跟着自动认）
       if (wantC) $('#gmCols').value = g.cols;
       if (wantR) $('#gmRows').value = g.rows;
       S.gmCountsSig = rsig0; updateGmLines();
       const which = (wantC && wantR) ? `${g.cols}×${g.rows}` : (wantC ? T('列 ' + g.cols, 'cols ' + g.cols) : T('行 ' + g.rows, 'rows ' + g.rows));
-      autoNote += (autoNote ? '　·　' : '') + T(`格数自动认到 ${which}（格距 ${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px）；不对就改，改了就按你的，重新框选才会再认`,
-                   `Cells auto-counted as ${which} (pitch ${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px); edit if wrong — yours stays until you frame again`);
-    } else if (g.counts_est && g.counts_est.conf !== 'trace') {
-      // 只量到格距、没认全缝：只报告不改（改了这版几何会重排，数字会翻车）
-      autoNote += (autoNote ? '　·　' : '') + T(`按格距看像是 ${g.counts_est.cols}×${g.counts_est.rows}（${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px），但刀缝没认全，先按 ${g.cols}×${g.rows} 铺；把框贴紧或点「自动对线」`,
-                   `Pitch suggests ${g.counts_est.cols}×${g.counts_est.rows} (${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px) but the cuts were not fully traced — using ${g.cols}×${g.rows}; frame tighter or press “Snap lines”`);
+      const weak = (g.counts_est.conf !== 'trace');
+      autoNote += (autoNote ? '　·　' : '') + (weak
+        ? T(`格数按格距算到 ${which}（${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px，刀缝没认全）；不对就改，改了就按你的`,
+            `Cells from the measured pitch: ${which} (${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px; cuts not fully traced) — edit if wrong`)
+        : T(`格数自动认到 ${which}（格距 ${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px）；不对就改，改了就按你的，重新框选才会再认`,
+            `Cells auto-counted as ${which} (pitch ${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px); edit if wrong — yours stays until you frame again`));
     } else if ((wantC || wantR) && !g.counts_est) {
       autoNote += (autoNote ? '　·　' : '') + T(`格数没认出来（周期不规整），先按 ${g.cols}×${g.rows} 铺；不对就把框收紧一点或改数字`,
                    `Could not count cells (irregular pitch) — using ${g.cols}×${g.rows}; tighten the frame or edit the numbers`);
