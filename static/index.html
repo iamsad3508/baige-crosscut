@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>百格分析 — ASTM D3359 / ISO 2409（用 DeepSeek API 开发）</title>
-<link rel="stylesheet" href="style.css?v=258">
+<link rel="stylesheet" href="style.css?v=260">
 </head>
 <body>
 <div class="topbar">
@@ -121,11 +121,16 @@
           <input id="gmRows" type="number" min="2" max="40" value="7">
         </div>
         <div class="muted" id="gmLines" style="font-size:11px"></div>
-        <div class="row tight">
+        <div class="row tight" id="gmKRow" hidden>
           <span class="step">2</span>
           <span class="lab" data-i18n="gm.k">刀宽</span>
           <input id="gmK" type="range" min="2" max="80" step="1" value="17" style="flex:1;max-width:104px">
           <input id="gmKn" type="number" min="2" max="80" step="1" value="17" style="width:56px"><span class="muted">px</span>
+        </div>
+        <div class="row tight" id="gmKInheritRow">
+          <span class="step">2</span>
+          <span class="lab" data-i18n="gm.k">刀宽</span>
+          <span id="gmKInherit" class="muted" style="font-size:11.5px"></span>
         </div>
         <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
           <span class="step">3</span>
@@ -296,6 +301,7 @@
                   title="按块数回落：自动扫 k，按块数峰谷定刀缝（默认）。按露底分布：按露底厚度分布给一个阈值，你可以随时手改，比阈值粗的算脱落。">
             <option value="auto_blk" data-i18n="mode.auto">按块数回落</option>
             <option value="width" data-i18n="mode.width">按露底分布</option>
+            <option value="grid" data-i18n="mode.grid">按刀缝格网（百格）</option>
           </select>
         </div>
         <div class="muted" id="exmodeInfo" style="margin-top:1mm"></div>
@@ -365,7 +371,7 @@
     </div>
   </aside>
 </main>
-<script src="i18n.js?v=258"></script>
-<script src="app.js?v=258"></script>
+<script src="i18n.js?v=260"></script>
+<script src="app.js?v=260"></script>
 </body>
 </html>

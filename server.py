@@ -3672,6 +3672,8 @@ def _grid_model(view, labels, roles, union, bbox, req):
                       "kept": round(tot_k * sc * sc, 1),
                       "cell_area": round(cell_area * sc * sc, 1),
                       "equiv": (tot_k / cell_area if has_cls else None)},
+            # 等级按框选区的百分比给（与主分析同一套 cc.astm_class）；判法=格网 时结果卡直接用它
+            "grade": (cc.astm_class(100.0 * (1.0 - tot_k / max(tot_a, 1.0))) if has_cls else None),
             "units": L("像素", "px")}
 
 

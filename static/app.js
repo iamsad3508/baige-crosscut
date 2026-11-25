@@ -440,7 +440,8 @@ function gmBody(extra) {
     loc_tile: 64, loc_factor: 1.6, roi_native: S.roiNative,
     model: true,
     cols: +$('#gmCols').value || 0, rows: +$('#gmRows').value || 0,
-    angle: +$('#gmAng').value || 0, k_band: +$('#gmK').value || 0,
+    // 刀宽与「忽略细线宽度」合成一个数（S.line）：同一个物理量，两个框只会互相打架
+    angle: +$('#gmAng').value || 0, k_band: S.line || 0,
     ox: S.gmOff.ox, oy: S.gmOff.oy,
     line_dx: S.gmOff.dx.slice(), line_dy: S.gmOff.dy.slice(),
     overlay: !!S.showOverlay,
@@ -533,6 +534,52 @@ async function gmAutoSample(silent) {
   }
 }
 
+/* 判法=格网 时的半自动：框完/改参数就自己跑一遍（合并连点，别每次拖动都发请求） */
+let gmTimer = null;
+function scheduleGm(ms) {
+  if (S.exmode !== 'grid' || !S.id || !S.rois.length) return;
+  if (gmTimer) clearTimeout(gmTimer);
+  gmTimer = setTimeout(() => { gmTimer = null; runModelGrid(); }, ms || 700);
+}
+/* 刀宽与「忽略细线宽度」合并成一个数之后，格网块里那行只显示“沿用 = N px” */
+function refreshGmK() {
+  const on = S.exmode === 'grid';
+  const row = $('#gmKRow'), inh = $('#gmKInheritRow');
+  if (row) row.hidden = on;
+  if (inh) inh.hidden = !on;
+  const t = $('#gmKInherit');
+  if (t) {
+    t.textContent = on
+      ? T(`沿用「忽略细线宽度」= ${S.line} px（在「量尺」页改这个数）`,
+          `same as the cut threshold = ${S.line} px (change it on the ruler tab)`)
+      : '';
+  }
+}
+
+/* 判法=格网 时，结果卡直接显示格网口径的数（框选区百分比 + 等级），
+   不再让主卡显示像素判法那个数——两个数并排只会让人不知道信哪个 */
+function setGridCard(g) {
+  const pct = +((g.total || {}).pct || 0);
+  const grd = g.grade || '—';
+  const head = $('#summary');
+  if (head) {
+    head.textContent = `${T('框选区', 'Region')} ${pct.toFixed(2)}%  ${grd}`
+      + `（${g.cols}×${g.rows}，${T('格网口径', 'grid method')}）`;
+    head.className = 'summary' + ((grd === '0B' || grd === '1B') ? ' bad' : '');
+  }
+  const ss = $('#sideSummary');
+  if (ss) ss.textContent = `${pct.toFixed(2)}% ${grd}`;
+  const bd = $('#resBadge');
+  if (bd) { bd.textContent = grd; bd.className = 'rg ' + gcls(grd); bd.title = ''; }
+  const pc = $('#resCardPct');
+  if (pc) pc.textContent = `${pct.toFixed(2)}% ${T('脱落（框选区·格网）', 'removal (region, grid)')}`;
+  const box = $('#resCardRows');
+  if (box) {
+    box.innerHTML = `<div class="rrow"><span>${g.cols}×${g.rows}</span><span>${pct.toFixed(2)}%</span>`
+      + `<span class="rg ${gcls(grd)}">${grd}</span></div>`;
+  }
+}
+
 async function runModelGrid(extra) {
   if (!S.id) { setStatus(T('先打开一张图', 'Open an image first')); return; }
   if (!S.rois.length) { setStatus(T('先在图上拖一个选区，把整片百格框住', 'Draw a region around the grid first')); return; }
@@ -561,6 +608,7 @@ async function runModelGrid(extra) {
     if (S.gmAuto) g.auto_samples = true;
     S.gmPitch = $('#gmPitch') ? (+$('#gmPitch').value || 0) : 0;   // 格距( mm )输入已撤，面积一律 px²
     $('#gmInfo').textContent = gmSummary(g);
+    if (S.exmode === 'grid') { try { setGridCard(g); } catch (_) {} }
     // 用 shift_*（最终位置比等分挪了多少）提示；line_* 现在只回显用户自己的拖拽量
     const snapD = [].concat(g.shift_dx || g.line_dx || [], g.shift_dy || g.line_dy || []).map(Math.abs);
     const snapMax = snapD.length ? Math.max(...snapD) : 0;
@@ -1261,6 +1309,7 @@ cv.addEventListener('pointerup', e => {
     dropOverlay();                              // 旧覆盖层是按上一组选区算的
     refreshRoiList(); syncRoiAngle(); draw();
     if (S.semi) scheduleSemi(); else analyze();     // 连续拖框时合并成一次计算
+    scheduleGm();                                  // 判法=格网：框完就自己认缝、铺格、统计
     return;
   }
   if (d.kind === 'ruler') {
@@ -1269,7 +1318,7 @@ cv.addEventListener('pointerup', e => {
     if (Math.hypot(b.x - a.x, b.y - a.y) >= 4) measureGroove(a, b);
     draw(); return;
   }
-  if (d.moved) { refreshRoiList(); analyze(); }
+  if (d.moved) { refreshRoiList(); analyze(); scheduleGm(); }
   draw();
 });
 
@@ -1598,7 +1647,7 @@ function noteText(s) {
 
 /* ------------------------------------------------------------------ 分析 */
 /* 判法 = auto 时只是“先自动定个 k”，真正算的时候仍按宽度判法 */
-function srvMode() { return (S.exmode === 'auto' || S.exmode === 'auto_blk') ? 'width' : S.exmode; }
+function srvMode() { return (S.exmode === 'auto' || S.exmode === 'auto_blk' || S.exmode === 'grid') ? 'width' : S.exmode; }
 function payload() {
   return {
     id: S.id, res: S.res,
@@ -2757,7 +2806,8 @@ $('#chkRoiNative').onchange = e => setRoiNative(e.target.checked);
    并在状态栏说明数字可能与存档不同。*/
 const EXMODE_TXT = {
   auto_blk: '按块数回落：自动扫 k=1…16，块数先从低急升到峰值、再回落。①取过峰值后第一档块数 ≤ 峰值 25% 的 k；②若进这一档时露底还在大跌（≥2 个百分点），说明还没走平，继续往下一档；③走平的那一档当刀缝宽度，再按这个宽度算。扫一次约 4 秒；下面的曲线可以点任意一档手动覆盖。',
-  width: '按露底分布：看露底厚度分布给一个刀缝阈值（薄结构占主导时才信它），比阈值粗的算脱落、其余全算刀缝。这个值你可以随时手改；换个判法再回来会重算。'
+  width: '按露底分布：看露底厚度分布给一个刀缝阈值（薄结构占主导时才信它），比阈值粗的算脱落、其余全算刀缝。这个值你可以随时手改；换个判法再回来会重算。',
+  grid: '按刀缝格网（半自动）：先把每条刀缝认出来、线铺在缝正中，再逐格统计；列/行在「框选」页，刀宽就是上面那个「忽略细线宽度」。框完选区会自动跑完分色→认缝→铺格→统计，不用再点按钮；改列/行/刀宽会立刻重跑。'
 };
 const EXMODE_TXT_EN = {
   auto_blk: 'By block count: automatically scans k=1…16. The block count rises steeply to a peak, then falls. '
@@ -2774,7 +2824,7 @@ const RETIRED_MODES = { auto: 1, shape: 1, local: 1 };
 /* 只同步状态与界面，不触发计算（打开记录时要用它，否则会先按错的判法算一遍） */
 function applyExmode(v) {
   const retired = !!RETIRED_MODES[v];
-  S.exmode = (v === 'auto_blk') ? v : 'width';        // 停用的判法一律回落到按宽度
+  S.exmode = (v === 'auto_blk' || v === 'grid') ? v : 'width';   // 停用的判法一律回落到按宽度
   S.kneeWarn = '';                                    // 上一条判法的告警不能留到这一条
   try { updateKneeHint(); } catch (_) {}               // 面板立刻换成这一条判法的说明
   const el = $('#selExmode'); if (el) el.value = S.exmode;
@@ -2788,6 +2838,12 @@ function applyExmode(v) {
   try { localStorage.setItem('baige.exmode', S.exmode); } catch (_) {}
   const info = $('#exmodeInfo');
   if (info) info.textContent = exmodeTxt(S.exmode);
+  // 判法=刀缝格网 → 格网块（列/行/歪角）直接露出来，这就是半自动的操作面
+  if (S.exmode === 'grid') {
+    const cb = $('#chkGmShow');
+    if (cb && !cb.checked) { cb.checked = true; if (cb.onchange) cb.onchange({ target: cb }); }
+  }
+  try { refreshGmK(); } catch (_) {}
   try { updateKneeHint(); } catch (_) {}     // 换判法立刻刷新/隐藏 k 曲线
 }
 function setExmode(v) {
@@ -2798,6 +2854,12 @@ function setExmode(v) {
   if (v === 'auto' || v === 'auto_blk') S.knee = null;    // 重选自动判法 = 重新扫、重新套用
   else if (v === 'width') setStatus(T('按露底分布：沿用当前 ' + S.line + ' px（手改标记已清；切回按块数回落会重新按判法定 k）',
         `By bare distribution: keeping ${S.line} px (the manual flag is cleared; switching back to block count re-derives k)`));
+  else if (v === 'grid') {
+    // 半自动：框选由人做，认缝/分色/铺格/统计由程序做完；列/行/刀宽留给人数值微调
+    setStatus(T('按刀缝格网：在图上框住整片百格就自动跑完（列/行在上面，刀宽=量尺页的「忽略细线宽度」）',
+      'By cut grid: just frame the whole grid — tracing, colouring and statistics run automatically'));
+    scheduleGm(300);
+  }
   S.blocks = null;
   if (S.id && S.samples.length >= 2 && S.rois.length) analyze();
 }
@@ -3151,7 +3213,7 @@ async function saveRecord() {
       gm: S.gm ? {
         cols: S.gm.cols, rows: S.gm.rows,
         // 存界面上的输入值本身（不是回传的换算值）：重开时按同一个数填回去，单位才不会再错一次
-        k_wire: +($('#gmK') ? $('#gmK').value : 0) || 0, angle: S.gm.angle,
+        k_wire: S.line || 0, angle: S.gm.angle,   // 刀宽与「忽略细线宽度」已合并成一个数
         ox: (S.gmOff && S.gmOff.ox) || 0, oy: (S.gmOff && S.gmOff.oy) || 0,
         line_dx: S.gm.line_dx || [], line_dy: S.gm.line_dy || [],
         snap: !!S.gmSnap, total_pct: (S.gm.total || {}).pct,
@@ -3503,6 +3565,7 @@ function setLine(v, keepSuggest) {
       `Using your cut width ${S.line} (auto was ${S.knee.k}; re-select “automatic” to restore it)`));
   }
   $('#rngLine').value = Math.min(25, S.line); $('#numLine').value = S.line;
+  try { refreshGmK(); } catch (_) {}          // 格网块里那行“刀宽 沿用 = N px”要跟着变
   try { localStorage.setItem('baige.line', String(S.line)); } catch (_) {}
   if (!keepSuggest) { S.suggestHold = null; S.widthTouched = true; }   // 用户自己改的：本图内不再用建议值覆盖
   debouncedAnalyze();
