@@ -2983,8 +2983,8 @@ async function refreshRecords() {
         <div class="recmeta">
           <div class="recname" data-name="${it.id}">${esc(it.name)}</div>
           <div class="recsub">${esc(it.created || '')}　${it.w}×${it.h}　k=${it.line_px}　tol=${it.tol}</div>
-          <div class="recsub"><b>${grade}%</b> ${g}${it.manual ? T(`　✎排除${it.manual}块`, ` · ✎${it.manual} excluded`) : ''}${it.worst_roi ? T(`　最差 R${it.worst_roi}`, ` · worst R${it.worst_roi}`) : ''}${T(`　${it.n_roi} 个选区`, ` · ${it.n_roi} region(s)`)}
-            ${it.sep ? `<span class="sepchip" data-sep="${it.id}" title="${T('看分离结果（刀缝 / 崩边 / 格内脱落）', 'Open the separation result')}">◐ ${T('分离图', 'separation')}</span>` : ''}</div>
+          <div class="recsub"><b>${grade}%</b> ${g}${it.manual ? T(`　✎排除${it.manual}块`, ` · ✎${it.manual} excluded`) : ''}${it.worst_roi ? T(`　最差 R${it.worst_roi}`, ` · worst R${it.worst_roi}`) : ''}${T(`　${it.n_roi} 个选区`, ` · ${it.n_roi} region(s)`)}</div>
+          ${it.sep ? `<div class="recsub"><span class="sepchip" data-sep="${it.id}" title="${T('看分离结果（刀缝 / 崩边 / 格内脱落）', 'Open the separation result')}">◐ ${T('看分离图', 'separation map')}</span></div>` : ''}
         </div>
         <button class="ren" data-ren="${it.id}" title="${T('重命名', 'Rename')}">✎</button>
         <button class="del" data-del="${it.id}" title="${T('删除（服务器上一起删）', 'Delete (also from the server)')}">×</button>
