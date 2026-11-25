@@ -25,7 +25,7 @@ import threading
 import time
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -3432,13 +3432,13 @@ class GridReq(AnalyzeReq):
     snap: bool = False           # 逐根线各自吸附到最近的暗缝上（透视/刀走偏时用）
 
 
-def _grid_model(view, labels, roles, union, bbox, req):
-    """模型格网：选区外接框按 cols×rows 等分，逐格统计「格内剩余漆膜面积」。
+def _model_geom(view, bbox, req):
+    """模型格网的线位（视图 px）。等分 → 整体平移 → 逐线微调 → 可选逐根吸附。
 
-    与自动拟合的分工：自动拟合去猜周期/相位（规则阵列好用，旧翻拍图上常直接失败）；
-    这里格数、角度、刀缝宽都从请求来，工具只做两件事——把线画出来、把每格里的
-    漆膜像素数出来。面积口径与主分析一致：只数被分成「漆膜」的像素，刀缝带按
-    k/2 从每边扣掉（扣掉的既不算脱落、也不进分母）。
+    单独成函数是为了让「铺格」和「刀缝分离」用同一套线位：两边各算一次很容易悄悄分叉，
+    而分叉之后图上画的线和统计用的线不是一套，最难看。
+    返回 dict：xb/yb（各 cols+1、rows+1 根线在旋转后坐标系里的位置）、per_x/per_y、k、
+    ang、cx/cy、ct/st（反向变换用）、snap_err。
     """
     x0, y0, x1, y1 = [float(v) for v in bbox]
     cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
@@ -3447,6 +3447,44 @@ def _grid_model(view, labels, roles, union, bbox, req):
     ang = float(req.angle or 0.0)
     kw = float(req.k_band) if req.k_band else float(req.line_px or 1)
     k = max(1.0, float(view.len_in(kw)))          # 视图 px
+    per_x, per_y = bw / cols, bh / rows
+    u0, v0 = cx - bw / 2.0, cy - bh / 2.0
+    th = math.radians(-ang)
+    ct, st = math.cos(th), math.sin(th)
+    _ox, _oy = float(view.len_in(req.ox or 0.0)), float(view.len_in(req.oy or 0.0))
+    _ca, _sa = math.cos(math.radians(ang)), math.sin(math.radians(ang))
+    du, dv = _ox * _ca - _oy * _sa, _ox * _sa + _oy * _ca
+    _dx = [float(view.len_in(v)) for v in (req.line_dx or [])]
+    _dy = [float(view.len_in(v)) for v in (req.line_dy or [])]
+    xi = [u0 + du + i * per_x for i in range(cols + 1)]
+    yj = [v0 + dv + j * per_y for j in range(rows + 1)]
+    xb = [xi[i] + (_dx[i - 1] if 0 < i <= len(_dx) else 0.0) for i in range(cols + 1)]
+    yb = [yj[j] + (_dy[j - 1] if 0 < j <= len(_dy) else 0.0) for j in range(rows + 1)]
+    snap_err = ""
+    if getattr(req, "snap", False):
+        try:
+            g8 = np.asarray(view.work["rgb"]).astype(np.float32)
+            if g8.ndim == 3:
+                g8 = g8.mean(2)
+            sx, sy = gf.snap_lines(g8.clip(0, 255).astype(np.uint8), ang, xb, yb,
+                                   per_x, per_y, (cx, cy))
+            xb = [xb[i] + sx[i] for i in range(cols + 1)]
+            yb = [yb[j] + sy[j] for j in range(rows + 1)]
+        except Exception as _e:
+            snap_err = repr(_e)
+    return {"xb": xb, "yb": yb, "xi": xi, "yj": yj, "per_x": per_x, "per_y": per_y, "k": k, "ang": ang,
+            "cx": cx, "cy": cy, "ct": ct, "st": st, "snap_err": snap_err,
+            "cols": cols, "rows": rows}
+
+
+def _grid_model(view, labels, roles, union, bbox, req):
+    """模型格网：选区外接框按 cols×rows 等分，逐格统计「格内剩余漆膜面积」。
+
+    与自动拟合的分工：自动拟合去猜周期/相位（规则阵列好用，旧翻拍图上常直接失败）；
+    这里格数、角度、刀缝宽都从请求来，工具只做两件事——把线画出来、把每格里的
+    漆膜像素数出来。面积口径与主分析一致：只数被分成「漆膜」的像素，刀缝带按
+    k/2 从每边扣掉（扣掉的既不算脱落、也不进分母）。
+    """
     shape2 = union.shape
 
     coat = np.zeros(shape2, bool)
@@ -3459,41 +3497,22 @@ def _grid_model(view, labels, roles, union, bbox, req):
 
     def _rot(a):
         im = Image.fromarray((a * 255).astype(np.uint8))
-        if abs(ang) > 0.01:
-            im = im.rotate(ang, resample=Image.NEAREST, center=(cx, cy), fillcolor=0)
+        if abs(ang0) > 0.01:
+            im = im.rotate(ang0, resample=Image.NEAREST, center=(cx0, cy0), fillcolor=0)
         return np.asarray(im) > 127
 
+    G = _model_geom(view, bbox, req)
+    x0, y0, x1, y1 = [float(v) for v in bbox]
+    ang0 = G["ang"]; cx0 = G["cx"]; cy0 = G["cy"]
     coat_r, sub_r = _rot(coat), _rot(sub)
-
-    per_x, per_y = bw / cols, bh / rows
-    u0, v0 = cx - bw / 2.0, cy - bh / 2.0
-    th = math.radians(-ang)
-    ct, st = math.cos(th), math.sin(th)
-
-    # 整体平移：图像空间 (ox,oy) → 格网坐标 (du,dv) = R(ang)·(ox,oy)
-    _ox, _oy = float(view.len_in(req.ox or 0.0)), float(view.len_in(req.oy or 0.0))
-    _ca, _sa = math.cos(math.radians(ang)), math.sin(math.radians(ang))
-    du, dv = _ox * _ca - _oy * _sa, _ox * _sa + _oy * _ca
-
-    # 逐线微调（刀走偏 / 不垂直时用）：每根内线沿自身法线各自平移
-    _dx = [float(view.len_in(v)) for v in (req.line_dx or [])]
-    _dy = [float(view.len_in(v)) for v in (req.line_dy or [])]
-    xi = [u0 + du + i * per_x for i in range(cols + 1)]      # 理想等分位置
-    yj = [v0 + dv + j * per_y for j in range(rows + 1)]
-    xb = [xi[i] + (_dx[i - 1] if 0 < i <= len(_dx) else 0.0) for i in range(cols + 1)]
-    yb = [yj[j] + (_dy[j - 1] if 0 < j <= len(_dy) else 0.0) for j in range(rows + 1)]
-    _snap_err = ""
-    if req.snap:                                             # 逐根吸附到最近的暗缝
-        try:
-            g8 = np.asarray(view.work["rgb"]).astype(np.float32)
-            if g8.ndim == 3:
-                g8 = g8.mean(2)
-            sx, sy = gf.snap_lines(g8.clip(0, 255).astype(np.uint8), ang, xb, yb,
-                                   per_x, per_y, (cx, cy))
-            xb = [xb[i] + sx[i] for i in range(cols + 1)]
-            yb = [yb[j] + sy[j] for j in range(rows + 1)]
-        except Exception as _e:                              # 别静默：对不上线时要能看到原因
-            _snap_err = repr(_e)
+    cols, rows = G["cols"], G["rows"]
+    k, ang = G["k"], G["ang"]
+    cx, cy, ct, st = G["cx"], G["cy"], G["ct"], G["st"]
+    ang0, cx0, cy0 = ang, cx, cy
+    xb, yb = G["xb"], G["yb"]
+    xi, yj = G["xi"], G["yj"]
+    per_x, per_y = G["per_x"], G["per_y"]
+    _snap_err = G["snap_err"]
     u0, v0 = xb[0], yb[0]
     bw = xb[-1] - xb[0]
     bh = yb[-1] - yb[0]
@@ -3580,6 +3599,166 @@ class AutoSampleReq(BaseModel):
     id: str
     res: str = "full"
     rois: list[ROI] = []
+
+
+# ---------------------------------------------------------------------------
+# 刀缝分离（v2.35）：把「刀划出来的沟」从「真脱落」里扣出来
+# ---------------------------------------------------------------------------
+# 为什么不做第三套「找格子」：这张样实测——没有任何一列/一行的暗像素占比超过 25%
+# （score 峰值 0.25），刀缝是断续的、被光照切碎的；自动投影一定会混进假线（7 根里 2 根是假）。
+# 所以这里不猜几何，直接用**模型格网铺好的那套线位**（人给的列数/行数/角度/刀宽，
+# 可逐线拖、可自动对线），只负责把它们之间的距离场分成三层：
+#     d <= k/2            刀缝本体      —— 与附着力无关，扣掉
+#     k/2 < d <= k/2+edge 刀口崩边      —— 缝外被带下来的漆，单列
+#     d > k/2+edge        格子内部      —— 这里才是「整格掉了」的脱落
+# 三个数分开报，是为了让用户看到「等级是被哪一层撑着」，而不是一个揉在一起的百分比。
+
+class SepReq(GridReq):
+    edge_w: float = 60.0     # 崩边带宽（wire px）
+    k_mult: float = 1.5      # 崩边阈值 = k_mult × 格内暗场 p98
+    overlay: bool = True
+
+
+def _dark_field(gray):
+    """暗场：大核模糊 − 原图。细沟在这里变亮，均匀漆膜接近 0。"""
+    def bz(a, r):
+        return np.asarray(Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
+                          .filter(ImageFilter.BoxBlur(int(r))), np.float32)
+    g = np.asarray(gray, np.float32)
+    return np.clip(bz(bz(g, 18), 18) - g, 0, None)
+
+
+def _sep_overlay(seam, flare, blk, view, bbox, key, fw, fh) -> str:
+    """三层上色：蓝=刀缝、橙=崩边、红=格内成块露底。坐标口径与画布一致。"""
+    path = os.path.join(OVERLAYS, key + ".png")
+    disp_side = min(1200, max(fh, fw))
+    sc = min(1.0, disp_side / float(max(fh, fw)))
+    ow, oh = max(1, int(round(fw * sc))), max(1, int(round(fh * sc)))
+    if view is None:
+        a, bx, by = sc, 0.0, 0.0
+    else:
+        a = view.s6 * sc / view.scale
+        bx = view.ox * view.s6 * sc
+        by = view.oy * view.s6 * sc
+    y0, x0 = int(bbox[1]), int(bbox[0])
+    out = np.zeros((oh, ow, 4), np.uint8)
+    for m, rgba in ((seam, (70, 165, 255, 165)), (flare, (255, 190, 60, 205)), (blk, (255, 45, 45, 215))):
+        if not m.any():
+            continue
+        sub = m[y0:y0 + int(bbox[3] - bbox[1]), x0:x0 + int(bbox[2] - bbox[0])]
+        hh, ww = sub.shape
+        tw, th = max(1, int(round(ww * a))), max(1, int(round(hh * a)))
+        sm = np.asarray(Image.fromarray((sub * 255).astype(np.uint8))
+                        .resize((tw, th), Image.NEAREST)) > 127
+        oy, ox = int(round(y0 * a + by)), int(round(x0 * a + bx))
+        h2 = min(th, oh - oy)
+        w2 = min(tw, ow - ox)
+        if h2 <= 0 or w2 <= 0:
+            continue
+        tgt = out[oy:oy + h2, ox:ox + w2]
+        tgt[sm[:h2, :w2]] = rgba
+    Image.fromarray(out, "RGBA").save(path, "PNG", optimize=True)
+    return "api/overlay/%s.png" % key
+
+
+@app.post("/api/separate")
+def api_separate(req: SepReq):
+    """按模型格网的线位把「刀缝 / 刀口崩边 / 格内脱落」分成三层各给一个数。"""
+    if req.cols < 2 or req.rows < 2:
+        raise HTTPException(400, L("先在格网里填列数/行数，再算分离（分离用的是你铺的那套线）",
+                                   "Set columns/rows first — separation uses the grid you laid out"))
+    sess = get_session(req.id)
+    with HEAVY_BLOCK:
+        with sess.lock:
+            work, view = _view_for(sess, req)
+            samples = [s.model_dump() for s in req.samples]
+            roles = _roles(samples)
+            rois_ = [r.model_dump() for r in req.rois]
+            rois_v = view.rois_in(rois_) if rois_ else []
+            shape2 = work["lab"].shape[:2]
+            masks = _masks(shape2, rois_v) if rois_v else [np.ones(shape2, bool)]
+            labels, *_ = _labels_for(sess, work, req.tol, req.purity, samples, masks,
+                                     _msig(rois_v), view.key)
+
+    union = np.zeros(shape2, bool)
+    for m in masks:
+        union |= m
+    ys_i, xs_i = np.where(union)
+    if xs_i.size == 0:
+        raise HTTPException(400, L("先画一个选区", "Draw a region first"))
+    gx0, gx1 = int(xs_i.min()), int(xs_i.max()) + 1
+    gy0, gy1 = int(ys_i.min()), int(ys_i.max()) + 1
+
+    rgb = work["rgb"]
+    gray = np.asarray(rgb).astype(np.float32)
+    if gray.ndim == 3:
+        gray = gray @ np.array([0.299, 0.587, 0.114], np.float32)
+    D = _dark_field(gray)
+
+    G = _model_geom(view, (gx0, gy0, gx1, gy1), req)
+    xb, yb = G["xb"], G["yb"]
+    k, cx, cy, ct, st = G["k"], G["cx"], G["cy"], G["ct"], G["st"]
+
+    # 距离场：旋转坐标是等距变换，所以 |U - 线位| 就是到那条线的垂直距离
+    H2, W2 = shape2
+    YY, XX = np.mgrid[0:H2, 0:W2].astype(np.float32)
+    dxp, dyp = XX - cx, YY - cy
+    U = cx + dxp * ct + dyp * st
+    V = cy - dxp * st + dyp * ct
+    dU = np.full((H2, W2), 1e6, np.float32)
+    for x in xb:
+        dU = np.minimum(dU, np.abs(U - float(x)))
+    dV = np.full((H2, W2), 1e6, np.float32)
+    for y in yb:
+        dV = np.minimum(dV, np.abs(V - float(y)))
+    dist = np.minimum(dU, dV)
+
+    ew = float(view.len_in(req.edge_w))
+    seam = dist <= k / 2.0
+    edge = (dist > k / 2.0) & (dist <= k / 2.0 + ew)
+    inner = (dist > k / 2.0 + ew) & union
+    if inner.sum() < 0.05 * max(1, int(union.sum())):
+        raise HTTPException(400, L("刀宽/崩边带宽设得太大，选区里没剩多少格子了",
+                                   "Blade width / edge band too wide — nothing left inside the cells"))
+    base = float(np.percentile(D[inner], 98.0))
+    thr = req.k_mult * base
+    flare = edge & (D > thr) & union
+
+    cand = (D > thr) & inner
+    er = np.asarray(Image.fromarray((cand * 255).astype(np.uint8))
+                    .filter(ImageFilter.MinFilter(7)), np.float32) > 127
+    blk = np.asarray(Image.fromarray((er * 255).astype(np.uint8))
+                     .filter(ImageFilter.MaxFilter(7)), np.float32) > 127
+    blk &= inner
+
+    n_inner = float(inner.sum())
+    pct_flare = 100.0 * float(flare.sum()) / n_inner
+    pct_blk = 100.0 * float(blk.sum()) / n_inner
+    sweep = []
+    for f in (1.35, 1.5, 1.7, 1.9, 2.2):
+        n = int((edge & (D > f * base) & union).sum())
+        p = 100.0 * n / n_inner
+        sweep.append({"k": f, "pct": round(p, 2), "astm": cc.astm_class(p)})
+
+    out = {"ok": True, "cols": G["cols"], "rows": G["rows"],
+           "k_wire": round(float(view.len_out(k)), 1), "edge_w": req.edge_w,
+           "base_dark": round(base, 1), "k_mult": req.k_mult,
+           "seam_pct": round(100.0 * float((seam & union).sum()) / max(1.0, float(union.sum())), 1),
+           "flare_pct": round(pct_flare, 2), "blk_pct": round(pct_blk, 2),
+           "astm": cc.astm_class(pct_flare + pct_blk), "iso": cc.iso_class(pct_flare + pct_blk),
+           "sweep": sweep, "snap_err": G["snap_err"],
+           "cell_area": int(n_inner)}
+    if req.overlay:
+        key = "sep_%s_%s_%d_%d" % (
+            sess.id[:8],
+            hashlib.sha1(("%s|%s|%s|%s" % (round(k, 2), [round(v, 1) for v in xb],
+                                           [round(v, 1) for v in yb], req.edge_w)).encode()).hexdigest()[:10],
+            int(req.edge_w), int(req.k_mult * 100))
+        fw = int(round(sess.size[0] * view.s6))
+        fh = int(round(sess.size[1] * view.s6))
+        out["overlay_url"] = _sep_overlay(seam, flare, blk, view,
+                                          (gx0, gy0, gx1, gy1), key, fw, fh)
+    return out
 
 
 @app.post("/api/autosample")

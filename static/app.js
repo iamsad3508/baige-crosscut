@@ -445,6 +445,45 @@ function gmBody(extra) {
   }, extra || {});
 }
 
+/* 刀缝分离：用上面那套线位把「刀缝 / 刀口崩边 / 格内脱落」分成三层各给一个数。
+   几何（列数/行数/歪角/刀宽/拖线/对线）全部来自模型格网，这里只多做一件事——
+   把缝外 EDGE 宽度内比漆膜更暗的那圈单独计数，不和格内脱落揉在一起。 */
+async function runSep() {
+  if (!S.id) { setStatus(T('先打开一张图', 'Open an image first')); return; }
+  if (!S.rois.length) { setStatus(T('先在图上框住整片百格', 'Draw a region around the grid first')); return; }
+  if (!(+$('#gmCols').value >= 2) || !(+$('#gmRows').value >= 2)) {
+    setStatus(T('先在格网里填列数/行数', 'Set columns/rows first')); return;
+  }
+  if (S.busy) return;
+  S.busy = true;
+  setStatus(T('正在分离刀缝…', 'Separating the cuts…'));
+  const out = $('#sepOut');
+  try {
+    if (!S.samples.length) { S.gmAuto = false; await gmAutoSample(true); }
+    const b = gmBody({
+      edge_w: Math.max(0, +$('#sepEdge').value || 0),
+      k_mult: Math.max(1.05, +$('#sepK').value || 1.5),
+      overlay: true,
+    });
+    const r = await post('api/separate', b);
+    if (!r.ok) throw new Error(r.reason || T('分离失败', 'separation failed'));
+    if (r.overlay_url) { S.showOverlay = true; if ($('#chkOverlay')) $('#chkOverlay').checked = true; loadOverlay(r.overlay_url); }
+    const pct = r.flare_pct + r.blk_pct;
+    out.innerHTML = T(
+      `刀缝带 <b>${fmt(r.seam_pct, 1)}%</b> 的选区（扣掉）　｜　刀口崩边 <b>${fmt(r.flare_pct, 2)}%</b>　｜　格内成块露底 <b>${fmt(r.blk_pct, 2)}%</b><br>`
+      + `→ 按「崩边+格内」算 <b>${fmt(pct, 2)}%</b> · ${r.astm}　｜　k=${r.k_mult} 时阈值随 k 变：`
+      + r.sweep.map(x => `${x.k}→${x.pct}%`).join(' / '),
+      `cut band <b>${fmt(r.seam_pct, 1)}%</b> of region (excluded) | edge flaking <b>${fmt(r.flare_pct, 2)}%</b> | flakes inside cells <b>${fmt(r.blk_pct, 2)}%</b><br>`
+      + `→ counting flaking only: <b>${fmt(pct, 2)}%</b> · ${r.astm} | sweep: `
+      + r.sweep.map(x => `${x.k}→${x.pct}%`).join(' / '));
+    setStatus(T('分离完成：蓝=刀缝、橙=崩边、红=格内成块露底',
+                'Done — blue = cut, orange = edge flaking, red = flakes inside cells'));
+  } catch (e) {
+    out.textContent = T('分离失败：', 'Failed: ') + (e.message || e);
+    setStatus(String(e.message || e));
+  } finally { S.busy = false; }
+}
+
 function gmSummary(g) {
   const n = g.cells.length;
   const intact = g.cells.filter(c => c.pct <= 10).length;
@@ -3251,6 +3290,7 @@ if ($('#chkGmShow')) {
   };
 }
 if ($('#btnGmSnap')) $('#btnGmSnap').onclick = () => runModelGrid({ snap: true });
+if ($('#btnSep')) $('#btnSep').onclick = () => runSep();
 if ($('#btnGmColor')) $('#btnGmColor').onclick = async () => {
   const ok = await gmAutoSample(false);
   if (ok) await runModelGrid();
