@@ -3430,6 +3430,7 @@ class GridReq(AnalyzeReq):
     line_dx: list[float] = []    # 每根竖线的单独微调（wire px，沿格网 u 方向）
     line_dy: list[float] = []
     snap: bool = False           # 逐根线各自吸附到最近的暗缝上（透视/刀走偏时用）
+    trace: bool = True           # 先认缝再按缝铺线（等分只在认不全时兜底）
 
 
 def _model_geom(view, bbox, req):
@@ -3467,7 +3468,30 @@ def _model_geom(view, bbox, req):
     xb = [xi[i] + (_dx[i - 1] if 0 < i <= len(_dx) else 0.0) for i in range(cols + 1)]
     yb = [yj[j] + (_dy[j - 1] if 0 < j <= len(_dy) else 0.0) for j in range(rows + 1)]
     snap_err = ""
-    if getattr(req, "snap", False):
+    trace = None
+    # 先认缝：刀缝是长条、漆膜是孤岛 → 用「连续性」区分，认全了就直接按缝铺线
+    # （线落在沟的正中间；等分只在认不全时兜底，那才需要下面的逐根吸附去救）
+    if getattr(req, "trace", True):
+        try:
+            g8 = np.asarray(view.work["rgb"]).astype(np.float32)
+            if g8.ndim == 3:
+                g8 = g8.mean(2)
+            T = gf.trace_grid(g8.clip(0, 255).astype(np.uint8), ang, (cx, cy),
+                              (x0, y0, x1, y1), cols, rows)
+            trace = {k: T.get(k) for k in ("ok_x", "ok_y", "n_x", "n_y", "pitch_x", "pitch_y",
+                                           "cont_x", "cont_y", "msg")}
+            if T.get("ok_x"):
+                xb = list(T["xb"])
+                per_x = (xb[-1] - xb[0]) / max(1, cols)
+                trace["used_x"] = True
+            if T.get("ok_y"):
+                yb = list(T["yb"])
+                per_y = (yb[-1] - yb[0]) / max(1, rows)
+                trace["used_y"] = True
+        except Exception as _e:
+            trace = {"ok_x": False, "ok_y": False, "msg": repr(_e)}
+    traced = bool(trace and (trace.get("used_x") or trace.get("used_y")))
+    if getattr(req, "snap", False) and not traced:
         try:
             g8 = np.asarray(view.work["rgb"]).astype(np.float32)
             if g8.ndim == 3:
@@ -3480,7 +3504,7 @@ def _model_geom(view, bbox, req):
             snap_err = repr(_e)
     return {"xb": xb, "yb": yb, "xi": xi, "yj": yj, "per_x": per_x, "per_y": per_y, "k": k, "ang": ang,
             "cx": cx, "cy": cy, "ct": ct, "st": st, "snap_err": snap_err,
-            "cols": cols, "rows": rows}
+            "cols": cols, "rows": rows, "trace": trace}
 
 
 def _grid_model(view, labels, roles, union, bbox, req):
@@ -3591,6 +3615,7 @@ def _grid_model(view, labels, roles, union, bbox, req):
             "cells": [dict(c, area=round(c["area"] * sc * sc, 1),
                            kept=round(c["kept"] * sc * sc, 1)) for c in cells],
             "line_dx": used_dx, "line_dy": used_dy, "snap_err": _snap_err,
+            "trace": G.get("trace"),
             "need_samples": (not has_cls),
             "total": {"pct": (100.0 * (1.0 - tot_k / max(tot_a, 1.0)) if has_cls else None),
                       "area": round(tot_a * sc * sc, 1),

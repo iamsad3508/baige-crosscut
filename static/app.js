@@ -561,14 +561,24 @@ async function runModelGrid(extra) {
     $('#gmInfo').textContent = gmSummary(g);
     const snapD = [].concat(g.line_dx || [], g.line_dy || []).map(Math.abs);
     const snapMax = snapD.length ? Math.max(...snapD) : 0;
+    const tr = g.trace || null;
+    const trOk = tr && (tr.used_x || tr.used_y);
+    const trNote = tr
+      ? (trOk
+        ? T(`刀缝追踪：竖 ${tr.n_x || 0} 条 / 横 ${tr.n_y || 0} 条（间距 ${Math.round(tr.pitch_x || 0)}×${Math.round(tr.pitch_y || 0)} px）`,
+            `Seams traced: ${tr.n_x || 0} vertical / ${tr.n_y || 0} horizontal (pitch ${Math.round(tr.pitch_x || 0)}×${Math.round(tr.pitch_y || 0)} px)`)
+        : T(`没认全刀缝（竖 ${tr.n_x || 0}/${S.gm.cols + 1}、横 ${tr.n_y || 0}/${S.gm.rows + 1}）→ 这一版先按等分铺`,
+            `Could not trace all cuts (${tr.n_x || 0}/${S.gm.cols + 1} and ${tr.n_y || 0}/${S.gm.rows + 1}) — fell back to even division`))
+      : '';
+    if (trNote) $('#gmTrace').textContent = trNote;
     setStatus((extra && extra.snap)
       ? (snapMax >= 1
         ? T('对线完成：线最多挪了 ' + snapMax.toFixed(1) + ' px；挪太多说明格数/框位不对',
             'Snapped — largest line shift ' + snapMax.toFixed(1) + ' px')
         : T('对线完成：线本来就贴住了，没挪（数字不变是对的）',
             'Snapped — nothing moved, the lines were already on the cuts'))
-      : T('格网已铺好：橙带=你设的刀宽（扣掉不算），逐格是剩余漆膜；线不齐可直接拖那一根',
-          'Grid laid out — orange = the blade width you excluded'));
+      : (trOk ? trNote : T('格网已铺好：橙带=你设的刀宽（扣掉不算），逐格是剩余漆膜；线不齐可直接拖那一根',
+          'Grid laid out — orange = the blade width you excluded')));
     draw();
   } catch (e) {
     setStatus(String(e.message || e));
