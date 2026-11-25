@@ -3491,13 +3491,18 @@ def _model_geom(view, bbox, req):
         except Exception as _e:
             trace = {"ok_x": False, "ok_y": False, "msg": repr(_e)}
     traced = bool(trace and (trace.get("used_x") or trace.get("used_y")))
-    if getattr(req, "snap", False) and not traced:
+    # 两个方向都认全了才完全跳过吸附；只认全一个方向时，另一个方向仍允许吸附兜底
+    if getattr(req, "snap", False) and not (trace and trace.get("used_x") and trace.get("used_y")):
         try:
             g8 = np.asarray(view.work["rgb"]).astype(np.float32)
             if g8.ndim == 3:
                 g8 = g8.mean(2)
             sx, sy = gf.snap_lines(g8.clip(0, 255).astype(np.uint8), ang, xb, yb,
                                    per_x, per_y, (cx, cy))
+            if trace and trace.get("used_x"):
+                sx = [0.0] * len(sx)          # 这个方向已经按真缝铺好了，别再动
+            if trace and trace.get("used_y"):
+                sy = [0.0] * len(sy)
             xb = [xb[i] + sx[i] for i in range(cols + 1)]
             yb = [yb[j] + sy[j] for j in range(rows + 1)]
         except Exception as _e:
