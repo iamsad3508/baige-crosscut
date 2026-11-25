@@ -3476,7 +3476,8 @@ def _model_geom(view, bbox, req):
                 _T = gf.trace_grid(_g.clip(0, 255).astype(np.uint8), a, (cx, cy),
                                    (x0, y0, x1, y1), cols, rows)
                 _tr = {kk: _T.get(kk) for kk in ("ok_x", "ok_y", "n_x", "n_y", "pitch_x", "pitch_y",
-                                                 "cont_x", "cont_y", "msg")}
+                                                 "sign_x", "sign_y", "qual_x", "qual_y",
+                                                 "w_x", "w_y", "msg")}
                 _tr["angle"] = a
                 return _T, _tr
             except Exception as _e:
@@ -3515,13 +3516,14 @@ def _model_geom(view, bbox, req):
     snap_err = ""
     # 认全了的方向直接用真缝位置（线落在沟中间），并据此校正平均间距
     if T:
+        # 真缝位置 + 用户自己拖的那点偏移（拖拽是叠加在真缝上，不能被覆盖掉）
         if T.get("ok_x"):
-            xb = [float(v) for v in T["xb"]]
-            per_x = (xb[-1] - xb[0]) / max(1, cols)
+            xb = [float(T["xb"][i]) + (_dx[i - 1] if 0 < i <= len(_dx) else 0.0) for i in range(cols + 1)]
+            per_x = (T["xb"][-1] - T["xb"][0]) / max(1, cols)
             trace["used_x"] = True
         if T.get("ok_y"):
-            yb = [float(v) for v in T["yb"]]
-            per_y = (yb[-1] - yb[0]) / max(1, rows)
+            yb = [float(T["yb"][j]) + (_dy[j - 1] if 0 < j <= len(_dy) else 0.0) for j in range(rows + 1)]
+            per_y = (T["yb"][-1] - T["yb"][0]) / max(1, rows)
             trace["used_y"] = True
     traced = bool(trace and (trace.get("used_x") or trace.get("used_y")))
     # 两个方向都认全了才完全跳过吸附；只认全一个方向时，另一个方向仍允许吸附兜底
@@ -3542,7 +3544,7 @@ def _model_geom(view, bbox, req):
             snap_err = repr(_e)
     return {"xb": xb, "yb": yb, "xi": xi, "yj": yj, "per_x": per_x, "per_y": per_y, "k": k, "ang": ang,
             "cx": cx, "cy": cy, "ct": ct, "st": st, "snap_err": snap_err,
-            "cols": cols, "rows": rows, "trace": trace}
+            "cols": cols, "rows": rows, "trace": trace, "drag_x": _dx, "drag_y": _dy}
 
 
 def _grid_model(view, labels, roles, union, bbox, req):
@@ -3639,8 +3641,17 @@ def _grid_model(view, labels, roles, union, bbox, req):
                       "quad": quad(u0, v - k / 2.0, u0 + bw, v + k / 2.0)})
 
     # 回传每根内线相对「理想等分」的总偏移（wire px）：前端直接存，下次拖线在它上面累加
-    used_dx = [round(float(view.len_out(xb[i] - xi[i])), 2) for i in range(1, cols)]
-    used_dy = [round(float(view.len_out(yb[j] - yj[j])), 2) for j in range(1, rows)]
+    # 给前端的两套数：shift_* 是“最终位置比等分挪了多少”（只用来提示），
+    # used_* 回的是**用户拖拽量本身**。以前 used_* = 最终−等分，前端存下来下次又当拖拽
+    # 叠加一遍，于是每跑一次就漂一点——换颜色/改刀宽重跑几次就彻底歪掉。
+    _dx = G.get("drag_x") or []          # 用户拖拽量（在 _model_geom 里算的）
+    _dy = G.get("drag_y") or []
+    shift_dx = [round(float(view.len_out(xb[i] - xi[i])), 2) for i in range(1, cols)]
+    shift_dy = [round(float(view.len_out(yb[j] - yj[j])), 2) for j in range(1, rows)]
+    used_dx = [round(float(view.len_out(_dx[i - 1])), 2) if 0 < i <= len(_dx) else 0.0
+               for i in range(1, cols)]
+    used_dy = [round(float(view.len_out(_dy[j - 1])), 2) if 0 < j <= len(_dy) else 0.0
+               for j in range(1, rows)]
 
     cell_area = (tot_a / len(cells)) if cells else max(1.0, (per_x - k) * (per_y - k))
     sc = view.len_out(1.0)                       # wire px / 视图 px；面积要平方
@@ -3653,6 +3664,7 @@ def _grid_model(view, labels, roles, union, bbox, req):
             "cells": [dict(c, area=round(c["area"] * sc * sc, 1),
                            kept=round(c["kept"] * sc * sc, 1)) for c in cells],
             "line_dx": used_dx, "line_dy": used_dy, "snap_err": _snap_err,
+            "shift_dx": shift_dx, "shift_dy": shift_dy,
             "trace": G.get("trace"),
             "need_samples": (not has_cls),
             "total": {"pct": (100.0 * (1.0 - tot_k / max(tot_a, 1.0)) if has_cls else None),

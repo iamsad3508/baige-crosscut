@@ -561,7 +561,8 @@ async function runModelGrid(extra) {
     if (S.gmAuto) g.auto_samples = true;
     S.gmPitch = $('#gmPitch') ? (+$('#gmPitch').value || 0) : 0;   // 格距( mm )输入已撤，面积一律 px²
     $('#gmInfo').textContent = gmSummary(g);
-    const snapD = [].concat(g.line_dx || [], g.line_dy || []).map(Math.abs);
+    // 用 shift_*（最终位置比等分挪了多少）提示；line_* 现在只回显用户自己的拖拽量
+    const snapD = [].concat(g.shift_dx || g.line_dx || [], g.shift_dy || g.line_dy || []).map(Math.abs);
     const snapMax = snapD.length ? Math.max(...snapD) : 0;
     const tr = g.trace || null;
     const trOk = tr && (tr.used_x || tr.used_y);
@@ -575,7 +576,14 @@ async function runModelGrid(extra) {
             + ((tr.n_y >= S.gm.rows - 1 && tr.n_y !== S.gm.rows + 1) ? `、横着 ${tr.n_y} 条 → ${tr.n_y - 1} 行` : ''),
             `Could not trace all cuts (${tr.n_x || 0}/${S.gm.cols + 1} and ${tr.n_y || 0}/${S.gm.rows + 1}) — fell back to even division`))
       : '';
-    if (trNote) $('#gmTrace').textContent = trNote;
+    // 刀宽比实测缝宽小太多时提醒：缝里露白的部分会被算进“格内脱落”（这张二值化图实测缝宽 24px，
+    // 填 3px 会把大半个缝算成脱落，读数虚高）
+    let wNote = '';
+    if (tr && tr.w_x && S.gm && +$('#gmK').value && +$('#gmK').value < 0.6 * tr.w_x) {
+      wNote = T(`｜刀缝实测宽 ${Math.round(tr.w_x)} px，你现在填 ${+$('#gmK').value} px，缝里露白的部分会被算成脱落`,
+                ` | detected cut width ${Math.round(tr.w_x)} px vs your ${+$('#gmK').value} px`);
+    }
+    if (trNote || wNote) $('#gmTrace').textContent = trNote + wNote;
     setStatus((extra && extra.snap)
       ? (snapMax >= 1
         ? T('对线完成：线最多挪了 ' + snapMax.toFixed(1) + ' px；挪太多说明格数/框位不对',

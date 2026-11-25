@@ -317,26 +317,45 @@ def _axis_dev(dev, axis, n_need, pitch0, lo, hi):
     """
     q = float(np.percentile(dev, 95))
     if q <= 0:
-        return [], 0.0, -1.0
+        return [], 0.0, -1.0, 0.0
     hit = dev > 0.35 * q
     cont = hit.mean(axis=axis)
     dark = np.percentile(dev, 75, axis=axis)
     score = _smooth1d(cont * dark, 1.0)
-    cands = [c for c in _centroids(cont, dark, score, 1, score.size - 1, pitch0)
-             if cont[int(round(c[0]))] >= 0.45]
+    raw = [c for c in _centroids(cont, dark, score, 1, score.size - 1, 1e9)
+           if cont[int(round(c[0]))] >= 0.45]
+    # 宽度门限用**候选自己量出来的间距**：刀道宽约为间距的 1/3，整块漆膜约 2/3。
+    # 用框宽/格数算出来的间距（pitch0）在框画松时会失准，实测会让 48px 宽的漆膜块（间距 77）
+    # 刚好卡在 0.55*pitch0 之内混进来，于是又错半格。
+    if len(raw) >= 3:
+        _sp = float(np.median(np.diff([c[0] for c in sorted(raw)])))
+        max_w = 0.5 * _sp if _sp > 4 else 0.55 * pitch0
+    else:
+        max_w = 0.55 * pitch0
+    cands = [c for c in raw if c[2] <= max_w]
     keep, last = [], -1e9
     for c in sorted(cands):
         if c[0] - last >= 0.45 * pitch0:
             keep.append(c)
             last = c[0]
     centers, pitch = _walk(keep, n_need, lo, hi, pitch0)
+    # 认出多于 n_need 条时（框把格外的缝也圈进来了），取最规整的那 n_need 条
+    if len(centers) > n_need:
+        centers = _trim(centers, n_need, lo, hi)
     if len(centers) != n_need:
-        return centers, pitch, -1.0
+        return centers, pitch, -1.0, 0.0
     d = np.diff(centers)
     uni = 1.0 - float(np.std(d) / max(1e-6, np.mean(d)))
     peak = max(1e-6, float(score.max()))
     ctr = float(np.median([score[int(round(c))] for c in centers])) / peak
-    return centers, pitch, uni * (0.25 + ctr)
+    # 顺手把刀缝实测宽度带回去：用户常把“刀宽”填成刀片刃宽(0.1mm≈3px)，
+    # 而图上露白的那条带其实十几二十像素，差太多就会把大半个缝算成“脱落”
+    wd = []
+    for c in centers:
+        near = [k[2] for k in cands if abs(k[0] - c) < 2.0]
+        if near:
+            wd.append(min(near))
+    return centers, pitch, uni * (0.25 + ctr), (float(np.median(wd)) if wd else 0.0)
 
 
 def _centroids(cont, dark, score, lo, hi, pitch):
@@ -373,6 +392,22 @@ def _centroids(cont, dark, score, lo, hi, pitch):
         else:
             i += 1
     return out
+
+
+def _trim(centers, n_need, lo, hi):
+    """候选多于期望条数时，挑最规整的连续 n_need 条（间距方差最小，尽量落在框内）。"""
+    best, best_cost = None, None
+    for i in range(0, len(centers) - n_need + 1):
+        w = centers[i:i + n_need]
+        d = np.diff(w)
+        if d.size == 0:
+            continue
+        cost = float(np.std(d) / max(1e-6, np.mean(d)))
+        outside = sum(1 for c in w if c < lo - 2 or c > hi + 2) * 0.2
+        cost += outside
+        if best_cost is None or cost < best_cost:
+            best, best_cost = w, cost
+    return list(best) if best else centers
 
 
 def _walk(cands, n_need, lo, hi, pitch):
@@ -470,16 +505,17 @@ def trace_grid(gray, angle, center, box, cols, rows):
         best = None
         for sign in (1.0, -1.0):
             dev = np.clip(sign * sub, 0, None)
-            centers, pitch, qual = _axis_dev(dev, axis, n_need, pitch0, lo, hi)
+            centers, pitch, qual, wdt = _axis_dev(dev, axis, n_need, pitch0, lo, hi)
             if best is None or qual > best[2]:
-                best = (centers, pitch, qual, sign)
-        centers, pitch, qual, sign = best
+                best = (centers, pitch, qual, sign, wdt)
+        centers, pitch, qual, sign, wdt = best
         ok = len(centers) == n_need
         out["ok_" + tag] = ok
         out[("xb" if tag == "x" else "yb")] = [c / norm + off for c in centers] if ok else []
         out["n_" + tag] = len(centers)
         out["pitch_" + tag] = round(pitch / norm, 1)
         out["sign_" + tag] = "dark" if sign > 0 else "bright"
+        out["w_" + tag] = round(float(wdt) / norm, 1)
         out["qual_" + tag] = round(qual, 2)
     return out
 
