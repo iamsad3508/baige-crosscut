@@ -554,6 +554,7 @@ async function runModelGrid(extra) {
     // 服务端回传的是「相对理想等分的总偏移」，吸附过之后必须同步回来，否则下次拖线会叠错
     if (g.line_dx) S.gmOff.dx = g.line_dx.slice();
     if (g.line_dy) S.gmOff.dy = g.line_dy.slice();
+    S.gmSnap = !!(extra && extra.snap);          // 记录里存“这次是不是对过线”，重开时照原样复原
     if (g.overlay_url) loadOverlay(g.overlay_url);
     if (S.gmAuto) g.auto_samples = true;
     S.gmPitch = $('#gmPitch') ? (+$('#gmPitch').value || 0) : 0;   // 格距( mm )输入已撤，面积一律 px²
@@ -3047,6 +3048,7 @@ async function refreshRecords() {
           <div class="recname" data-name="${it.id}">${esc(it.name)}</div>
           <div class="recsub">${esc(it.created || '')}　${it.w}×${it.h}　k=${it.line_px}　tol=${it.tol}</div>
           <div class="recsub"><b>${grade}%</b> ${g}${it.manual ? T(`　✎排除${it.manual}块`, ` · ✎${it.manual} excluded`) : ''}${it.worst_roi ? T(`　最差 R${it.worst_roi}`, ` · worst R${it.worst_roi}`) : ''}${T(`　${it.n_roi} 个选区`, ` · ${it.n_roi} region(s)`)}</div>
+          ${it.gm ? `<div class="recsub" data-i18n-skip>${T('格网', 'grid')} ${it.gm.cols}×${it.gm.rows}${it.gm.n ? ` · ${it.gm.n} 格` : ''}${it.gm.pct != null ? ` · ${fmt(it.gm.pct, 1)}%` : ''}${it.gm.angle ? ` · ${it.gm.angle}°` : ''}</div>` : ''}
 
         </div>
         <button class="ren" data-ren="${it.id}" title="${T('重命名', 'Rename')}">✎</button>
@@ -3123,6 +3125,16 @@ async function saveRecord() {
       iso: (R && R.exN > 0) ? R.iso : '',
       excl: (R && R.exN > 0) ? excl : null,
       knee_warn: S.kneeWarn || '', knee_k: (S.knee && S.knee.k) || null,
+      gm: S.gm ? {
+        cols: S.gm.cols, rows: S.gm.rows,
+        // 存界面上的输入值本身（不是回传的换算值）：重开时按同一个数填回去，单位才不会再错一次
+        k_wire: +($('#gmK') ? $('#gmK').value : 0) || 0, angle: S.gm.angle,
+        ox: (S.gmOff && S.gmOff.ox) || 0, oy: (S.gmOff && S.gmOff.oy) || 0,
+        line_dx: S.gm.line_dx || [], line_dy: S.gm.line_dy || [],
+        snap: !!S.gmSnap, total_pct: (S.gm.total || {}).pct,
+        total_kept: (S.gm.total || {}).kept, total_area: (S.gm.total || {}).area,
+        cells: (S.gm.cells || []).map(c => ({ i: c.i, j: c.j, pct: c.pct, kept: c.kept })),
+      } : null,
     });
     if (!r.ok) throw new Error(r.reason || T('保存失败', 'save failed'));
     const savedId = r.id || (r.record && r.record.id);
@@ -3185,6 +3197,18 @@ async function openRecord(rid) {
     S.rulerHist = []; S.rulerFull = []; S.rulerLast = null; S.rulerSeg = null; S.rulerDone = null;
     S.annot.strokes = []; S.annot.cur = null; S.annot.res = null;
     syncParams(); syncSampleUI(); refreshRoiList();
+    // 记录里存过模型格网 → 把参数与线位先摆回去（真正铺格在 analyze 之后）
+    S.gmRec = (rec.gm && rec.gm.cols >= 2 && rec.gm.rows >= 2) ? rec.gm : null;
+    if (S.gmRec) {
+      if ($('#gmCols')) $('#gmCols').value = S.gmRec.cols;
+      if ($('#gmRows')) $('#gmRows').value = S.gmRec.rows;
+      syncGmK(Math.max(2, Math.min(80, Math.round(S.gmRec.k_wire || 17))), false);
+      if ($('#gmAng')) $('#gmAng').value = S.gmRec.angle || 0;
+      S.gmOff = { ox: S.gmRec.ox || 0, oy: S.gmRec.oy || 0,
+                  dx: (S.gmRec.line_dx || []).slice(), dy: (S.gmRec.line_dy || []).slice() };
+      S.gmSnap = !!S.gmRec.snap;
+      updateGmLines();
+    }
     $('#fileName').textContent = S.name;
     $('#drop').classList.add('hide');
     fitView();
@@ -3213,6 +3237,20 @@ async function openRecord(rid) {
           setStatus(T(`已按记录复原：手动排除 ${nEx} 块（自动 ${fmt(rec.result.auto_pct, 2)}% → ${fmt(rec.result.pct, 2)}%）`,
             `Restored from the record: ${nEx} blocks excluded by hand (auto ${fmt(rec.result.auto_pct, 2)}% → ${fmt(rec.result.pct, 2)}%)`));
         }
+      }
+      if (S.gmRec) {
+        // 记录里带格网 → 用同一组参数把它铺回去（格数/刀宽/歪角/线位都一致），
+        // 否则“打开记录”只回到主分析，格网那层就丢了（用户报的“格子没记下来”）
+        const cs = document.querySelector('#chkGmShow');
+        if (cs && !cs.checked) { cs.checked = true; cs.dispatchEvent(new Event('change')); }
+        await runModelGrid({ snap: false });
+        const gp0 = (S.gmRec.total || {}).pct, gp1 = (S.gm && S.gm.total || {}).pct;
+        const gmOff = (gp0 != null && gp1 != null && Math.abs(gp0 - gp1) > 0.05);
+        setStatus(gmOff
+          ? T(`⚠ 格网复原后框选区 ${fmt(gp1, 2)}% 与存档 ${fmt(gp0, 2)}% 不一致（程序版本变过）`,
+              `⚠ Grid restored but measures ${fmt(gp1, 2)}% vs archived ${fmt(gp0, 2)}% (version changed)`)
+          : T(`记录里带模型格网 ${S.gmRec.cols}×${S.gmRec.rows} · 框选区 ${fmt(gp1, 2)}% → 已复原`,
+              `Record had a model grid ${S.gmRec.cols}×${S.gmRec.rows} (${fmt(gp1, 2)}%) — restored`));
       }
     }
     else setResult(T(`已打开记录：${S.name}\n${rec.created || ''}\n参数已恢复（吸色 ${S.samples.length} 个、阈值 ${S.line}、容差 ${S.tol}），点「计算」出结果。`,

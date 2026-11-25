@@ -4019,6 +4019,8 @@ class SaveReq(BaseModel):
     excl: list[list[int]] | None = None
     knee_warn: str = ""          # 判法没定出 k 时的警告文本（存起来，重开记录还看得见）
     knee_k: int | None = None
+    # 模型格网（实验块）的快照：不存的话「记录里没有那些格子」，重开也回不到当时的格网
+    gm: dict | None = None
 
 
 def _rec_dir(rid: str) -> str:
@@ -4054,6 +4056,11 @@ def _rec_brief(rid: str) -> dict | None:
         "worst_roi": (res.get("worst") or {}).get("roi"),
         "manual": len([i for a in (res.get("excl") or []) for i in (a or [])]),
         "auto_pct": res.get("auto_pct"),
+        "gm": ({"cols": (d.get("gm") or {}).get("cols"), "rows": (d.get("gm") or {}).get("rows"),
+                "pct": ((d.get("gm") or {}).get("total") or {}).get("pct"),
+                "angle": (d.get("gm") or {}).get("angle"),
+                "n": len((d.get("gm") or {}).get("cells") or [])}
+               if d.get("gm") else None),
         "tol": d.get("tol"), "line_px": d.get("line_px"),
         "bytes": sum(os.path.getsize(os.path.join(_rec_dir(rid), f))
                      for f in os.listdir(_rec_dir(rid))
@@ -4148,6 +4155,27 @@ def records_save(req: SaveReq):
                      for r in (out.get("rows") or [])],
         },
     }
+    if req.gm:
+        g = req.gm
+        def _r(v, n=2):
+            try:
+                return round(float(v), n)
+            except Exception:
+                return None
+        rec["gm"] = {
+            "cols": int(g.get("cols") or 0), "rows": int(g.get("rows") or 0),
+            "k_wire": _r(g.get("k_wire"), 1), "angle": _r(g.get("angle"), 2),
+            "ox": _r(g.get("ox"), 2), "oy": _r(g.get("oy"), 2),
+            "line_dx": [_r(v, 1) for v in (g.get("line_dx") or [])],
+            "line_dy": [_r(v, 1) for v in (g.get("line_dy") or [])],
+            "snap": bool(g.get("snap")),
+            "total": {"pct": _r(g.get("total_pct"), 2),
+                      "kept": _r(g.get("total_kept"), 0),
+                      "area": _r(g.get("total_area"), 0)},
+            "cells": [{"i": int(c.get("i") or 0), "j": int(c.get("j") or 0),
+                       "pct": _r(c.get("pct"), 2), "kept": _r(c.get("kept"), 0)}
+                      for c in (g.get("cells") or [])][:1600],
+        }
     # 手动排除过块：存“已生效”的数字 + 自动值 + 排除了哪几块（重开时按编号复原）
     if req.pct is not None:
         rec["result"]["auto_pct"] = total.get("pct")
