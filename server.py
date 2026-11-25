@@ -64,7 +64,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.46"      # 软件版本（发版时改）
+APP_VERSION = "2.47"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3426,6 +3426,8 @@ class GridReq(AnalyzeReq):
     k_band: float = 0.0          # 刀缝带宽（wire px）；0 = 用 line_px
     auto_angle: bool = False     # 让服务端先估一个角度回来（只给建议，不改请求）
     auto_counts: bool = False    # 让服务端自己数格数（认得出才用，认不出沿用 cols/rows）
+    auto_cols: bool = False      # 只认列（行由人定）；auto_counts 同时打开两个方向
+    auto_rows: bool = False
     roles_auto: bool = False     # 颜色是自动分的（人没点过）→ 允许按格内面积纠正漆膜/基材角色
     ox: float = 0.0              # 整格网平移（wire px，图像坐标）
     oy: float = 0.0
@@ -3982,11 +3984,13 @@ def _count_estimate(gray, box):
         if not (2 <= cols <= 40 and 2 <= rows <= 40):
             return None
         t = gf.trace_grid(gray, ang, ((x0 + x1) / 2.0, (y0 + y1) / 2.0), (x0, y0, x1, y1), cols, rows)
-        if not (t.get("ok_x") and t.get("ok_y")):
-            return None
+        conf = "trace" if (t.get("ok_x") and t.get("ok_y")) else "period"
+        # 认缝复核不过时不硬拒：格距（自相关）本身是稳的，逐根认缝在原生分辨率/边缘上会失手
+        # （实测同一张图 roi_native=True 时一个框 11/11、旁边挪 10px 的框 1/11）。降级成 period，
+        # 界面照实说“刀缝没认全，格数是按格距算的”，用户看一眼就能改。
         return {"cols": cols, "rows": rows,
                 "pitch_x": round(px, 1), "pitch_y": round(py, 1),
-                "angle": round(ang, 2),
+                "angle": round(ang, 2), "conf": conf,
                 "w_x": t.get("w_x"), "w_y": t.get("w_y")}
     except Exception:
         return None
@@ -4027,12 +4031,18 @@ def api_grid(req: GridReq):
         gray = gray.mean(2)
     sub = np.ascontiguousarray(gray[gy0:gy1, gx0:gx1]).clip(0, 255).astype(np.uint8)
 
-    if req.model and (req.auto_counts or (req.cols >= 2 and req.rows >= 2)):
+    if req.model and (req.auto_counts or req.auto_cols or req.auto_rows or (req.cols >= 2 and req.rows >= 2)):
         cnt = None
-        if req.auto_counts or req.cols < 2 or req.rows < 2:
+        want_c = req.auto_counts or req.auto_cols
+        want_r = req.auto_counts or req.auto_rows
+        if want_c or want_r or req.cols < 2 or req.rows < 2:
             cnt = _count_estimate(gray, (gx0, gy0, gx1, gy1))
-            if cnt:
-                req = req.model_copy(update={"cols": cnt["cols"], "rows": cnt["rows"]})
+            # 只有「认缝复核过」的格数才拿来改几何；只量到格距（conf='period'）时只报告、不改，
+            # 否则会拿一个没验证过的格数把用户的框重排，数字直接翻车（实测 8% → 30%）。
+            if cnt and cnt.get("conf") == "trace":
+                req = req.model_copy(update={
+                    "cols": cnt["cols"] if (want_c or req.cols < 2) else req.cols,
+                    "rows": cnt["rows"] if (want_r or req.rows < 2) else req.rows})
         if req.cols < 2 or req.rows < 2:
             return {"ok": False, "warn": "grid.nocount",
                     "reason": L("认不出格数：把框贴着整片百格画紧一点，或手填列/行数",

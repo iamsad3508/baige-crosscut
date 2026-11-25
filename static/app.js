@@ -442,8 +442,9 @@ function gmBody(extra) {
     tol: S.tol, purity: S.purity, line_px: S.line, mode: S.exmode,
     loc_tile: 64, loc_factor: 1.6, roi_native: S.roiNative,
     model: true,
-    // 没手改过列/行、且框换了位置 → 让服务端自己数一遍；手改过的永远以人为准
-    auto_counts: !(S.gmColsManual || S.gmRowsManual) && S.gmCountsSig !== gmRoiSig(),
+    // 没手改过的那一边 → 让服务端自己数；两边都手改过就完全不认（永远以人为准）
+    auto_cols: !S.gmColsManual && S.gmCountsSig !== gmRoiSig(),
+    auto_rows: !S.gmRowsManual && S.gmCountsSig !== gmRoiSig(),
     auto_angle: !S.gmAngManual,          // 框完就自己估歪角（只回建议，人改过就不再动）
     roles_auto: !S.samplesManual,        // 颜色是自动分的 → 允许服务端按格内面积纠正角色
     cols: +$('#gmCols').value || 0, rows: +$('#gmRows').value || 0,
@@ -611,7 +612,8 @@ async function runModelGrid(extra) {
   setBusy(true);                            // 必须走 setBusy：直接改 S.busy 不会刷新「计算」按钮
   setStatus(T('正在铺格…', 'Laying out the grid…'));
   const rsig0 = gmRoiSig();
-  const wantCounts = !(S.gmColsManual || S.gmRowsManual) && S.gmCountsSig !== rsig0;
+  const wantC = !S.gmColsManual && S.gmCountsSig !== rsig0;
+  const wantR = !S.gmRowsManual && S.gmCountsSig !== rsig0;
   try {
     // 框完就自动分色：没有色样，或上次那对是自动分的而框已经挪了 → 重新分一对。
     // 人自己点过的颜色（samplesManual）永远不动——包括换框。
@@ -636,12 +638,19 @@ async function runModelGrid(extra) {
       autoNote = T('漆膜/基材已按格内面积对调（刀缝露白面积大时“面积大=漆膜”会判反）',
                    'Coating/substrate swapped by in-cell area (a wide exposed cut can invert the area rule)');
     }
-    if (g.counts_est && !S.gmColsManual && !S.gmRowsManual) {
-      $('#gmCols').value = g.cols; $('#gmRows').value = g.rows;
+    if (g.counts_est && (wantC || wantR) && g.counts_est.conf === 'trace') {
+      // 逐轴写回：只改没被手改过的那一边（用户只改行时，列照样跟着自动认）
+      if (wantC) $('#gmCols').value = g.cols;
+      if (wantR) $('#gmRows').value = g.rows;
       S.gmCountsSig = rsig0; updateGmLines();
-      autoNote += (autoNote ? '　·　' : '') + T(`格数自动认到 ${g.cols}×${g.rows}（格距 ${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px）；不对就改，改了就按你的`,
-                   `Cells auto-counted as ${g.cols}×${g.rows} (pitch ${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px); edit if wrong`);
-    } else if (wantCounts && !g.counts_est && !S.gmColsManual && !S.gmRowsManual) {
+      const which = (wantC && wantR) ? `${g.cols}×${g.rows}` : (wantC ? T('列 ' + g.cols, 'cols ' + g.cols) : T('行 ' + g.rows, 'rows ' + g.rows));
+      autoNote += (autoNote ? '　·　' : '') + T(`格数自动认到 ${which}（格距 ${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px）；不对就改，改了就按你的，重新框选才会再认`,
+                   `Cells auto-counted as ${which} (pitch ${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px); edit if wrong — yours stays until you frame again`);
+    } else if (g.counts_est && g.counts_est.conf !== 'trace') {
+      // 只量到格距、没认全缝：只报告不改（改了这版几何会重排，数字会翻车）
+      autoNote += (autoNote ? '　·　' : '') + T(`按格距看像是 ${g.counts_est.cols}×${g.counts_est.rows}（${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px），但刀缝没认全，先按 ${g.cols}×${g.rows} 铺；把框贴紧或点「自动对线」`,
+                   `Pitch suggests ${g.counts_est.cols}×${g.counts_est.rows} (${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px) but the cuts were not fully traced — using ${g.cols}×${g.rows}; frame tighter or press “Snap lines”`);
+    } else if ((wantC || wantR) && !g.counts_est) {
       autoNote += (autoNote ? '　·　' : '') + T(`格数没认出来（周期不规整），先按 ${g.cols}×${g.rows} 铺；不对就把框收紧一点或改数字`,
                    `Could not count cells (irregular pitch) — using ${g.cols}×${g.rows}; tighten the frame or edit the numbers`);
     }
@@ -694,6 +703,9 @@ async function runModelGrid(extra) {
       : (trOk ? trNote : T('格网已铺好：橙带=你设的刀宽（扣掉不算），逐格是剩余漆膜；线不齐可直接拖那一根',
           'Grid laid out — orange = the blade width you excluded')));
     draw();
+    // 格网判法下 k 就是刀宽：铺完格顺手把 k 曲线扫出来。analyze() 在「还没吸色」时是**提前 return**
+    // 的（不进 finally），所以第一次框完表一定是空的 —— 用户报「k 曲线不显示」就是这条路径。
+    if (S.exmode === 'grid' && S.samples.length >= 2) { try { ensureKnee().catch(() => {}); } catch (_) {} }
   } catch (e) {
     setStatus(String(e.message || e));
   } finally {
@@ -1359,6 +1371,10 @@ cv.addEventListener('pointerup', e => {
     }
     S.rois.push({ box: [x0, y0, x1, y1], ang: 0 });
     S.sel = S.rois.length - 1;
+    // 重新框选 = 换了一片样品：行列/歪角的手改标记作废，让程序按新框再认一次
+    // （拖已有框的边只算微调，不清标记——否则刚手填的列数会被自己挪一下就覆盖掉）
+    S.gmColsManual = false; S.gmRowsManual = false; S.gmAngManual = false;
+    S.gmCountsSig = ''; S.gmAutoSig = '';
     dropOverlay();                              // 旧覆盖层是按上一组选区算的
     refreshRoiList(); syncRoiAngle(); draw();
     if (S.semi) scheduleSemi(); else analyze();     // 连续拖框时合并成一次计算
@@ -3060,6 +3076,9 @@ function applyBlocks() {
     if (mi >= 0) out[mi] = marginHint(R.per.length === 1 ? R.per[0].pct : R.pct);
   }
   S.lines = out;
+  // 选区列表（框选页左上「R1 29.89% 3B」）也要跟着手动排除变，否则同一屏上两处数字不一样。
+  // 点块排除走的是 applyBlocks → 以前没人刷这个列表。
+  try { refreshRoiList(); } catch (_) {}
 }
 
 function blocksText() {
