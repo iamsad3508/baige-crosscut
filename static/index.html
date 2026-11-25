@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>百格分析 — ASTM D3359 / ISO 2409（用 DeepSeek API 开发）</title>
-<link rel="stylesheet" href="style.css?v=250">
+<link rel="stylesheet" href="style.css?v=251">
 </head>
 <body>
 <div class="topbar">
@@ -96,61 +96,73 @@
       </div>
       <div id="gmWrap" hidden>
       <div class="sect">
-        <h4 data-i18n="grid.h">格网（实验）</h4>
-        <div class="muted" data-i18n="grid.tip">在选区范围里自动找格子：适合激光划格、刀割百格这种规则阵列。
-          找到后每格单独算脱落率，可直接看出哪一格掉得最凶（不影响上面的选区结果）。</div>
-        <div class="row" style="margin-top:8px">
+        <h4 data-i18n="grid.h">格网实验 · 按 1 → 2 → 3 点</h4>
+        <div class="muted" data-i18n="grid.tip">规则阵列（激光划格、刀割百格）先试这条。第 1 步是框选，没有按钮——在图上拖一个框，把整片百格圈进去。</div>
+        <div class="muted" id="gmStep0" style="margin-top:6px" data-i18n="gm.s0">① 在图上拖框圈住整片百格</div>
+        <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
+          <span class="step">2</span>
           <button id="btnGrid" data-i18n="grid.run">自动找格子</button>
+          <span class="step">3</span>
+          <label class="chk"><input type="checkbox" id="chkGridCells"> <span data-i18n="grid.cells">每格上色</span></label>
           <button id="btnGridOff" data-i18n="grid.clear">去掉格网</button>
-          <label class="chk"><input type="checkbox" id="chkGridCells"> <span data-i18n="grid.cells">每格上色（诊断）</span></label>
         </div>
         <div class="muted" id="gridInfo" style="margin-top:6px"></div>
       </div>
 
       <div class="sect">
-        <h4 data-i18n="gm.h">模型格网（旧图用）</h4>
-        <div class="muted" data-i18n="gm.tip">自动找不到线时走这条：列数、行数、歪角、刀宽都由你定。
-          扣掉这条带，**框选区里其余非漆膜像素都算被拉掉的**，结果只给一个数（整框脱落%）。
-          判断依据就是图上那层染色：<b style="color:#ff5b5b">红＝露底</b>、<b style="color:#54d97a">绿＝漆膜</b>（顶部「覆盖层」开关）。
-          线不齐：拖那一根线 / 拖框内空白处整体平移 / 点「自动对线」让每根各自吸附到暗缝。</div>
+        <h4 data-i18n="gm.h">模型格网 · 按 1 → 7 点（任何图都能用）</h4>
+        <div class="muted" data-i18n="gm.tip">自动找不着线就走这条。1 填格数 → 2 调刀宽 → 3 歪角（歪了才动）→ 4 自动分色 → 5 铺格出数 → 6 线不齐才对线 → 7 要分刀缝/崩边再算分离。
+          扣掉刀宽那条带，框里其余非漆膜像素都算被拉掉的，结果只给一个数。</div>
         <div class="row tight">
+          <span class="step">1</span>
           <span class="lab" data-i18n="gm.cols">列数</span><input id="gmCols" type="number" min="2" max="40" value="9">
           <span class="lab" data-i18n="gm.rows">行数</span><input id="gmRows" type="number" min="2" max="40" value="7">
-        </div>
-        <div class="row tight">
-          <span class="lab" data-i18n="gm.angle">歪角</span>
-          <input id="gmAng" type="number" step="0.1" min="-20" max="20" value="0"><span class="muted">°</span>
-          <button id="btnGmAngle" data-i18n="gm.autoang">自动定角</button>
-        </div>
-        <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
-          <button id="btnGmSnap" data-i18n="gm.snap" title="每根线各自吸附到最近的那道暗缝：透视照/刀走偏时用">自动对线</button>
-          <button id="btnGmColor" data-i18n="gm.color" title="按亮度自动给一对色样（亮=漆膜、暗=露底）；分错了图上点一下就能改">自动分色</button>
-        </div>
-        <div class="row tight">
-          <span class="lab" data-i18n="gm.k">刀宽</span>
-          <input id="gmK" type="range" min="2" max="80" step="1" value="17" style="flex:1;max-width:150px">
-          <span class="val" id="gmKv">17</span><span class="muted">px</span>
         </div>
         <div class="row tight">
           <span class="lab" data-i18n="gm.pitch">格距</span>
           <input id="gmPitch" type="number" step="0.1" min="0" value="0"><span class="muted">mm</span>
           <label class="chk"><input type="checkbox" id="chkGmArea"> <span data-i18n="gm.area">每格</span></label>
         </div>
-        <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
-          <button id="btnGmRun" data-i18n="gm.run">铺格并统计</button>
-          <button id="btnGmReset" data-i18n="gm.reset" title="把拖过的线位与整体偏移归零">线位归零</button>
-          <button id="btnGmOff" data-i18n="grid.clear">去掉格网</button>
+        <div class="row tight">
+          <span class="step">2</span>
+          <span class="lab" data-i18n="gm.k">刀宽</span>
+          <input id="gmK" type="range" min="2" max="80" step="1" value="17" style="flex:1;max-width:140px">
+          <span class="val" id="gmKv">17</span><span class="muted">px</span>
         </div>
-        <div class="muted" id="gmInfo" style="margin-top:6px"></div>
-        <div class="row tight" style="margin-top:8px;border-top:1px solid var(--line);padding-top:8px">
+        <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
+          <span class="step">3</span>
+          <span class="lab" data-i18n="gm.angle">歪角</span>
+          <input id="gmAng" type="number" step="0.1" min="-20" max="20" value="0" style="width:62px"><span class="muted">°</span>
+          <button id="btnGmAngle" data-i18n="gm.autoang">自动定角</button>
+        </div>
+        <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
+          <span class="step">4</span>
+          <button id="btnGmColor" data-i18n="gm.color" title="按亮度自动给一对色样（亮=漆膜、暗=露底）；分错了图上点一下就能改">自动分色</button>
+        </div>
+        <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
+          <span class="step">5</span>
+          <button id="btnGmRun" class="primary" data-i18n="gm.run">铺格并统计</button>
+        </div>
+        <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
+          <span class="step stepopt">6</span>
+          <button id="btnGmSnap" data-i18n="gm.snap" title="每根线各自吸附到最近的那道暗缝：透视照/刀走偏时用">自动对线</button>
+          <span class="muted" data-i18n="gm.opt6">线压不齐才点</span>
+        </div>
+        <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
+          <span class="step stepopt">7</span>
           <label class="chk" title="按上面这套线位把距离分成三层：缝内扣掉、缝外一圈算刀口崩边、再外面才是格内脱落"><input type="checkbox" id="chkSep"> <span data-i18n="sep.on">刀缝分离</span></label>
           <span class="lab" data-i18n="sep.edge">崩边带</span>
-          <input id="sepEdge" type="number" min="0" max="300" step="5" value="60" style="width:64px"><span class="muted">px</span>
+          <input id="sepEdge" type="number" min="0" max="300" step="5" value="60" style="width:58px"><span class="muted">px</span>
           <span class="lab" data-i18n="sep.k">阈值k</span>
-          <input id="sepK" type="number" min="1.1" max="3" step="0.05" value="1.5" style="width:58px">
+          <input id="sepK" type="number" min="1.1" max="3" step="0.05" value="1.5" style="width:52px">
           <button id="btnSep" data-i18n="sep.run">算分离</button>
         </div>
         <div class="muted" id="sepOut" style="margin-top:4px"></div>
+        <div class="muted" id="gmInfo" style="margin-top:6px"></div>
+        <div class="row tight" style="flex-wrap:wrap;row-gap:6px;border-top:1px solid var(--line);padding-top:6px;margin-top:6px">
+          <button id="btnGmReset" data-i18n="gm.reset" title="把拖过的线位与整体偏移归零">线位归零</button>
+          <button id="btnGmOff" data-i18n="grid.clear">去掉格网</button>
+        </div>
       </div>
       </div><!-- /#gmWrap -->
 
@@ -344,7 +356,7 @@
     </div>
   </aside>
 </main>
-<script src="i18n.js?v=250"></script>
-<script src="app.js?v=250"></script>
+<script src="i18n.js?v=251"></script>
+<script src="app.js?v=251"></script>
 </body>
 </html>
