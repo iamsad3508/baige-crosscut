@@ -432,7 +432,9 @@ function gmHitAt(ex, ey) {
 
 function gmBody(extra) {
   return Object.assign({
-    id: S.id, res: S.res, rois: S.rois.map(r => ({ box: r.box, ang: r.ang })),
+    // 格网一律用 full（= 画布这张 wire 图）算：预览分辨率下裁出来的内容与画布上的框对不上，
+    // 认缝会跑空（实测同一张图 full 认 11 条、prev 只认 1 条）
+    id: S.id, res: 'full', rois: S.rois.map(r => ({ box: r.box, ang: r.ang })),
     samples: S.samples.map(x => ({ rgb: x.rgb, role: x.role })),
     tol: S.tol, purity: S.purity, line_px: S.line, mode: S.exmode,
     loc_tile: 64, loc_factor: 1.6, roi_native: S.roiNative,
@@ -3144,6 +3146,8 @@ async function saveRecord() {
         snap: !!S.gmSnap, total_pct: (S.gm.total || {}).pct,
         total_kept: (S.gm.total || {}).kept, total_area: (S.gm.total || {}).area,
         cells: (S.gm.cells || []).map(c => ({ i: c.i, j: c.j, pct: c.pct, kept: c.kept })),
+        trace: S.gm.trace || null,        // 存下“这次认缝认到几条”，出问题时能回看
+        pitch_x: S.gm.pitch_x, pitch_y: S.gm.pitch_y,
       } : null,
     });
     if (!r.ok) throw new Error(r.reason || T('保存失败', 'save failed'));

@@ -3446,6 +3446,51 @@ def _model_geom(view, bbox, req):
     bw, bh = max(4.0, x1 - x0), max(4.0, y1 - y0)
     cols, rows = max(2, int(req.cols)), max(2, int(req.rows))
     ang = float(req.angle or 0.0)
+    auto_ang = 0.0
+    # 歪角没填（或填了 0）而图是歪的：认缝按 0 度走会把一条斜缝摊到很多列上，连续性直接崩掉，
+    # 于是“认不全 → 回退等分 → 看着对不准”。先自己估一个角度去认，认全了才采用。
+    if getattr(req, "trace", True) and abs(ang) < 0.35:
+        try:
+            _g8 = np.asarray(view.work["rgb"]).astype(np.float32)
+            if _g8.ndim == 3:
+                _g8 = _g8.mean(2)
+            _bx0, _by0 = int(max(0, x0)), int(max(0, y0))
+            _bx1, _by1 = int(min(_g8.shape[1], x1)), int(min(_g8.shape[0], y1))
+            _crop = _g8[_by0:_by1, _bx0:_bx1].clip(0, 255).astype(np.uint8)
+            if _crop.size:
+                _est = float(gf.estimate_angle(_crop))
+                if abs(_est) >= 0.5:
+                    auto_ang = _est
+        except Exception:
+            auto_ang = 0.0
+    # 先认缝：刀缝是长条、漆膜是孤岛 → 用「连续性」区分，认全了就直接按缝铺线
+    # （线落在沟的正中间；等分只在认不全时兜底，那才需要下面的逐根吸附去救）
+    trace = None
+    T = None
+    if getattr(req, "trace", True):
+        def _try_trace(a):
+            try:
+                _g = np.asarray(view.work["rgb"]).astype(np.float32)
+                if _g.ndim == 3:
+                    _g = _g.mean(2)
+                _T = gf.trace_grid(_g.clip(0, 255).astype(np.uint8), a, (cx, cy),
+                                   (x0, y0, x1, y1), cols, rows)
+                _tr = {kk: _T.get(kk) for kk in ("ok_x", "ok_y", "n_x", "n_y", "pitch_x", "pitch_y",
+                                                 "cont_x", "cont_y", "msg")}
+                _tr["angle"] = a
+                return _T, _tr
+            except Exception as _e:
+                return None, {"ok_x": False, "ok_y": False, "msg": repr(_e), "angle": a}
+
+        T, trace = _try_trace(ang)
+        if auto_ang and not (T.get("ok_x") and T.get("ok_y")):
+            T2, tr2 = _try_trace(auto_ang)
+            if (T2.get("ok_x") + T2.get("ok_y")) > ((T or {}).get("ok_x", 0) + (T or {}).get("ok_y", 0)):
+                T, trace = T2, tr2
+                ang = auto_ang
+                th = math.radians(ang)          # 只在“按这个角度认得更全”时才改角度
+                ct, st = math.cos(th), math.sin(th)
+
     kw = float(req.k_band) if req.k_band else float(req.line_px or 1)
     k = max(1.0, float(view.len_in(kw)))          # 视图 px
     per_x, per_y = bw / cols, bh / rows
@@ -3468,28 +3513,16 @@ def _model_geom(view, bbox, req):
     xb = [xi[i] + (_dx[i - 1] if 0 < i <= len(_dx) else 0.0) for i in range(cols + 1)]
     yb = [yj[j] + (_dy[j - 1] if 0 < j <= len(_dy) else 0.0) for j in range(rows + 1)]
     snap_err = ""
-    trace = None
-    # 先认缝：刀缝是长条、漆膜是孤岛 → 用「连续性」区分，认全了就直接按缝铺线
-    # （线落在沟的正中间；等分只在认不全时兜底，那才需要下面的逐根吸附去救）
-    if getattr(req, "trace", True):
-        try:
-            g8 = np.asarray(view.work["rgb"]).astype(np.float32)
-            if g8.ndim == 3:
-                g8 = g8.mean(2)
-            T = gf.trace_grid(g8.clip(0, 255).astype(np.uint8), ang, (cx, cy),
-                              (x0, y0, x1, y1), cols, rows)
-            trace = {k: T.get(k) for k in ("ok_x", "ok_y", "n_x", "n_y", "pitch_x", "pitch_y",
-                                           "cont_x", "cont_y", "msg")}
-            if T.get("ok_x"):
-                xb = list(T["xb"])
-                per_x = (xb[-1] - xb[0]) / max(1, cols)
-                trace["used_x"] = True
-            if T.get("ok_y"):
-                yb = list(T["yb"])
-                per_y = (yb[-1] - yb[0]) / max(1, rows)
-                trace["used_y"] = True
-        except Exception as _e:
-            trace = {"ok_x": False, "ok_y": False, "msg": repr(_e)}
+    # 认全了的方向直接用真缝位置（线落在沟中间），并据此校正平均间距
+    if T:
+        if T.get("ok_x"):
+            xb = [float(v) for v in T["xb"]]
+            per_x = (xb[-1] - xb[0]) / max(1, cols)
+            trace["used_x"] = True
+        if T.get("ok_y"):
+            yb = [float(v) for v in T["yb"]]
+            per_y = (yb[-1] - yb[0]) / max(1, rows)
+            trace["used_y"] = True
     traced = bool(trace and (trace.get("used_x") or trace.get("used_y")))
     # 两个方向都认全了才完全跳过吸附；只认全一个方向时，另一个方向仍允许吸附兜底
     if getattr(req, "snap", False) and not (trace and trace.get("used_x") and trace.get("used_y")):
@@ -4202,6 +4235,8 @@ def records_save(req: SaveReq):
             "total": {"pct": _r(g.get("total_pct"), 2),
                       "kept": _r(g.get("total_kept"), 0),
                       "area": _r(g.get("total_area"), 0)},
+            "trace": g.get("trace") or None,
+            "pitch": [g.get("pitch_x"), g.get("pitch_y")],
             "cells": [{"i": int(c.get("i") or 0), "j": int(c.get("j") or 0),
                        "pct": _r(c.get("pct"), 2), "kept": _r(c.get("kept"), 0)}
                       for c in (g.get("cells") or [])][:1600],

@@ -5,6 +5,7 @@
 纯 numpy + PIL，不引入 scipy/opencv。
 """
 import math
+import os
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -397,11 +398,27 @@ def trace_grid(gray, angle, center, box, cols, rows):
     # 图里都表现为暗沟，就按暗沟认。
     raw = np.clip(bg - r, 0, None)
 
-    ix0, ix1 = int(max(1, math.floor(x0))), int(min(raw.shape[1] - 2, math.ceil(x1)))
-    iy0, iy1 = int(max(1, math.floor(y0))), int(min(raw.shape[0] - 2, math.ceil(y1)))
+    # 往外多留一圈：框画得紧时，最外那两条缝正好压在框边上，剖面里贴边的峰会被告警掉
+    # （实测 1.0 倍能认 11 条，缩到 0.5 倍只认 10 条，就是最外一条被裁掉了）
+    pad = int(max(4.0, 0.05 * max(x1 - x0, y1 - y0)))
+    ix0 = int(max(1, math.floor(x0) - pad))
+    ix1 = int(min(raw.shape[1] - 2, math.ceil(x1) + pad))
+    iy0 = int(max(1, math.floor(y0) - pad))
+    iy1 = int(min(raw.shape[0] - 2, math.ceil(y1) + pad))
     if ix1 - ix0 < 40 or iy1 - iy0 < 40:
         return {"ok_x": False, "ok_y": False, "xb": [], "yb": [], "msg": "选区太小"}
     sub = raw[iy0:iy1, ix0:ix1]
+
+    # 分辨率归一：同一张图在 371 px 和 1400 px 下认缝结果必须一致，否则「预览分辨率」一变
+    # 就换了个结果。这里把剖面统一缩放/放大到长边 ~900 px 再认（放大不增信息，但把固定
+    # sigma 的平滑、固定比例的窗口拉回同一尺度），认完再换算回去。
+    norm = 1.0
+    long_side = max(sub.shape)
+    if long_side and (long_side < 520 or long_side > 1500):
+        norm = 900.0 / long_side
+        tw, th = max(8, int(round(sub.shape[1] * norm))), max(8, int(round(sub.shape[0] * norm)))
+        sub = np.asarray(Image.fromarray(np.clip(sub, 0, 255).astype(np.uint8))
+                         .resize((tw, th), Image.LANCZOS)).astype(np.float32)
 
     px, py = _profiles(sub)
     out = {"ok_x": False, "ok_y": False, "xb": [], "yb": [], "msg": ""}
@@ -423,11 +440,11 @@ def trace_grid(gray, angle, center, box, cols, rows):
                 keep.append(c)
                 last = c[0]
         # 边界要用各自的轴（这里以前两个方向都传了 x 的边界，y 方向走两步就被判出界）
-        centers, pitch = _walk(keep, n_need, blo - off, bhi - off, pitch0)
+        centers, pitch = _walk(keep, n_need, (blo - off) * norm, (bhi - off) * norm, pitch0 * norm)
         ok = len(centers) == n_need
         out["ok_" + tag] = ok
-        out[("xb" if tag == "x" else "yb")] = [c + off for c in centers] if ok else []
+        out[("xb" if tag == "x" else "yb")] = [c / norm + off for c in centers] if ok else []
         out["n_" + tag] = len(centers)
-        out["pitch_" + tag] = round(pitch, 1)
+        out["pitch_" + tag] = round(pitch / norm, 1)
         out["cont_" + tag] = round(float(np.median([cont[int(round(c))] for c in centers])), 2) if centers else 0.0
     return out
