@@ -1482,7 +1482,11 @@ async function upload(file) {
     S.annot.strokes = []; S.annot.cur = null; S.annot.res = null;
     S.tol = 25; S.purity = 0.5;              // 容差/纯度跟着图走，重置
     S.widthTouched = false; S.suggRetry = false;
-    // 刀缝宽度不重置：它更像“你手上这把刀”的参数，直接沿用上一张（打开记录时会被记录值覆盖）
+    // 刀缝宽度也不沿用：上一张手设的 k 是那张图的（不同相机/倍率下同一个数不是同一段宽度），
+    // 新图一律回到"没量过"的初值，交给判法重定——半自动会带 r.line_px 回来，
+    // 或用「建议值」按钮按露底厚度算。手改标记一并作废，否则自动值会被 lineManual 挡住。
+    S.line = 1; S.lineSrc = 'default'; S.lineManual = false;
+    S.suggest = null; S.suggestSrc = ''; S.suggestHold = null; S.knee = null; S.kneeWarn = '';
     clearImageState();                      // 结果卡/胶囊/建议阈值/诊断全部清空
     $('#chkAutoTol').checked = true; S.autoTol = true;
     syncParams(); syncSampleUI(); refreshRoiList();
@@ -3023,7 +3027,7 @@ async function refreshRecords() {
           <div class="recname" data-name="${it.id}">${esc(it.name)}</div>
           <div class="recsub">${esc(it.created || '')}　${it.w}×${it.h}　k=${it.line_px}　tol=${it.tol}</div>
           <div class="recsub"><b>${grade}%</b> ${g}${it.manual ? T(`　✎排除${it.manual}块`, ` · ✎${it.manual} excluded`) : ''}${it.worst_roi ? T(`　最差 R${it.worst_roi}`, ` · worst R${it.worst_roi}`) : ''}${T(`　${it.n_roi} 个选区`, ` · ${it.n_roi} region(s)`)}</div>
-          ${it.sep ? `<div class="recsub"><span class="sepchip" data-sep="${it.id}" title="${T('看分离结果（刀缝 / 崩边 / 格内脱落）', 'Open the separation result')}">◐ ${T('看分离图', 'separation map')}</span></div>` : ''}
+
         </div>
         <button class="ren" data-ren="${it.id}" title="${T('重命名', 'Rename')}">✎</button>
         <button class="del" data-del="${it.id}" title="${T('删除（服务器上一起删）', 'Delete (also from the server)')}">×</button>
@@ -3032,26 +3036,6 @@ async function refreshRecords() {
   } catch (e) {
     box.innerHTML = `<div class="empty">${T('读取失败：', 'Load failed: ')}${esc(e.message)}</div>`;
   }
-}
-
-/* 分离结果灯箱：记录目录里若有 separated.jpg（刀缝/崩边/格内脱落的分层图），点开看大图 */
-function showSep(rid) {
-  let box = document.getElementById('sepBox');
-  if (!box) {
-    box = document.createElement('div');
-    box.id = 'sepBox';
-    box.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(4,6,10,.92);'
-      + 'display:flex;align-items:center;justify-content:center;cursor:zoom-out;padding:16px';
-    box.onclick = () => { box.style.display = 'none'; };
-    document.body.appendChild(box);
-  }
-  box.innerHTML = '<img style="max-width:100%;max-height:100%;box-shadow:0 8px 40px #000">';
-  box.firstChild.onerror = () => {
-    box.innerHTML = '<div style="color:#ffd88a;font:600 15px system-ui">'
-      + T('这条记录没有分离图', 'This record has no separation image') + '</div>';
-  };
-  box.firstChild.src = 'api/records/' + rid + '/separated.jpg?v=' + Date.now();
-  box.style.display = 'flex';
 }
 
 /* 重命名：把那行的名字换成输入框，回车保存，Esc 取消；空名字不提交 */
@@ -3337,8 +3321,6 @@ $('#recClose').onclick = closeDrawer;
 $('#scrim').onclick = closeDrawer;
 $('#btnSave').onclick = saveRecord;
 $('#recList').addEventListener('click', e => {
-  const sep = e.target.closest('[data-sep]');
-  if (sep) { e.stopPropagation(); showSep(sep.getAttribute('data-sep')); return; }
   const ren = e.target.closest('[data-ren]');
   if (ren) { e.stopPropagation(); startRename(ren.getAttribute('data-ren')); return; }
   const del = e.target.closest('[data-del]');
@@ -3530,10 +3512,6 @@ try {
   setExmode((keep === 'width' || keep === 'auto_blk') ? keep : 'auto_blk');
 } catch (_) { setExmode('auto_blk'); }
 try { updateKneeHint(); } catch (_) {}
-try {
-  const lw = parseInt(localStorage.getItem('baige.line'), 10);
-  if (lw >= 1) { S.line = Math.min(60, lw); $('#rngLine').value = Math.min(25, S.line); $('#numLine').value = S.line; }
-} catch (_) {}
 resizeCanvas();
 syncParams();
 setStatus(T('滚轮缩放 · 中键拖动平移 · 双击适应窗口', 'Wheel to zoom · middle-drag to pan · double-click to fit'));
