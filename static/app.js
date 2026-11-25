@@ -34,6 +34,9 @@ const S = {
   blocksSeq: 0,
   grid: null, gridCells: false,
   gm: null, gmPitch: 0, gmArea: false, gmOff: { ox: 0, oy: 0, dx: [], dy: [] }, gmDrag: null,
+  // 格网里「人改过」的标记：改了就不再让自动值覆盖（用户明确要求保留手改）
+  gmColsManual: false, gmRowsManual: false, gmAngManual: false,
+  gmCountsSig: '', gmAutoSig: '', samplesManual: false,
 };
 
 /* 顶栏那些复选框：一律记住上次的选择。用户预期是"取消勾 → 刷新也还是取消"，
@@ -439,6 +442,10 @@ function gmBody(extra) {
     tol: S.tol, purity: S.purity, line_px: S.line, mode: S.exmode,
     loc_tile: 64, loc_factor: 1.6, roi_native: S.roiNative,
     model: true,
+    // 没手改过列/行、且框换了位置 → 让服务端自己数一遍；手改过的永远以人为准
+    auto_counts: !(S.gmColsManual || S.gmRowsManual) && S.gmCountsSig !== gmRoiSig(),
+    auto_angle: !S.gmAngManual,          // 框完就自己估歪角（只回建议，人改过就不再动）
+    roles_auto: !S.samplesManual,        // 颜色是自动分的 → 允许服务端按格内面积纠正角色
     cols: +$('#gmCols').value || 0, rows: +$('#gmRows').value || 0,
     // 刀宽与「忽略细线宽度」合成一个数（S.line）：同一个物理量，两个框只会互相打架
     angle: +$('#gmAng').value || 0, k_band: S.line || 0,
@@ -446,6 +453,11 @@ function gmBody(extra) {
     line_dx: S.gmOff.dx.slice(), line_dy: S.gmOff.dy.slice(),
     overlay: !!S.showOverlay,
   }, extra || {});
+}
+
+/* 选区的“位置签名”：框挪了才重新认格数/重新分色，参数一动就重来只会让数字跳 */
+function gmRoiSig() {
+  return JSON.stringify(S.rois.map(r => r.box.map(v => Math.round(v))));
 }
 
 /* 刀缝分离：用上面那套线位把「刀缝 / 刀口崩边 / 格内脱落」分成三层各给一个数。
@@ -458,7 +470,7 @@ async function runSep() {
     setStatus(T('先在格网里填列数/行数', 'Set columns/rows first')); return;
   }
   if (S.busy) return;
-  S.busy = true;
+  setBusy(true);
   setStatus(T('正在分离刀缝…', 'Separating the cuts…'));
   const out = $('#sepOut');
   try {
@@ -484,7 +496,7 @@ async function runSep() {
   } catch (e) {
     out.textContent = T('分离失败：', 'Failed: ') + (e.message || e);
     setStatus(String(e.message || e));
-  } finally { S.busy = false; }
+  } finally { setBusy(false); }
 }
 
 /* 列/行填的是「格子」数，刀线 = 格子数 + 1；把这层换算直接写在界面上，免得填反 */
@@ -524,9 +536,10 @@ async function gmAutoSample(silent) {
     });
     if (!r.ok) { if (!silent) setStatus(r.reason || T('自动分色失败', 'Auto colours failed')); return false; }
     S.samples = r.samples.map(x => ({ rgb: x.rgb.slice(), role: x.role }));
-    S.selSample = -1; S.span = r.span; S.gmAuto = true;
+    S.selSample = -1; S.span = r.span; S.gmAuto = true; S.samplesManual = false;
     if (S.autoTol && typeof r.auto_tol === 'number') S.tol = r.auto_tol;
     syncSampleUI(); updateSpan(); draw();
+    if (r.warn) setStatus(r.warn);
     return true;
   } catch (e) {
     if (!silent) setStatus(T('自动分色失败：', 'Auto colours failed: ') + e.message);
@@ -535,11 +548,22 @@ async function gmAutoSample(silent) {
 }
 
 /* 判法=格网 时的半自动：框完/改参数就自己跑一遍（合并连点，别每次拖动都发请求） */
-let gmTimer = null;
+let gmTimer = null, gmPending = false;
 function scheduleGm(ms) {
   if (S.exmode !== 'grid' || !S.id || !S.rois.length) return;
+  gmPending = true;
   if (gmTimer) clearTimeout(gmTimer);
-  gmTimer = setTimeout(() => { gmTimer = null; runModelGrid(); }, ms || 700);
+  gmTimer = setTimeout(pumpGm, ms || 700);
+}
+/* 忙的时候不能把请求丢掉：改刀宽会同时触发 analyze()，analyze() 一进来就 busy，
+   老代码在定时器到点那一刻直接 return（且不重试）→ 刀宽/「计算」永远不生效，
+   只有「自动定角」那种 await 完再直调的路径能跑。这里改成等它闲下来再跑。 */
+function pumpGm() {
+  gmTimer = null;
+  if (!gmPending) return;
+  if (S.busy) { gmTimer = setTimeout(pumpGm, 180); return; }
+  gmPending = false;
+  runModelGrid();
 }
 /* 刀宽与「忽略细线宽度」合并成一个数之后，格网块里那行只显示“沿用 = N px” */
 function refreshGmK() {
@@ -583,19 +607,48 @@ function setGridCard(g) {
 async function runModelGrid(extra) {
   if (!S.id) { setStatus(T('先打开一张图', 'Open an image first')); return; }
   if (!S.rois.length) { setStatus(T('先在图上拖一个选区，把整片百格框住', 'Draw a region around the grid first')); return; }
-  if (S.busy) return;
-  S.busy = true;
+  if (S.busy) { scheduleGm(200); return; }        // 分析还没跑完：排队，别丢
+  setBusy(true);                            // 必须走 setBusy：直接改 S.busy 不会刷新「计算」按钮
   setStatus(T('正在铺格…', 'Laying out the grid…'));
+  const rsig0 = gmRoiSig();
+  const wantCounts = !(S.gmColsManual || S.gmRowsManual) && S.gmCountsSig !== rsig0;
   try {
-    // 没有色样时铺格拿不到任何百分比（几何还是会画出来）。先自动分一对，省得用户以为坏了
-    if (!S.samples.length) { S.gmAuto = false; await gmAutoSample(true); }
+    // 框完就自动分色：没有色样，或上次那对是自动分的而框已经挪了 → 重新分一对。
+    // 人自己点过的颜色（samplesManual）永远不动——包括换框。
+    if (!S.samples.length || (!S.samplesManual && S.gmAutoSig !== rsig0)) {
+      if (await gmAutoSample(true)) S.gmAutoSig = rsig0;
+    }
     const g = await post('api/grid', gmBody(extra));
     if (!g.ok) {
       S.gm = null;
-      const msg = T('铺格失败：先在图上框住整片百格，再填列数/行数', 'Grid failed — frame the whole grid first');
+      const msg = g.reason || T('铺格失败：先在图上框住整片百格，再填列数/行数', 'Grid failed — frame the whole grid first');
       $('#gmInfo').textContent = msg; setStatus(msg); draw(); return;
     }
     S.gm = g;
+    // ── 格数 / 歪角写回输入框（自动认出来的，人改过就不再覆盖）─────────────────
+    let autoNote = '';
+    if (g.roles_flipped && !S.samplesManual && S.samples.length >= 2) {
+      // 服务端按「格子内部谁占多数」替我们把漆膜/基材换回来了：本地色样跟着换，
+      // 否则图上的色块/百分比和色样面板对不上。
+      S.samples = S.samples.map(s => ({ rgb: s.rgb,
+        role: s.role === 'coat' ? 'sub' : (s.role === 'sub' ? 'coat' : s.role) }));
+      try { syncSampleUI(); } catch (_) {}
+      autoNote = T('漆膜/基材已按格内面积对调（刀缝露白面积大时“面积大=漆膜”会判反）',
+                   'Coating/substrate swapped by in-cell area (a wide exposed cut can invert the area rule)');
+    }
+    if (g.counts_est && !S.gmColsManual && !S.gmRowsManual) {
+      $('#gmCols').value = g.cols; $('#gmRows').value = g.rows;
+      S.gmCountsSig = rsig0; updateGmLines();
+      autoNote += (autoNote ? '　·　' : '') + T(`格数自动认到 ${g.cols}×${g.rows}（格距 ${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px）；不对就改，改了就按你的`,
+                   `Cells auto-counted as ${g.cols}×${g.rows} (pitch ${Math.round(g.pitch_x)}×${Math.round(g.pitch_y)} px); edit if wrong`);
+    } else if (wantCounts && !g.counts_est && !S.gmColsManual && !S.gmRowsManual) {
+      autoNote += (autoNote ? '　·　' : '') + T(`格数没认出来（周期不规整），先按 ${g.cols}×${g.rows} 铺；不对就把框收紧一点或改数字`,
+                   `Could not count cells (irregular pitch) — using ${g.cols}×${g.rows}; tighten the frame or edit the numbers`);
+    }
+    if (!S.gmAngManual && typeof g.angle === 'number' && Math.abs(g.angle - (+$('#gmAng').value || 0)) > 0.05) {
+      $('#gmAng').value = g.angle;
+      autoNote += (autoNote ? '　·　' : '') + T(`歪角自动估到 ${g.angle}°`, `Tilt auto-estimated at ${g.angle}°`);
+    }
     if (S.gmOff.dx.length !== Math.max(0, g.cols - 1) || S.gmOff.dy.length !== Math.max(0, g.rows - 1)) {
       S.gmOff.dx = new Array(Math.max(0, g.cols - 1)).fill(0);
       S.gmOff.dy = new Array(Math.max(0, g.rows - 1)).fill(0);
@@ -607,7 +660,7 @@ async function runModelGrid(extra) {
     if (g.overlay_url) loadOverlay(g.overlay_url);
     if (S.gmAuto) g.auto_samples = true;
     S.gmPitch = $('#gmPitch') ? (+$('#gmPitch').value || 0) : 0;   // 格距( mm )输入已撤，面积一律 px²
-    $('#gmInfo').textContent = gmSummary(g);
+    $('#gmInfo').textContent = gmSummary(g) + (autoNote ? '　·　' + autoNote : '');
     if (S.exmode === 'grid') { try { setGridCard(g); } catch (_) {} }
     // 用 shift_*（最终位置比等分挪了多少）提示；line_* 现在只回显用户自己的拖拽量
     const snapD = [].concat(g.shift_dx || g.line_dx || [], g.shift_dy || g.line_dy || []).map(Math.abs);
@@ -644,7 +697,7 @@ async function runModelGrid(extra) {
   } catch (e) {
     setStatus(String(e.message || e));
   } finally {
-    S.busy = false;
+    setBusy(false);
   }
 }
 
@@ -677,7 +730,7 @@ async function runGrid() {
   if (!S.id) { setStatus(T('先打开一张图', 'Open an image first')); return; }
   if (!S.rois.length) { setStatus(T('先在图上拖一个选区，再自动找格子', 'Draw a region first')); return; }
   if (S.busy) return;
-  S.busy = true;
+  setBusy(true);
   setStatus(T('正在找格子…', 'Fitting the grid…'));
   try {
     const g = await post('api/grid', {
@@ -710,7 +763,7 @@ async function runGrid() {
   } catch (e) {
     setStatus(String(e.message || e));
   } finally {
-    S.busy = false;
+    setBusy(false);
   }
 }
 
@@ -1579,6 +1632,8 @@ async function upload(file) {
     // 新图一律回到"没量过"的初值，交给判法重定——半自动会带 r.line_px 回来，
     // 或用「建议值」按钮按露底厚度算。手改标记一并作废，否则自动值会被 lineManual 挡住。
     S.line = 1; S.lineSrc = 'default'; S.lineManual = false;
+    S.gmColsManual = false; S.gmRowsManual = false; S.gmAngManual = false;
+    S.gmCountsSig = ''; S.gmAutoSig = ''; S.samplesManual = false;   // 新图：格数/歪角/分色都可以重新自动
     S.suggest = null; S.suggestSrc = ''; S.suggestHold = null; S.knee = null; S.kneeWarn = '';
     clearImageState();                      // 结果卡/胶囊/建议阈值/诊断全部清空
     $('#chkAutoTol').checked = true; S.autoTol = true;
@@ -1762,6 +1817,7 @@ function renderKnee() {
   }
   if (!S.knee || !S.knee.rows) { el.textContent = ''; return; }
   const autoNow = (S.exmode === 'auto' || S.exmode === 'auto_blk');
+  const isGrid = (S.exmode === 'grid');
   // 每一行都能点：点哪档就把刀缝设成哪档，边看蚂蚁线边挑
   const rows = S.knee.rows.map(r => {
     const on = r.k === S.line;
@@ -1770,8 +1826,16 @@ function renderKnee() {
       + (on ? '▶ ' : '&nbsp;&nbsp;') + 'k=' + String(r.k).padStart(2) + T('   块 ', '  blocks ')
       + String(r.n).padStart(3) + T('   露底 ', '  bare ') + r.pct.toFixed(2) + '%</div>';
   }).join('');
-  const label = (S.exmode === 'auto_blk') ? T('按块数回落', 'By block count') : T('按露底分布', 'By bare area');
-  el.innerHTML = (autoNow
+  const label = isGrid ? T('k 曲线（刀宽）', 'k curve (blade)')
+    : (S.exmode === 'auto_blk') ? T('按块数回落', 'By block count') : T('按露底分布', 'By bare area');
+  el.innerHTML = (isGrid
+      ? '<b>' + T('k 曲线（当前刀宽 ' + S.line + ' px）', 'k curve (blade ' + S.line + ' px)') + '</b>'
+        + T('：每行的 k 就是刀缝阈值＝刀宽，点一行就把它设成刀宽（橙色带随之变宽），格网立刻重算。'
+            + (S.knee.derived ? '自动判法建议 k=' + S.knee.k + '。' : '自动判法没定出 k，自己挑一档。'),
+            ': each row is a cut threshold ＝ blade width — click one to use it; the grid recomputes. '
+            + (S.knee.derived ? 'The automatic rule suggests k=' + S.knee.k + '.'
+                              : 'The automatic rule derived no k; pick a row yourself.'))
+      : autoNow
       ? (S.knee.derived
           ? '<b>' + label + T('：k=', ': k=') + S.knee.k + '</b>' + T('（', ' (') + (S.knee.why || '') + T('）', ')')
           : '<b style="color:#d29922">' + label + T('：没定出 k</b>', ': no k could be derived</b>')
@@ -1805,7 +1869,7 @@ function updateKneeHint() {
 async function ensureKnee(force) {
   if (!S.id || !S.rois.length || S.samples.length < 2) return false;
   const sig = kneeSig();
-  const rule = (S.exmode === 'auto_blk') ? 'count' : 'area';
+  const rule = (S.exmode === 'auto_blk' || S.exmode === 'grid') ? 'count' : 'area';
   const autoNow = (S.exmode === 'auto' || S.exmode === 'auto_blk');
   if (!force && S.knee && S.knee.sig === sig && S.knee.rule === rule) {
     // 切回自动判法：即便曲线是缓存的，也要把刀缝重新按判法对齐（用户手改过的除外）
@@ -1987,7 +2051,15 @@ async function analyze() {
   } catch (err) {
     setResult(T('分析失败：', 'Analysis failed: ') + err.message);
   } finally {
-    if (my === S.seq) setBusy(false);
+    if (my === S.seq) {
+      setBusy(false);
+      // 格网判法：像素分析跑完再铺格（以前 setLine→scheduleGm 在 busy 时被丢掉，刀宽看着“不生效”），
+      // 并顺手把 k 曲线扫出来——这条判法下 k 就是刀宽，表要能看、能点。
+      if (S.exmode === 'grid') {
+        scheduleGm(30);
+        if (S.samples.length >= 2) ensureKnee().catch(() => {});
+      }
+    }
   }
 }
 const debouncedAnalyze = debounce(analyze, 220);
@@ -2397,6 +2469,7 @@ async function pickAt(ex, ey) {
     });
     if (!r.ok) { setStatus(r.reason); return; }
     S.samples = r.samples;
+    S.samplesManual = true;               // 人点过的颜色：自动分色以后不许再覆盖
     S.selSample = S.samples.length - 1;
     S.span = r.span;
     const autoApplied = S.autoTol && typeof r.auto_tol === 'number';
@@ -3299,6 +3372,8 @@ async function openRecord(rid) {
       S.gmOff = { ox: S.gmRec.ox || 0, oy: S.gmRec.oy || 0,
                   dx: (S.gmRec.line_dx || []).slice(), dy: (S.gmRec.line_dy || []).slice() };
       S.gmSnap = !!S.gmRec.snap;
+      // 记录里存的列/行/歪角是当时的人工值：标成手改，别让自动认格数/自动定角把它覆盖掉
+      S.gmColsManual = true; S.gmRowsManual = true; S.gmAngManual = true;
       updateGmLines();
     }
     $('#fileName').textContent = S.name;
@@ -3416,11 +3491,6 @@ function syncGmWrap() { applyGmShow(S.exmode === 'grid'); }
 try { syncGmWrap(); } catch (_) {}
 if ($('#btnGmSnap')) $('#btnGmSnap').onclick = () => runModelGrid({ snap: true });
 if ($('#btnSep')) $('#btnSep').onclick = () => runSep();
-if ($('#btnGmColor')) $('#btnGmColor').onclick = async () => {
-  const ok = await gmAutoSample(false);
-  if (ok) await runModelGrid();
-};
-if ($('#btnGmOff')) $('#btnGmOff').onclick = () => { S.gm = null; S.gmDrag = null; S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] }; $('#gmInfo').textContent = ''; draw(); };
 if ($('#btnGmReset')) $('#btnGmReset').onclick = () => {
   S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] };
   if (S.gm) runModelGrid(); else draw();
@@ -3435,8 +3505,13 @@ function syncGmK(v, rerun) {
 }
 if ($('#gmK')) $('#gmK').oninput = (e) => syncGmK(e.target.value, true);
 if ($('#gmKn')) $('#gmKn').onchange = (e) => syncGmK(e.target.value, true);
+const GM_MANUAL = { '#gmCols': 'gmColsManual', '#gmRows': 'gmRowsManual', '#gmAng': 'gmAngManual' };
 ['#gmCols', '#gmRows', '#gmAng'].forEach(s => {
-  if ($(s)) $(s).onchange = () => { updateGmLines(); if (S.gm) gmRerun(); };
+  if ($(s)) $(s).onchange = () => {
+    S[GM_MANUAL[s]] = true;                    // 人改过 → 自动认格数/自动定角不再覆盖（保留手改）
+    updateGmLines();
+    if (S.gm) gmRerun(); else scheduleGm(300);
+  };
 });
 updateGmLines();
 if ($('#chkGmArea')) $('#chkGmArea').onchange = (e) => { S.gmArea = e.target.checked; draw(); };

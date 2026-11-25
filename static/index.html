@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>百格分析 — ASTM D3359 / ISO 2409（用 DeepSeek API 开发）</title>
-<link rel="stylesheet" href="style.css?v=262">
+<link rel="stylesheet" href="style.css?v=263">
 </head>
 <body>
 <div class="topbar">
@@ -220,7 +220,7 @@
         <div class="muted" id="exmodeInfo" style="margin-top:1mm"></div>
         <div class="muted" id="kneeInfo" style="margin-top:1mm"></div>
       <div id="gmWrap" hidden>
-模型格网 · 按 1 → 7 点（任何图都能用）</h4>
+        <h4 data-i18n="gm.h">模型格网（按 1 → 7 点，任何图都能用）</h4>
         <div class="muted" data-i18n="gm.tip">框完选区就自动跑：自动分色 → 认刀缝 → 按缝铺线 → 统计。列/行/歪角一改就重算，不用再点按钮。刀宽与「忽略细线宽度」是同一个数。</div>
         <div class="row tight">
           <span class="step">1</span>
@@ -238,7 +238,7 @@
         </div>
         <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
           <span class="step">4</span>
-          <button id="btnGmColor" data-i18n="gm.color" title="按亮度自动给一对色样（亮=漆膜、暗=露底）；分错了图上点一下就能改">自动分色</button>
+          <span class="muted" data-i18n="gm.color">自动分色：框完选区就按面积自己挑漆膜/露底，分错了在图上点一下就能改</span>
         </div>
         <div class="row tight" style="flex-wrap:wrap;row-gap:6px">
           <span class="step stepopt">6</span>
@@ -259,9 +259,9 @@
           <summary class="muted" style="cursor:pointer;font-size:11.5px" data-i18n="gm.help">这些是什么？（点开）</summary>
           <div class="muted" style="font-size:11.5px;line-height:1.55;margin-top:4px">
             <div><b data-i18n="gm.help1n">刀宽</b><span data-i18n="gm.help1">：这条橙色带整条扣掉，既不算脱落也不进分母。</span></div>
-            <div><b data-i18n="gm.help2n">自动分色</b><span data-i18n="gm.help2">：按亮度自动挑一对色样（亮=漆膜、暗=露底）；分错了就在图上点一下漆膜、再点一下露底。</span></div>
+            <div><b data-i18n="gm.help2n">自动分色</b><span data-i18n="gm.help2">：框完选区就按「面积大的那类＝漆膜」自己挑一对色样（深色漆膜也不会判反）；分错了就在图上点一下漆膜、再点一下露底。</span></div>
             <div><b data-i18n="gm.help3n">刀缝分离</b><span data-i18n="gm.help3">：把「刀划出来的沟」和「被刀带下来的漆」分开——沟扣掉（与附着力无关），缝外 <i>崩边带</i> 那圈算崩边，再往里成块的才算格内脱落。<i>阈值k</i> 越大越严格。</span></div>
-            <div><b data-i18n="gm.help4n">线位归零 / 去掉格网</b><span data-i18n="gm.help4">：归零=把拖过的线全部退回等分位置；去掉格网=清掉整套格网重来。</span></div>
+            <div><b data-i18n="gm.help4n">线位归零</b><span data-i18n="gm.help4">：把拖过的那些线全部退回等分位置（删掉选区，整套格网就一起清掉了）。</span></div>
           </div>
         </details>
         <div class="muted" id="gmTrace" style="margin-top:6px;font-size:11px"></div>
@@ -269,7 +269,6 @@
         <div class="row tight" style="flex-wrap:wrap;row-gap:6px;border-top:1px solid var(--line);padding-top:6px;margin-top:6px">
           <label class="chk" title="在每格里写上剩余漆膜百分比和面积"><input type="checkbox" id="chkGmArea"> <span data-i18n="gm.area">每格</span></label>
           <button id="btnGmReset" data-i18n="gm.reset" title="把拖过的线位与整体偏移归零">线位归零</button>
-          <button id="btnGmOff" data-i18n="grid.clear">去掉格网</button>
         </div>
       </div>
       </div><!-- /#gmWrap -->
@@ -338,7 +337,7 @@
     </div>
   </aside>
 </main>
-<script src="i18n.js?v=262"></script>
-<script src="app.js?v=262"></script>
+<script src="i18n.js?v=263"></script>
+<script src="app.js?v=263"></script>
 </body>
 </html>

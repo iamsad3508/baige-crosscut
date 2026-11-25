@@ -64,7 +64,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.22"      # 软件版本（发版时改）
+APP_VERSION = "2.46"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3425,6 +3425,8 @@ class GridReq(AnalyzeReq):
     angle: float = 0.0           # 格网倾角（度，逆时针为正，与 PIL rotate 同向）
     k_band: float = 0.0          # 刀缝带宽（wire px）；0 = 用 line_px
     auto_angle: bool = False     # 让服务端先估一个角度回来（只给建议，不改请求）
+    auto_counts: bool = False    # 让服务端自己数格数（认得出才用，认不出沿用 cols/rows）
+    roles_auto: bool = False     # 颜色是自动分的（人没点过）→ 允许按格内面积纠正漆膜/基材角色
     ox: float = 0.0              # 整格网平移（wire px，图像坐标）
     oy: float = 0.0
     line_dx: list[float] = []    # 每根竖线的单独微调（wire px，沿格网 u 方向）
@@ -3484,9 +3486,15 @@ def _model_geom(view, bbox, req):
                 return None, {"ok_x": False, "ok_y": False, "msg": repr(_e), "angle": a}
 
         T, trace = _try_trace(ang)
-        if auto_ang and not (T.get("ok_x") and T.get("ok_y")):
+        if auto_ang and abs(auto_ang - ang) >= 0.4:
+            # 0° 常常也能认全（尤其图案本身是正的），但线压在缝边上。估出来的角度只要
+            # 认得不差就采用它——否则界面上永远显示 0°，用户以为“自动定角没执行”。
             T2, tr2 = _try_trace(auto_ang)
-            if (T2.get("ok_x") + T2.get("ok_y")) > ((T or {}).get("ok_x", 0) + (T or {}).get("ok_y", 0)):
+            ok1 = int(bool(T.get("ok_x"))) + int(bool(T.get("ok_y")))
+            ok2 = int(bool(T2.get("ok_x"))) + int(bool(T2.get("ok_y")))
+            q1 = float(T.get("qual_x") or -1) + float(T.get("qual_y") or -1)
+            q2 = float(T2.get("qual_x") or -1) + float(T2.get("qual_y") or -1)
+            if ok2 > ok1 or (ok2 == ok1 and q2 > q1 + 0.02):
                 T, trace = T2, tr2
                 ang = auto_ang
                 th = math.radians(ang)          # 只在“按这个角度认得更全”时才改角度
@@ -3601,6 +3609,37 @@ def _grid_model(view, labels, roles, union, bbox, req):
     # 没吸样就没有任何"漆膜/露底"像素：这时不能把格子全丢掉——几何跟分类无关，
     # 该照常回给前端画框，只是不给百分比（用户点了"铺格"却什么都没出现，就是这里丢的）
     has_cls = bool((coat_r | sub_r).any())
+
+    # ── 「谁是漆膜」按**格子内部**的面积判，而不是全框面积 ─────────────────────
+    # 刀缝露白面积一大（参考图上那条宽带能占 40% 格距），全框面积会站在基材那边，
+    # 角色一翻，百分比就变成 100−真值（实测同一张图 65.2% 与 34.8% 互为补数）。
+    # 漆膜物理上盖住格子内部，基材集中在刀缝和崩边处，所以按格内计数是稳的。
+    # 只在"颜色是自动分的"时才敢替用户翻（roles_auto），人点过的颜色一律不动。
+    roles_flipped = False
+    cell_coat = cell_sub = 0.0
+    try:
+        inner = np.zeros(shape2, bool)
+        for i in range(cols):
+            ia0 = max(0, int(round(xb[i] + k / 2.0)))
+            ia1 = min(W, int(round(xb[i + 1] - k / 2.0)))
+            if ia1 - ia0 < 2:
+                continue
+            for j in range(rows):
+                ib0 = max(0, int(round(yb[j] + k / 2.0)))
+                ib1 = min(H, int(round(yb[j + 1] - k / 2.0)))
+                if ib1 - ib0 < 2:
+                    continue
+                inner[ib0:ib1, ia0:ia1] = True
+        cell_coat = float((coat_r & inner).sum())
+        cell_sub = float((sub_r & inner).sum())
+        tot_in = max(cell_coat + cell_sub, 1.0)
+        if (getattr(req, "roles_auto", False) and has_cls
+                and cell_sub > 1.5 * max(cell_coat, 1.0) and cell_sub > 0.55 * tot_in):
+            coat_r, sub_r = sub_r, coat_r
+            cell_coat, cell_sub = cell_sub, cell_coat
+            roles_flipped = True
+    except Exception:
+        pass
     for i in range(cols):
         for j in range(rows):
             a0 = xb[i] + k / 2.0
@@ -3666,6 +3705,8 @@ def _grid_model(view, labels, roles, union, bbox, req):
             "line_dx": used_dx, "line_dy": used_dy, "snap_err": _snap_err,
             "shift_dx": shift_dx, "shift_dy": shift_dy,
             "trace": G.get("trace"),
+            "roles_flipped": roles_flipped,
+            "cell_coat_frac": (round(cell_coat / max(cell_coat + cell_sub, 1.0), 3) if has_cls else None),
             "need_samples": (not has_cls),
             "total": {"pct": (100.0 * (1.0 - tot_k / max(tot_a, 1.0)) if has_cls else None),
                       "area": round(tot_a * sc * sc, 1),
@@ -3846,9 +3887,15 @@ def api_separate(req: SepReq):
 
 @app.post("/api/autosample")
 def api_autosample(req: AutoSampleReq):
-    """按亮度把选区里的像素分成两簇，给出一对色样（亮=漆膜、暗=露底）。
+    """按亮度把选区里的像素分成两簇，给出一对色样（漆膜 + 露底）。
 
-    只是起点：分错了图上点一下就能改。没有它，用户框完直接点"铺格"会一个数都拿不到。
+    角色**不能按亮度定**：亮=漆膜的假设在「深色漆膜 / 浅色基材」的样品上会正好反
+    （实测 ERICHSEN 参考图黑漆+白底：亮线被当漆膜 → 65.2%，反过来才是 34.8%）。
+    物理先验是「漆膜盖住大部分面积，基材只在刀缝和掉块处露出来」：
+      1) 面积大的那簇 = 漆膜；
+      2) 例外——它近乎无彩（灰/白）而另一簇明显有彩（≥12）且占 ≥15%，则有彩的是漆膜
+         （与半自动认色 _group_colours 同一条规则，两条自动路径不能各说各的）。
+    只是起点：分错了图上点一下就能改。
     """
     sess = get_session(req.id)
     with HEAVY_BLOCK:
@@ -3878,10 +3925,71 @@ def api_autosample(req: AutoSampleReq):
                                            "Only one colour in the region"))
             bright = np.median(px[d], axis=0).round().astype(int).tolist()
             dark = np.median(px[~d], axis=0).round().astype(int).tolist()
-            samples = [{"rgb": bright, "role": cc.ROLE_COAT}, {"rgb": dark, "role": cc.ROLE_SUB}]
+            n_b, n_d = int(d.sum()), int((~d).sum())
+            total = n_b + n_d
+
+            def _chroma(c):
+                v = cc.rgb_to_lab(np.array(c, np.float32))
+                return float(np.hypot(float(v[1]), float(v[2])))
+
+            coat_rgb, sub_rgb = (bright, dark) if n_b >= n_d else (dark, bright)
+            n_coat = max(n_b, n_d)
+            if _chroma(coat_rgb) < 8.0:
+                other, n_other = (dark, n_d) if n_coat == n_b else (bright, n_b)
+                if _chroma(other) >= 12.0 and n_other >= 0.15 * total:
+                    coat_rgb, sub_rgb, n_coat = other, coat_rgb, n_other
+            samples = [{"rgb": coat_rgb, "role": cc.ROLE_COAT},
+                       {"rgb": sub_rgb, "role": cc.ROLE_SUB}]
             sp = _span_of(samples)
+            frac = n_coat / max(1, total)
+            warn = ""
+            if frac < 0.60:
+                warn = L("两类面积差不多（漆膜只占 %.0f%%），自动分色不一定对——"
+                         "图上点一下完好漆膜、再点一下露底就能改" % (100 * frac),
+                         "The two colours cover similar areas (coating %.0f%%), so the automatic "
+                         "pick may be wrong — click the intact coating, then the bare substrate" % (100 * frac))
             return {"ok": True, "samples": samples, "span": sp, "auto_tol": _auto_tol_of(sp),
-                    "ratio_bright": round(float(d.mean()), 3)}
+                    "ratio_bright": round(float(d.mean()), 3),
+                    "coat_frac": round(frac, 3), "warn": warn}
+
+
+def _count_estimate(gray, box):
+    """自己在选区里数格数：估角 → 转正 → 自相关定格距 → 格数 = 边长 / 格距。
+
+    两道闸，不放心就不改用户的数：
+      ① 自相关残差 ≤ 0.12×格距（周期不整齐说明不是规则阵列）；
+      ② 拿这个格数真的认一遍缝，两个方向都认全（trace_grid ok_x & ok_y）才算数。
+    认不出返回 None → 调用方沿用请求里的 cols/rows，并在界面上说明“没认出来”。
+    """
+    try:
+        x0, y0, x1, y1 = [int(round(v)) for v in box]
+        sub = np.asarray(gray[y0:y1, x0:x1]).astype(np.uint8)
+        if min(sub.shape) < 60:
+            return None
+        ang = float(gf.estimate_angle(sub))
+        fill = int(np.median(sub))
+        rot = np.asarray(Image.fromarray(sub, "L").rotate(ang, resample=Image.BILINEAR, fillcolor=fill))
+        r = gf.fit(rot)
+        if not r.get("ok"):
+            return None
+        px, py = float(r.get("period_x") or 0), float(r.get("period_y") or 0)
+        if px < 6 or py < 6:
+            return None
+        if float(r.get("resid_x") or 0) > 0.12 * px or float(r.get("resid_y") or 0) > 0.12 * py:
+            return None
+        cols = int(round((x1 - x0) / px))
+        rows = int(round((y1 - y0) / py))
+        if not (2 <= cols <= 40 and 2 <= rows <= 40):
+            return None
+        t = gf.trace_grid(gray, ang, ((x0 + x1) / 2.0, (y0 + y1) / 2.0), (x0, y0, x1, y1), cols, rows)
+        if not (t.get("ok_x") and t.get("ok_y")):
+            return None
+        return {"cols": cols, "rows": rows,
+                "pitch_x": round(px, 1), "pitch_y": round(py, 1),
+                "angle": round(ang, 2),
+                "w_x": t.get("w_x"), "w_y": t.get("w_y")}
+    except Exception:
+        return None
 
 
 @app.post("/api/grid")
@@ -3919,8 +4027,18 @@ def api_grid(req: GridReq):
         gray = gray.mean(2)
     sub = np.ascontiguousarray(gray[gy0:gy1, gx0:gx1]).clip(0, 255).astype(np.uint8)
 
-    if req.model and req.cols >= 2 and req.rows >= 2:
+    if req.model and (req.auto_counts or (req.cols >= 2 and req.rows >= 2)):
+        cnt = None
+        if req.auto_counts or req.cols < 2 or req.rows < 2:
+            cnt = _count_estimate(gray, (gx0, gy0, gx1, gy1))
+            if cnt:
+                req = req.model_copy(update={"cols": cnt["cols"], "rows": cnt["rows"]})
+        if req.cols < 2 or req.rows < 2:
+            return {"ok": False, "warn": "grid.nocount",
+                    "reason": L("认不出格数：把框贴着整片百格画紧一点，或手填列/行数",
+                                "Could not count the cells — frame the grid tightly or type columns/rows")}
         out = _grid_model(view, labels, roles, union, (gx0, gy0, gx1, gy1), req)
+        out["counts_est"] = cnt
         if req.auto_angle:
             out["angle_est"] = gf.estimate_angle(sub)
         if req.overlay:
