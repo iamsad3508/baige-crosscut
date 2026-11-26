@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.60"      # 软件版本（发版时改）
+APP_VERSION = "2.61"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4418,10 +4418,23 @@ def api_grid(req: GridReq):
             # 用户要的是"框完就自动"，而格距是自相关量出来的、残差过闸的，比默认 9×7 靠谱得多。
             # 面板必须写明这是按格距算的、可以改。实测用户那张 CrossScan 截图：按格距 11×11 +
             # −1.35° 得 35.9%（厂家软件自己显示 33.4%），而 9×7 是 52.5%。
+            # 格距是**这张图**的属性，跟框画多大无关。一旦量到就用它反算格数：
+            # 同一张图里框大框小必须用同一把尺子，否则大框缩成小框会“多出很多线”、
+            # 直接拉小框会“少”（以前是沿用请求里上一次留下的列/行）。
+            _pp = getattr(sess, "gm_pitch", None)
+            _bw, _bh = (gx1 - gx0), (gy1 - gy0)
+            if _pp and _pp[0] > 2 and _pp[1] > 2:
+                cnt = {"cols": max(1, int(round(_bw / _pp[0]))),
+                       "rows": max(1, int(round(_bh / _pp[1]))),
+                       "pitch_x": _pp[0], "pitch_y": _pp[1], "conf": "pitch"}
             if cnt:
                 req = req.model_copy(update={
                     "cols": cnt["cols"] if (want_c or req.cols < 2) else req.cols,
                     "rows": cnt["rows"] if (want_r or req.rows < 2) else req.rows})
+                # 只有自相关量出来的（conf=period，残差过闸）才写进缓存；
+                # trace 给小框时经常给错周期（实测 77 px 被写成 96/154），不能拿它污染整张图
+                if cnt.get("conf") == "period" and cnt.get("pitch_x") and cnt.get("pitch_y"):
+                    sess.gm_pitch = (float(cnt["pitch_x"]), float(cnt["pitch_y"]))
         if req.cols < 2 or req.rows < 2:
             return {"ok": False, "warn": "grid.nocount",
                     "reason": L("认不出格数：把框贴着整片百格画紧一点，或手填列/行数",
@@ -4747,6 +4760,18 @@ def records_save(req: SaveReq):
             except Exception:
                 return None
         rec["gm"] = {
+            # 逐线模式的开关与线集合必须一起存（以前没存，重开旧图按等分重铺 → 线永远对不上）
+            "line_mode": bool(g.get("line_mode")),
+            "lines": (None if not g.get("lines") else {
+                "a": [{"ang": _r(x.get("ang"), 3), "rho": _r(x.get("rho"), 2),
+                       "p0": [_r(v, 2) for v in (x.get("p0") or [])],
+                       "p1": [_r(v, 2) for v in (x.get("p1") or [])],
+                       "added": bool(x.get("added"))} for x in (g["lines"].get("a") or [])],
+                "b": [{"ang": _r(x.get("ang"), 3), "rho": _r(x.get("rho"), 2),
+                       "p0": [_r(v, 2) for v in (x.get("p0") or [])],
+                       "p1": [_r(v, 2) for v in (x.get("p1") or [])],
+                       "added": bool(x.get("added"))} for x in (g["lines"].get("b") or [])],
+            }),
             "cols": int(g.get("cols") or 0), "rows": int(g.get("rows") or 0),
             "k_wire": _r(g.get("k_wire"), 1), "angle": _r(g.get("angle"), 2),
             "ox": _r(g.get("ox"), 2), "oy": _r(g.get("oy"), 2),
