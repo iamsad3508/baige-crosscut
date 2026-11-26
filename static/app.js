@@ -37,6 +37,7 @@ const S = {
   // 格网里「人改过」的标记：改了就不再让自动值覆盖（用户明确要求保留手改）
   gmColsManual: false, gmRowsManual: false, gmAngManual: false,
   gmCountsSig: '', gmAutoSig: '', samplesManual: false,
+  gmLine: false, gmLines: null,          // 逐线模式：线集合（每根线自己的角度/位置）
 };
 
 /* 顶栏那些复选框：一律记住上次的选择。用户预期是"取消勾 → 刷新也还是取消"，
@@ -426,7 +427,9 @@ function gmBody(extra) {
     auto_cols: !S.gmColsManual && S.gmCountsSig !== gmRoiSig(),
     auto_rows: !S.gmRowsManual && S.gmCountsSig !== gmRoiSig(),
     auto_angle: !S.gmAngManual,          // 框完就自己估歪角（只回建议，人改过就不再动）
-    roles_auto: !S.samplesManual,        // 颜色是自动分的 → 允许服务端按格内面积纠正角色
+    roles_auto: !S.samplesManual,
+    auto_lines: (S.gmLine && !S.gmLines) || false,
+    lines: (S.gmLine && S.gmLines) || null,        // 颜色是自动分的 → 允许服务端按格内面积纠正角色
     cols: +$('#gmCols').value || 0, rows: +$('#gmRows').value || 0,
     // 刀宽与「忽略细线宽度」合成一个数（S.line）：同一个物理量，两个框只会互相打架
     angle: +$('#gmAng').value || 0, k_band: S.line || 0,
@@ -670,6 +673,8 @@ async function runModelGrid(extra) {
     // 服务端回传的是「相对理想等分的总偏移」，吸附过之后必须同步回来，否则下次拖线会叠错
     if (g.line_dx) S.gmOff.dx = g.line_dx.slice();
     if (g.line_dy) S.gmOff.dy = g.line_dy.slice();
+    if (g.lines_a && S.gmLine) S.gmLines = { a: g.lines_a, b: g.lines_b };
+    else if (!S.gmLine) S.gmLines = null;
     S.gmSnap = !!(extra && extra.snap);          // 记录里存“这次是不是对过线”，重开时照原样复原
     if (g.overlay_url) loadOverlay(g.overlay_url);
     if (S.gmAuto) g.auto_samples = true;
@@ -1175,7 +1180,8 @@ cv.addEventListener('pointerdown', e => {
       const pi = toImg(ex, ey);
       S.drag = gh.move
         ? { kind: 'gmmove', p0x: pi.x, p0y: pi.y }
-        : { kind: 'gmline', axis: gh.axis, idx: gh.idx, n: gh.n, p0x: pi.x, p0y: pi.y, off: 0 };
+        : { kind: 'gmline', axis: gh.axis, idx: gh.idx, n: gh.n, p0x: pi.x, p0y: pi.y, off: 0,
+            rot: !!ev.shiftKey };            // 逐线模式：Shift+拖 = 转这一根线
       cv.style.cursor = 'move';
       return;
     }
@@ -1249,6 +1255,20 @@ cv.addEventListener('pointermove', e => {
   const p = toImg(ex, ey);
 
   if (d.kind === 'gmline') {
+    if (S.gmLine && d.rot) {                 // 逐线模式：绕线的中点转这一根
+      const fam = d.axis === 'x' ? 'a' : 'b';
+      const L = (S.gmLines && S.gmLines[fam]) ? S.gmLines[fam][d.idx] : null;
+      if (L) {
+        const mx = (L.p0[0] + L.p1[0]) / 2, my = (L.p0[1] + L.p1[1]) / 2;
+        const a = Math.round(Math.atan2(p.y - my, p.x - mx) * 1800 / Math.PI) / 10;
+        const rad = a * Math.PI / 180;
+        const half = Math.hypot(L.p1[0] - L.p0[0], L.p1[1] - L.p0[1]) / 2;
+        L.ang = a;
+        L.p0 = [mx - Math.cos(rad) * half, my - Math.sin(rad) * half];
+        L.p1 = [mx + Math.cos(rad) * half, my + Math.sin(rad) * half];
+        drawSoon(); return;
+      }
+    }
     const off = (p.x - d.p0x) * d.n[0] + (p.y - d.p0y) * d.n[1];   // 沿这根线的法线投位移
     d.off = off;
     S.gmDrag = { kind: 'line', axis: d.axis, idx: d.idx, ldx: off * d.n[0], ldy: off * d.n[1] };
@@ -1351,6 +1371,17 @@ cv.addEventListener('pointerup', e => {
   if (d.kind === 'pan') { draw(); return; }
   if (d.kind === 'gmline') {
     S.gmDrag = null;
+    if (S.gmLine) {                          // 逐线模式：改的是线本身，不是"偏移量"
+      const fam = d.axis === 'x' ? 'a' : 'b';
+      const L = (S.gmLines && S.gmLines[fam]) ? S.gmLines[fam][d.idx] : null;
+      if (!L) { draw(); return; }
+      if (!d.rot && d.off) {
+        const rad = L.ang * Math.PI / 180, nx = -Math.sin(rad), ny = Math.cos(rad);
+        L.p0 = [L.p0[0] + nx * d.off, L.p0[1] + ny * d.off];
+        L.p1 = [L.p1[0] + nx * d.off, L.p1[1] + ny * d.off];
+      }
+      runModelGrid(); return;
+    }
     if (!d.off) { draw(); return; }
     if (d.axis === 'x') S.gmOff.dx[d.idx - 1] = (S.gmOff.dx[d.idx - 1] || 0) + d.off;
     else S.gmOff.dy[d.idx - 1] = (S.gmOff.dy[d.idx - 1] || 0) + d.off;
@@ -1386,7 +1417,7 @@ cv.addEventListener('pointerup', e => {
     // 重新框选 = 换了一片样品：行列/歪角的手改标记作废，让程序按新框再认一次
     // （拖已有框的边只算微调，不清标记——否则刚手填的列数会被自己挪一下就覆盖掉）
     S.gmColsManual = false; S.gmRowsManual = false; S.gmAngManual = false;
-    S.gmCountsSig = ''; S.gmAutoSig = '';
+    S.gmCountsSig = ''; S.gmAutoSig = ''; S.gmLines = null;   // 新框：逐线的线集合重新认
     dropOverlay();                              // 旧覆盖层是按上一组选区算的
     refreshRoiList(); syncRoiAngle(); draw();
     if (S.exmode === 'grid') scheduleGm();            // 判法=格网：只跑格网，不跑像素分析/扫 k
@@ -3720,6 +3751,91 @@ function setLine(v, keepSuggest) {
   // 判法=格网时刀宽就是格网的刀带宽：只重算格网，别再跑一遍像素分析（会顺带扫 k、跑“按块数回落”）
   if (S.exmode !== 'grid') debouncedAnalyze();
 }
+/* 把当前这套「列×行 + 歪角」拆成一根根独立的线：每根线一个 (角度, 位置)。
+   逐线模式默认走这条（不依赖认缝），认缝准不准都不影响，用户拖一下就能修。 */
+function gmLinesFromLattice() {
+  const g = S.gm;
+  if (!g || !g.box) return null;
+  /* 优先用服务端刚回的那套「刀缝带」——里面已经是认过的真缝位置（含歪角），
+     直接拿带子的中心线当线；只有拿不到带子时才退回按框等分。 */
+  const bands = (g.bands || []).slice();
+  const mk = (b) => {
+    const q = b.quad;
+    const dx = q[1][0] - q[0][0], dy = q[1][1] - q[0][1];
+    const len = Math.hypot(dx, dy);
+    if (len < 8) return null;
+    const cx = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4;
+    const cy = (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4;
+    const ux = dx / len, uy = dy / len;
+    const ang = Math.round(Math.atan2(uy, ux) * 1800 / Math.PI) / 10;
+    return { ang, rho: 0, p0: [cx - ux * len / 2, cy - uy * len / 2],
+             p1: [cx + ux * len / 2, cy + uy * len / 2] };
+  };
+  const A = bands.filter(b => b.axis === 'x').map(mk).filter(Boolean);
+  const B = bands.filter(b => b.axis === 'y').map(mk).filter(Boolean);
+  const addEnds = (arr, box) => {
+    // 两端补上边界线：沿法线各外推一个中位间距（比直接用框边准，框边可能没贴到最外面那刀）
+    if (!arr.length) return;
+    const gaps = [];
+    for (let i = 1; i < arr.length; i++) {
+      const a = arr[i].ang * Math.PI / 180;
+      gaps.push(Math.abs(-(arr[i].p0[0] - arr[i - 1].p0[0]) * Math.sin(a)
+                       + (arr[i].p0[1] - arr[i - 1].p0[1]) * Math.cos(a)));
+    }
+    const gp = gaps.length ? gaps.sort((x, y) => x - y)[Math.floor(gaps.length / 2)] : 40;
+    [0, arr.length - 1].forEach((k, side) => {
+      const L = arr[k], a = L.ang * Math.PI / 180;
+      const nx = -Math.sin(a), ny = Math.cos(a), s = side ? gp : -gp;
+      arr.push({ ang: L.ang, rho: 0,
+                 p0: [L.p0[0] + nx * s, L.p0[1] + ny * s],
+                 p1: [L.p1[0] + nx * s, L.p1[1] + ny * s] });
+    });
+    // 排序不能看 x：横线全都跨同一个 x 区间，按 x 排会把顺序打乱
+    const a0 = arr[0].ang * Math.PI / 180, n0x = -Math.sin(a0), n0y = Math.cos(a0);
+    const key = L => ((L.p0[0] + L.p1[0]) / 2) * n0x + ((L.p0[1] + L.p1[1]) / 2) * n0y;
+    arr.sort((u, v) => key(u) - key(v));
+  };
+  if (A.length >= 2 && B.length >= 2) {
+    addEnds(A, g.box); addEnds(B, g.box);
+    [...A, ...B].forEach(L => {
+      const r = L.ang * Math.PI / 180;
+      L.rho = -L.p0[0] * Math.sin(r) + L.p0[1] * Math.cos(r);
+    });
+    return { a: A, b: B };
+  }
+  // 兜底：按「框 + 列行 + 歪角」等分拆线
+  if (!g.cols || !g.rows) return null;
+  const [x0, y0, x1, y1] = g.box;
+  const deg = (g.angle || 0) * Math.PI / 180, ca = Math.cos(deg), sa = Math.sin(deg);
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const rot = (du, dv) => [cx + du * ca - dv * sa, cy + du * sa + dv * ca];
+  const AA = [], BB = [];
+  for (let i = 0; i <= g.cols; i++) {
+    const du = (i - g.cols / 2) * ((x1 - x0) / g.cols);
+    AA.push({ ang: Math.round((90 + g.angle) * 100) / 100, rho: 0,
+              p0: rot(du, y0 - cy), p1: rot(du, y1 - cy) });
+  }
+  for (let j = 0; j <= g.rows; j++) {
+    const dv = (j - g.rows / 2) * ((y1 - y0) / g.rows);
+    BB.push({ ang: Math.round((g.angle || 0) * 100) / 100, rho: 0,
+              p0: rot(x0 - cx, dv), p1: rot(x1 - cx, dv) });
+  }
+  [...AA, ...BB].forEach(L => {
+    const r = L.ang * Math.PI / 180;
+    L.rho = -L.p0[0] * Math.sin(r) + L.p0[1] * Math.cos(r);
+  });
+  return { a: AA, b: BB };
+}
+
+$('#chkLine').onchange = e => {
+  S.gmLine = e.target.checked;
+  S.gmLines = e.target.checked ? gmLinesFromLattice() : null;   // 先按现在的列/行拆；认缝另点按钮
+  if (S.gmLine && S.exmode !== 'grid') { $('#selExmode').value = 'grid'; setExmode('grid'); }
+  setStatus(S.gmLine ? T('逐线模式：不填列/行，直接认刀缝；拖线＝挪，Shift+拖＝转这根线',
+                            'Per-line mode: no rows/cols — cuts are traced; drag = move, Shift+drag = rotate')
+                     : T('已回到按列/行铺格', 'Back to columns/rows'));
+  try { scheduleGm(60); } catch (_) {}
+};
 $('#rngLine').oninput = e => setLine(e.target.value);
 $('#numLine').onchange = e => setLine(e.target.value);
 

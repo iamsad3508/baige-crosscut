@@ -35,6 +35,7 @@ from starlette.concurrency import run_in_threadpool
 
 import crosscut as cc
 import gridfit as gf
+import linefit as lf
 import srvi18n
 from srvi18n import L, is_en
 
@@ -64,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.51"      # 软件版本（发版时改）
+APP_VERSION = "2.52"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3435,6 +3436,9 @@ class GridReq(AnalyzeReq):
     line_dy: list[float] = []
     snap: bool = False           # 逐根线各自吸附到最近的暗缝上（透视/刀走偏时用）
     trace: bool = True           # 先认缝再按缝铺线（等分只在认不全时兜底）
+    # ---- 逐线模式（v2.52）：不要行列数，直接给两组线，每根线自己的角度和位置 ----
+    lines: dict | None = None    # {"a":[{"ang","rho","p0","p1"}...], "b":[...]}（wire px）
+    auto_lines: bool = False     # 让服务端自己认线（认出来的线集合直接当格网）
 
 
 def _model_geom(view, bbox, req):
@@ -3557,6 +3561,104 @@ def _model_geom(view, bbox, req):
     return {"xb": xb, "yb": yb, "xi": xi, "yj": yj, "per_x": per_x, "per_y": per_y, "k": k, "ang": ang,
             "cx": cx, "cy": cy, "ct": ct, "st": st, "snap_err": snap_err,
             "cols": cols, "rows": rows, "trace": trace, "drag_x": _dx, "drag_y": _dy}
+
+
+def _line_model(view, labels, roles, union, lines, k):
+    """逐线模式的统计：两族线求交成四边形格子，逐格数「格内剩余漆膜」。
+
+    与 _grid_model 的区别：这里没有 cols/rows/公共角度，格子是任意四边形
+    （相邻两族线的交点围成），所以不平行、不等距都能算。
+    """
+    coat = np.zeros(union.shape, bool)
+    sub = np.zeros(union.shape, bool)
+    for j, role in enumerate(roles):
+        if role == cc.ROLE_COAT:
+            coat |= (labels == j)
+        elif role == cc.ROLE_SUB:
+            sub |= (labels == j)
+    has_cls = bool((coat | sub).any())
+    H, W = union.shape
+    A, B = lf.norm(lines.get("a") or [], lines.get("b") or [])
+    cells, pts, ok = lf.build_cells(A, B)
+    if not ok:
+        angs = sorted(set(round(L["ang"], 1) for L in A + B))
+        return {"ok": False, "warn": "grid.nolines",
+                "reason": L("这两组线没围成格子：A %d 根 / B %d 根，角度 %s°——"
+                            "可能有两根几乎平行，或有一根落在选区外" % (len(A), len(B), angs[:8]),
+                            "These lines do not form cells: A=%d, B=%d, angles %s" % (len(A), len(B), angs[:8]))}
+    # 刀缝带：所有线都扣（边界线也扣，但格内本来就不含框外，不会影响结果）
+    bands = [lf.band_quad(L, k, (0, 0, W, H)) for L in (A + B)]
+    bm = Image.new("L", (W, H), 0)
+    bd = ImageDraw.Draw(bm)
+    for q in bands:
+        bd.polygon([tuple(p) for p in q], fill=255)
+    bandm = np.asarray(bm) > 127
+
+    sc = view.len_out(1.0)
+    out_cells, tot_a, tot_k = [], 0.0, 0.0
+    for c in cells:
+        q = c["quad"]
+        xs = [p[0] for p in q]
+        ys = [p[1] for p in q]
+        x0, x1 = max(0, int(min(xs))), min(W, int(max(xs)) + 1)
+        y0, y1 = max(0, int(min(ys))), min(H, int(max(ys)) + 1)
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            continue
+        m = Image.new("L", (x1 - x0, y1 - y0), 0)
+        ImageDraw.Draw(m).polygon([(p[0] - x0, p[1] - y0) for p in q], fill=255)
+        mm = np.asarray(m) > 127
+        mm &= ~bandm[y0:y1, x0:x1]
+        wq = [[round(view.to_wire(p[0], p[1])[0], 1), round(view.to_wire(p[0], p[1])[1], 1)] for p in q]
+        if not has_cls:
+            out_cells.append({"i": c["i"], "j": c["j"], "quad": wq, "area": 0.0,
+                              "kept": 0.0, "pct": None})
+            continue
+        pp = (coat[y0:y1, x0:x1] | sub[y0:y1, x0:x1]) & mm
+        area = float(pp.sum())
+        if area < 1:
+            continue
+        kept = float((coat[y0:y1, x0:x1] & pp).sum())
+        out_cells.append({"i": c["i"], "j": c["j"], "quad": wq,
+                          "area": round(area * sc * sc, 1), "kept": round(kept * sc * sc, 1),
+                          "pct": 100.0 * (1.0 - kept / area)})
+        tot_a += area
+        tot_k += kept
+
+    if not out_cells:
+        return {"ok": False, "warn": "grid.nocells",
+                "reason": L("线围出来的格子全落在选区外或面积太小——把线拖回选区里再试",
+                            "Every cell fell outside the region or was too small — move the lines back inside")}
+    pct = (100.0 * (1.0 - tot_k / max(tot_a, 1.0))) if has_cls else None
+    gaps_a = [abs(A[i + 1]["rho"] - A[i]["rho"]) for i in range(len(A) - 1)]
+    gaps_b = [abs(B[j + 1]["rho"] - B[j]["rho"]) for j in range(len(B) - 1)]
+    return {"ok": True, "warn": "", "model": True, "lines": True,
+            "angle": 0.0,
+            "cols": max(1, len(A) - 1), "rows": max(1, len(B) - 1),
+            "k": float(view.len_out(k)),
+            "pitch_x": float(view.len_out(float(np.median(gaps_a)) if gaps_a else 1.0)),
+            "pitch_y": float(view.len_out(float(np.median(gaps_b)) if gaps_b else 1.0)),
+            "lines_a": [{"ang": L["ang"], "rho": L["rho"], "p0": L["p0"], "p1": L["p1"]} for L in A],
+            "lines_b": [{"ang": L["ang"], "rho": L["rho"], "p0": L["p0"], "p1": L["p1"]} for L in B],
+            "bands": [{"axis": "x" if i < len(A) else "y",
+                       "idx": i if i < len(A) else i - len(A),
+                       "n": [round(-math.sin(math.radians(L["ang"])), 6),
+                             round(math.cos(math.radians(L["ang"])), 6)],
+                       "quad": [[round(view.to_wire(p[0], p[1])[0], 1),
+                                 round(view.to_wire(p[0], p[1])[1], 1)] for p in bands[i]]}
+                      for i, L in enumerate(A + B)],
+            "cells": out_cells,
+            "line_dx": [], "line_dy": [],
+            "trace": {"ok_x": True, "ok_y": True, "n_x": len(A), "n_y": len(B),
+                      "used_x": True, "used_y": True, "per_line": True},
+            "roles_flipped": False, "cell_coat_frac": None,
+            "need_samples": (not has_cls),
+            "total": {"pct": pct,
+                      "area": round(tot_a * sc * sc, 1),
+                      "kept": round(tot_k * sc * sc, 1),
+                      "cell_area": round((tot_a / max(1, len(out_cells))) * sc * sc, 1),
+                      "equiv": None},
+            "grade": (cc.astm_class(pct) if has_cls else None),
+            "units": L("像素", "px")}
 
 
 def _grid_model(view, labels, roles, union, bbox, req):
@@ -4075,6 +4177,67 @@ def api_grid(req: GridReq):
     if gray.ndim == 3:
         gray = gray.mean(2)
     sub = np.ascontiguousarray(gray[gy0:gy1, gx0:gx1]).clip(0, 255).astype(np.uint8)
+
+    # ── 逐线模式（v2.52）：不要行列数，线由检测/人给，每根线自己的角度和位置 ──────
+    if req.auto_lines or req.lines:
+        lines = req.lines
+        if (not lines) and req.auto_lines:
+            det = lf.detect_lines(sub, (0, 0, sub.shape[1], sub.shape[0]))
+            if not det.get("ok"):
+                return {"ok": False, "warn": "grid.nolines", "det": det,
+                        "reason": L("没认出成对的两族刀缝（%s）——把框贴着整片百格画紧一点，"
+                                    "或在「刀缝」页手动补线" % det.get("why", ""),
+                                    "Could not trace two families of cuts (%s) — frame the grid tightly "
+                                    "or add the lines by hand" % det.get("why", ""))}
+            lines = {"a": det["a"], "b": det["b"]}
+        # 坐标口径：检测出来的线在「子图」坐标（要加 gx0/gy0）；
+        # 前端传来的线是 wire 坐标（要按视图缩放换算，角度不变）
+        det_space = not req.lines
+
+        def _mv(lst):
+            out = []
+            for Ln in lst or []:
+                a = float(Ln.get("ang", 0.0))
+                p0 = Ln.get("p0") or [0, 0]
+                p1 = Ln.get("p1") or [0, 0]
+                if det_space:
+                    q0 = [float(p0[0]) + gx0, float(p0[1]) + gy0]
+                    q1 = [float(p1[0]) + gx0, float(p1[1]) + gy0]
+                else:
+                    q0 = list(view.to_view(float(p0[0]), float(p0[1])))
+                    q1 = list(view.to_view(float(p1[0]), float(p1[1])))
+                out.append({"ang": a,
+                            # 口径：ang 是方向角，法线 (−sin, cos)
+                            "rho": -q0[0] * math.sin(math.radians(a)) + q0[1] * math.cos(math.radians(a)),
+                            "p0": q0, "p1": q1})
+            return out
+        lines = {"a": _mv(lines.get("a")), "b": _mv(lines.get("b"))}
+        # 单根线的微调（前端拖哪根就传哪根的 dx/dy，视图 px）：沿这**根线自己**的法线挪
+        if req.line_dx or req.line_dy:
+            for fam, ds in (("a", req.line_dx), ("b", req.line_dy)):
+                for i, L in enumerate(lines[fam]):
+                    if i >= len(ds) or not ds[i]:
+                        continue
+                    a = math.radians(L["ang"])
+                    nx, ny = -math.sin(a), math.cos(a)
+                    d = float(view.len_in(ds[i]))
+                    L["p0"] = [L["p0"][0] + nx * d, L["p0"][1] + ny * d]
+                    L["p1"] = [L["p1"][0] + nx * d, L["p1"][1] + ny * d]
+                    L["rho"] = -L["p0"][0] * math.sin(a) + L["p0"][1] * math.cos(a)
+        k = float(view.len_in(req.k_band or req.line_px or 8.0))
+        out = _line_model(view, labels, roles, union, lines, k)
+        if out.get("ok") and req.overlay:
+            try:
+                side = _res_to_side(req.res, sess.full_img())
+                out["overlay_url"] = _build_overlay(
+                    sess, work, samples, req.tol, req.purity, side,
+                    masks if rois_v else None, _msig(rois_v),
+                    view=view if view.native else None,
+                    full_size=(int(round(sess.size[0] * view.s6)), int(round(sess.size[1] * view.s6))),
+                    line_px=req.line_px, mode=getattr(req, "mode", "width"))
+            except Exception:
+                out["overlay_url"] = None
+        return out
 
     if req.model and (req.auto_counts or req.auto_cols or req.auto_rows or (req.cols >= 2 and req.rows >= 2)):
         cnt = None
