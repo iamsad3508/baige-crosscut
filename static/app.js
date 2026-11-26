@@ -521,8 +521,18 @@ function updateGmLines() {
   const c = +($('#gmCols') ? $('#gmCols').value : 0) || 0;
   const r = +($('#gmRows') ? $('#gmRows').value : 0) || 0;
   if (c < 2 || r < 2) { el.textContent = ''; return; }
+  // 逐线模式下这行就是用户唯一会看的「数」：必须把线数、格数、丢了几格写在一起。
+  // （用户原话：「面板上哪有什么格几个啊」——之前只写在状态栏，一闪就没了。）
+  let extra = '';
+  if (S.gmLine && S.gmLines) {
+    const nA = S.gmLines.a.length, nB = S.gmLines.b.length;
+    const nC = S.gm && S.gm.cells ? S.gm.cells.length : 0;
+    const drop = S.gm && S.gm.cells_dropped ? T('，丢 ' + S.gm.cells_dropped + ' 格', ', ' + S.gm.cells_dropped + ' dropped') : '';
+    extra = T(`（逐线：线 ${nA}×${nB} 条 → 格 ${nC} 个${drop}）`,
+              ` (per-line: ${nA}×${nB} lines → ${nC} cells${drop})`);
+  }
   el.textContent = T(`→ 竖刀线 ${c + 1} 条 ／ 横刀线 ${r + 1} 条（刀线比格子多 1）`,
-                     `→ ${c + 1} vertical cuts / ${r + 1} horizontal cuts (one more than cells)`);
+                     `→ ${c + 1} vertical cuts / ${r + 1} horizontal cuts (one more than cells)`) + extra;
 }
 
 function gmSummary(g) {
@@ -670,6 +680,30 @@ async function runModelGrid(extra) {
       $('#gmInfo').textContent = msg; setStatus(msg); draw(); return;
     }
     S.gm = g; S.lastGm = g;
+    // 逐线模式：列/行输入框一律跟着**线集**走（线数−1），不让它留着上一套格网的数。
+    // 用户看到「列 10 行 8」但实际是 7×9 条线，就会以为程序算错了——面板必须自洽。
+    if (S.gmLine && g.lines_a) {
+      // 逐线模式没有「认缝」这一步，刀宽会一直停在默认 1 px → 整条缝都算脱落，数偏大。
+      // 这里按格距给一个起点（格距的 0.22，实测这批图刀缝约占 1/4~1/5 格距），只设一次。
+      // 刀宽起点：按当前格距估（格距的 0.22）。只在「人没改过 + 现在这个值还是我估的」时更新，
+      // 否则第一轮用拆线格距估出 2 px 会一直卡在那儿（实测 9 号图 pitch 32×24 却给了 2 px）。
+      if (!S.lineManual && g.pitch_x > 2) {
+        const guess = clamp(Math.round(0.22 * Math.min(g.pitch_x, g.pitch_y || g.pitch_x)), 2, 60);
+        const drift = S.lineAuto ? Math.abs(guess - S.line) / Math.max(1, S.line) : 1;
+        if (S.line <= 1 || (S.lineAuto && drift > 0.35)) {
+          setLine(guess);
+          S.lineAuto = guess;                 // 记住“这个值是估出来的”，人一改就不再动
+          S.lineManual = false;
+          setStatus(T('刀宽按格距先取 ' + guess + ' px（可改）', 'Blade width starts at ' + guess + ' px from the pitch'));
+          scheduleGm(60);
+        }
+      }
+      const nA0 = g.lines_a.length - 1, nB0 = g.lines_b.length - 1;
+      if (nA0 >= 1 && $('#gmCols')) $('#gmCols').value = nA0;
+      if (nB0 >= 1 && $('#gmRows')) $('#gmRows').value = nB0;
+      S.gmColsManual = true; S.gmRowsManual = true;      // 别让自动格数再覆盖它
+      try { updateGmLines(); } catch (_) {}              // 立刻把这行刷成「线 N×M 条 → 格 K 个」
+    }
     // ── 格数 / 歪角写回输入框（自动认出来的，人改过就不再覆盖）─────────────────
     let autoNote = '';
     if (g.roles_flipped && !S.samplesManual && S.samples.length >= 2) {
@@ -734,15 +768,14 @@ async function runModelGrid(extra) {
     $('#gmInfo').textContent = gmSummary(g) + (autoNote ? '　·　' + autoNote : '');
     // 逐线模式：把「认到几条线 / 几格 / 丢了几格 / 实际刀宽」固定写出来。
     // 用户原话：「就没见过哪里有丢几格认出几条线这几个字」——只在状态栏说一遍是不够的，会被下一条消息盖掉。
+    let lineNote = '';
     if (S.gmLine && g.lines_a) {
       const nA = g.lines_a.length, nB = g.lines_b.length;
       const nC = (g.cells || []).length;
       const drop = g.cells_dropped ? T(' · 丢 ' + g.cells_dropped + ' 格', ' · ' + g.cells_dropped + ' dropped') : '';
       const kw = g.k_used ? T(' · 刀宽 ' + g.k_used, ' · blade ' + g.k_used) : '';
-      if ($('#gmTrace')) {
-        $('#gmTrace').textContent = T(`线 ${nA}×${nB} 条 · 格 ${nC} 个${drop}${kw}`,
-                                      `${nA}×${nB} lines · ${nC} cells${drop}${kw}`);
-      }
+      lineNote = T(`线 ${nA}×${nB} 条 · 格 ${nC} 个${drop}${kw}`,
+                   `${nA}×${nB} lines · ${nC} cells${drop}${kw}`);
     }
     if (S.exmode === 'grid') { try { setGridCard(g); } catch (_) {} }
     // 用 shift_*（最终位置比等分挪了多少）提示；line_* 现在只回显用户自己的拖拽量
@@ -767,7 +800,9 @@ async function runModelGrid(extra) {
       wNote = T(`｜刀缝实测宽 ${Math.round(tr.w_x)} px，你现在填 ${S.line} px，缝里露白的部分会被算成脱落`,
                 ` | detected cut width ${Math.round(tr.w_x)} px vs your ${S.line} px`);
     }
-    if (trNote || wNote) $('#gmTrace').textContent = trNote + wNote;
+    if (lineNote || trNote || wNote) {
+      $('#gmTrace').textContent = [lineNote, trNote + wNote].filter(Boolean).join('　·　');
+    }
     setStatus((extra && extra.snap)
       ? (snapMax >= 1
         ? T('对线完成：线最多挪了 ' + snapMax.toFixed(1) + ' px；挪太多说明格数/框位不对',

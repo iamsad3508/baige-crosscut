@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.56"      # 软件版本（发版时改）
+APP_VERSION = "2.57"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3689,6 +3689,9 @@ def _line_model(view, labels, roles, union, lines, k, allow_flip=False):
     pct = (100.0 * (1.0 - tot_k / max(tot_a, 1.0))) if has_cls else None
     gaps_a = [abs(A[i + 1]["rho"] - A[i]["rho"]) for i in range(len(A) - 1)]
     gaps_b = [abs(B[j + 1]["rho"] - B[j]["rho"]) for j in range(len(B) - 1)]
+    # 回传格距（wire px）：前端刀宽还是默认 1 px 时按它给一个起点
+    _px = float(np.median(gaps_a)) if gaps_a else 0.0
+    _py = float(np.median(gaps_b)) if gaps_b else 0.0
     _wh = np.asarray(view.work["rgb"]).shape
     _bx0, _by0 = view.to_wire(0, 0)
     _bx1, _by1 = view.to_wire(_wh[1], _wh[0])
@@ -3716,6 +3719,7 @@ def _line_model(view, labels, roles, union, lines, k, allow_flip=False):
             # 期望格子数 vs 实际：差出来的那些是被「面积太小 / 落在选区外」丢掉的，
             # 前端要照着提示，否则用户只看到格子数少、不知道是线的问题
             "k_used": round(float(view.len_out(k)), 2),
+            "pitch_x": round(_px, 1), "pitch_y": round(_py, 1),
             "cells_expect": max(0, (len(A) - 1) * (len(B) - 1)),
             "cells_dropped": max(0, (len(A) - 1) * (len(B) - 1) - len(out_cells)),
             "line_dx": [], "line_dy": [],
