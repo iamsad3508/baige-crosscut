@@ -359,6 +359,31 @@ function drawModelGrid() {
   ctx.lineWidth = 1;
   for (const c of g.cells) { gmPath(sh(c.quad)); ctx.stroke(); }
 
+  // 逐线模式：把每根线的「中心点 + 两个端点」画出来（用户要的就是这个对位参考）
+  if (S.gmLine && S.gmLines) {
+    const dg3 = S.drag || {};
+    const dot = (pt, r, col, ring) => {
+      const s = toScreen(pt[0], pt[1]);
+      ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, 6.2832);
+      ctx.fillStyle = col; ctx.fill();
+      ctx.lineWidth = ring ? 2 : 1;
+      ctx.strokeStyle = ring ? '#ffffff' : '#0d1117';
+      ctx.stroke();
+    };
+    for (const fam of ['a', 'b']) {
+      const col = fam === 'a' ? '#46e1ff' : '#ff7ad9';
+      (S.gmLines[fam] || []).forEach((L, i) => {
+        if (!L.p0 || !L.p1) return;
+        const hot = dg3.kind === 'gmline' && dg3.idx === i && ((dg3.axis === 'x' ? 'a' : 'b') === fam);
+        const s0 = toScreen(L.p0[0], L.p0[1]), s1 = toScreen(L.p1[0], L.p1[1]);
+        ctx.beginPath(); ctx.moveTo(s0.x, s0.y); ctx.lineTo(s1.x, s1.y);
+        ctx.strokeStyle = hot ? '#ffffff' : col; ctx.lineWidth = hot ? 2 : 1; ctx.stroke();
+        dot(L.p0, 4, col, false); dot(L.p1, 4, col, false);
+        if (L._ctr) dot(L._ctr, hot ? 7 : 5, hot ? '#ffffff' : col, true);
+      });
+    }
+  }
+
   if (S.gmArea) {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     for (const c of g.cells) {
@@ -404,6 +429,30 @@ function distSeg(px, py, a, b) {
 /* 画布上抓格网：靠近某根刀缝带 → 拖这一根；在框内空白处 → 整体平移 */
 function gmHitAt(ex, ey) {
   const g = S.gm;
+  // 逐线模式：先抓三个把手（中心点 / 两个端点），它们比刀带更该优先响应
+  if (S.gmLine && S.gmLines) {
+    let best = null, bd = 12;
+    for (const fam of ['a', 'b']) {
+      (S.gmLines[fam] || []).forEach((L, i) => {
+        const axis = fam === 'a' ? 'x' : 'y';
+        const app = (pt, end) => {
+          if (!pt) return;
+          const s = toScreen(pt[0], pt[1]);
+          const d = Math.hypot(ex - s.x, ey - s.y);
+          if (d < bd) { bd = d; best = { axis, idx: i, end }; }
+        };
+        app(L._ctr, -1);
+        app(L.p0, 0);
+        app(L.p1, 1);
+      });
+    }
+    if (best) {
+      const fam = best.axis === 'x' ? 'a' : 'b';
+      const L = S.gmLines[fam][best.idx];
+      const rad = L.ang * Math.PI / 180;
+      return { axis: best.axis, idx: best.idx, n: [-Math.sin(rad), Math.cos(rad)], end: best.end };
+    }
+  }
   if (!g || !g.bands) return null;
   for (const b of g.bands) {
     const q = (b.quad || b).map(p => toScreen(p[0], p[1]));
@@ -752,7 +801,27 @@ async function runModelGrid(extra) {
     if (g.line_dx) S.gmOff.dx = g.line_dx.slice();
     if (g.line_dy) S.gmOff.dy = g.line_dy.slice();
     if (g.lines_a && S.gmLine) {
-      S.gmLines = { a: g.lines_a, b: g.lines_b };
+      // 服务端回来后按「最接近的那根」配回去，把 added/edge 这些标记保住
+      // （直接换掉会把标记丢掉 → 「－列」找不到刚加的那根；按索引抄又会错位，
+      //   因为服务端会按 rho 重排，转过角度之后顺序就变了，实测角度会被“回滚”）。
+      const _rebuild = (ours, src) => src.map(R => {
+        let bi = -1, bd = 1e9;
+        (ours || []).forEach((L, i) => {
+          const d = Math.abs(L.rho - R.rho) + Math.abs(L.ang - R.ang) * 2;
+          if (d < bd) { bd = d; bi = i; }
+        });
+        const base = (bi >= 0 && bd < 12) ? ours[bi] : {};
+        return Object.assign({}, base, {
+          ang: R.ang, rho: R.rho,
+          p0: R.p0 ? [R.p0[0], R.p0[1]] : base.p0,
+          p1: R.p1 ? [R.p1[0], R.p1[1]] : base.p1,
+        });
+      });
+      S.gmLines = {
+        a: _rebuild(S.gmLines && S.gmLines.a, g.lines_a),
+        b: _rebuild(S.gmLines && S.gmLines.b, g.lines_b),
+      };
+      gmLinesSpanAll();                                  // 端点按当前选区框铺好，把手才有地方站
       if (!S.gmLinesManual) S.gmLinesSig = gmRoiSig();   // 只有自动/拆出来的线才跟框绑定
     } else if (!S.gmLine) S.gmLines = null;
     // 有线被丢掉（两线太近、或线跑到选区外）要说出来，不然只看到格子数少、不知道为什么
@@ -1280,6 +1349,13 @@ cv.addEventListener('pointerdown', e => {
       S.drag = gh.move
         ? { kind: 'gmmove', p0x: pi.x, p0y: pi.y }
         : { kind: 'gmline', axis: gh.axis, idx: gh.idx, n: gh.n, p0x: pi.x, p0y: pi.y, off: 0,
+            end: gh.end, lx: pi.x, ly: pi.y,
+            pivot: (gh.end === 0 || gh.end === 1)
+              ? (() => { const f2 = gh.axis === 'x' ? 'a' : 'b';
+                         const L0 = S.gmLines && S.gmLines[f2] ? S.gmLines[f2][gh.idx] : null;
+                         const pt = L0 ? (gh.end === 0 ? L0.p1 : L0.p0) : null;
+                         return pt ? [pt[0], pt[1]] : null; })()
+              : null,
             rot: !!(e && e.shiftKey) };      // 逐线模式：Shift+拖 = 转这一根线
       if (S.gmLine) S.gmLinesManual = true;         // 拖过的线是人摆的，别再被自动认线覆盖
       cv.style.cursor = 'move';
@@ -1355,6 +1431,37 @@ cv.addEventListener('pointermove', e => {
   const p = toImg(ex, ey);
 
   if (d.kind === 'gmline') {
+    if (S.gmLine && (d.end === 0 || d.end === 1)) {   // 拖一头：另一头钉住，绕它转
+      const fam = d.axis === 'x' ? 'a' : 'b';
+      const L = (S.gmLines && S.gmLines[fam]) ? S.gmLines[fam][d.idx] : null;
+      if (L) {
+        const F = d.pivot || ((d.end === 0) ? L.p1 : L.p0);   // 按下时钉住的那一头，全程不动
+        if (F) {
+          const ang = Math.atan2(p.y - F[1], p.x - F[0]) * 180 / Math.PI;
+          const a2 = ang * Math.PI / 180;
+          L.ang = Math.round(ang * 10) / 10;
+          L.rho = -F[0] * Math.sin(a2) + F[1] * Math.cos(a2);
+          const sp = gmLineSpan(L);
+          L.p0 = sp[0]; L.p1 = sp[1]; L._ctr = sp[2];
+        }
+        drawSoon(); return;
+      }
+    }
+    if (S.gmLine && d.end === -1) {          // 拖中心点：整根线跟着鼠标走（不再只沿法线投）
+      const fam = d.axis === 'x' ? 'a' : 'b';
+      const L = (S.gmLines && S.gmLines[fam]) ? S.gmLines[fam][d.idx] : null;
+      if (L) {
+        const ddx = p.x - (d.lx != null ? d.lx : d.p0x), ddy = p.y - (d.ly != null ? d.ly : d.p0y);
+        L.p0 = [L.p0[0] + ddx, L.p0[1] + ddy];
+        L.p1 = [L.p1[0] + ddx, L.p1[1] + ddy];
+        const a3 = L.ang * Math.PI / 180;
+        L.rho = -L.p0[0] * Math.sin(a3) + L.p0[1] * Math.cos(a3);
+        d.lx = p.x; d.ly = p.y;
+        const sp = gmLineSpan(L);
+        L._ctr = sp[2];
+        drawSoon(); return;
+      }
+    }
     if (S.gmLine && d.rot) {                 // 逐线模式：绕线的中点转这一根
       const fam = d.axis === 'x' ? 'a' : 'b';
       const L = (S.gmLines && S.gmLines[fam]) ? S.gmLines[fam][d.idx] : null;
@@ -1475,7 +1582,7 @@ cv.addEventListener('pointerup', e => {
       const fam = d.axis === 'x' ? 'a' : 'b';
       const L = (S.gmLines && S.gmLines[fam]) ? S.gmLines[fam][d.idx] : null;
       if (!L) { draw(); return; }
-      if (!d.rot && d.off) {
+      if (d.end == null && !d.rot && d.off) {
         const rad = L.ang * Math.PI / 180, nx = -Math.sin(rad), ny = Math.cos(rad);
         L.p0 = [L.p0[0] + nx * d.off, L.p0[1] + ny * d.off];
         L.p1 = [L.p1[0] + nx * d.off, L.p1[1] + ny * d.off];
@@ -3839,8 +3946,11 @@ $('#numPurity').onchange = e => setPurity(e.target.value);
 function setLine(v, keepSuggest) {
   S.line = clamp(Math.round(+v), 1, 60);
   if (!keepSuggest) markLineSrc('manual');
+  if (!keepSuggest) {                     // 只要是**人**改的，一律锁住（以前只在自动判法下锁，
+    S.lineManual = true;                  // 格网/逐线模式里就会被“按格距估”反复覆盖 —— 用户看到刀宽改不动）
+    S.lineAuto = null;
+  }
   if (!keepSuggest && (S.exmode === 'auto' || S.exmode === 'auto_blk')) {   // 自动判法下用户自己改线宽：以他的为准
-    S.lineManual = true;
     if (S.knee && S.knee.k) setStatus(T('已按你设的刀缝 ' + S.line + ' 计算（自动值 ' + S.knee.k + '，重选「自动定刀缝」可恢复）',
       `Using your cut width ${S.line} (auto was ${S.knee.k}; re-select “automatic” to restore it)`));
   }
@@ -3943,6 +4053,7 @@ function gmLinesFromLattice(opt) {
 $('#chkLine').onchange = e => {
   S.gmLine = e.target.checked;
   S.gmLines = e.target.checked ? gmLinesFromLattice() : null;   // 先按现在的列/行拆；认缝另点按钮
+  if (S.gmLines) gmLinesSpanAll();
   S.gmLinesManual = false;
   S.gmLinesSig = S.gmLines ? gmRoiSig() : '';
   const ops = $('#lineOps');
@@ -3975,6 +4086,7 @@ function ensureLines(cols, rows) {
   const L = gmLinesFromLattice({ box: bb, cols: nc, rows: nr, angle: ang });
   if (!L) return false;
   S.gmLines = L; S.gmLinesManual = true; S.gmLinesSig = gmRoiSig();
+  gmLinesSpanAll();
   return true;
 }
 
@@ -3992,6 +4104,41 @@ function gmBoxFromLines() {
     }
   }
   return x1 > x0 && y1 > y0 ? [x0, y0, x1, y1] : null;
+}
+
+/* 线的三个把手：两个「与选区框的交点」（p0/p1）＋一个中心点（线上离框中心最近的点）。
+   端点钉在框边上有个大好处：拖一头、另一头不动，转完仍然贯穿整个选区——
+   用户担心的「线变长变短导致不密封」在这里不存在（格子本来就是按无限线的交点围的）。 */
+function gmLineSpan(L, bx) {
+  bx = bx || gmBoxFromLines() || (S.rois && S.rois[0] && S.rois[0].box);
+  const a = L.ang * Math.PI / 180, dx = Math.cos(a), dy = Math.sin(a);
+  const cx = bx ? (bx[0] + bx[2]) / 2 : S.w / 2, cy = bx ? (bx[1] + bx[3]) / 2 : S.h / 2;
+  const nx = -Math.sin(a), ny = Math.cos(a);
+  const rho = (L.rho != null) ? L.rho : (-cx * Math.sin(a) + cy * Math.cos(a));
+  const off = rho - (-cx * Math.sin(a) + cy * Math.cos(a));
+  const fx = cx + nx * off, fy = cy + ny * off;          // 中心点（垂足）
+  if (!bx) { const t = 400; return [[fx - dx * t, fy - dy * t], [fx + dx * t, fy + dy * t], [fx, fy]]; }
+  let tmin = -1e9, tmax = 1e9;
+  const lim = (pp, dd, lo, hi) => {
+    if (Math.abs(dd) < 1e-9) return;
+    let t1 = (lo - pp) / dd, t2 = (hi - pp) / dd;
+    if (t1 > t2) { const z = t1; t1 = t2; t2 = z; }
+    tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+  };
+  lim(fx, dx, bx[0], bx[2]); lim(fy, dy, bx[1], bx[3]);
+  if (!(tmax > tmin)) { const t = 200; return [[fx - dx * t, fy - dy * t], [fx + dx * t, fy + dy * t], [fx, fy]]; }
+  return [[fx + dx * tmin, fy + dy * tmin], [fx + dx * tmax, fy + dy * tmax], [fx, fy]];
+}
+
+/* 把所有线重新按选区框铺一遍（只改端点显示，不改 ang/rho → 不影响任何数字） */
+function gmLinesSpanAll() {
+  if (!S.gmLines) return;
+  for (const fam of ['a', 'b']) {
+    for (const L of (S.gmLines[fam] || [])) {
+      const sp = gmLineSpan(L);
+      L.p0 = sp[0]; L.p1 = sp[1]; L._ctr = sp[2];
+    }
+  }
 }
 
 function lineInsert(fam) {
@@ -4012,34 +4159,50 @@ function lineInsert(fam) {
   const mid = { ang: (A.ang + B.ang) / 2 };
   const t = (keyed[best - 1].k + keyed[best].k) / 2;
   const mk = (p0, p1, ang, rho) => ({ ang, rho, p0, p1 });
-  const a = mid.ang * Math.PI / 180, nx = -Math.sin(a), ny = Math.cos(a);
+  const a = mid.ang * Math.PI / 180;
+  let NL;
   if (axis === 'x') {
     const x = (A.p0[0] + B.p0[0]) / 2;
     const p0 = [x, box[1] - 30], p1 = [x, box[3] + 30];
-    const rho = -p0[0] * Math.sin(a) + p0[1] * Math.cos(a);
-    arr.push(mk(p0, p1, mid.ang, rho));
+    NL = mk(p0, p1, mid.ang, -p0[0] * Math.sin(a) + p0[1] * Math.cos(a));
   } else {
     const y = (A.p0[1] + B.p0[1]) / 2;
     const p0 = [box[0] - 30, y], p1 = [box[2] + 30, y];
-    const rho = -p0[0] * Math.sin(a) + p0[1] * Math.cos(a);
-    arr.push(mk(p0, p1, mid.ang, rho));
+    NL = mk(p0, p1, mid.ang, -p0[0] * Math.sin(a) + p0[1] * Math.cos(a));
   }
+  // 新线的位置只是「最宽那段的中间」，未必有真缝。打 edge 标记让服务端把它吸到 ±0.4 格距内
+  // 最强的脊线上（就是边界线在用的那段逻辑）；added 标记让「－列」优先撤掉刚加的这根。
+  NL.edge = true; NL.added = true;
+  arr.push(NL);
+  arr.sort((u, v) => u.rho - v.rho);
+  setStatus(T('已插入一根线（会吸到最近的刀缝上）', 'Line inserted (snapped to the nearest seam)'));
   runModelGrid();
 }
 function lineDelete(fam) {
   if (!ensureLines()) { setStatus(T('先在图上框一个选区', 'Frame a region first')); return; }
   const arr = S.gmLines && S.gmLines[fam];
-  if (!arr || arr.length < 3) return;              // 至少留两根，否则围不出格子
+  if (!arr || arr.length <= 2) {
+    setStatus(T('只剩 2 根了，再删就围不出格子', 'Only 2 lines left — cannot remove more'));
+    return;
+  }
   S.gmLinesManual = true;
   const box = gmBoxFromLines();
   if (!box) return;
-  const cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
-  let bi = 0, bd = Infinity;
-  arr.forEach((L, i) => {
-    const d = Math.hypot((L.p0[0] + L.p1[0]) / 2 - cx, (L.p0[1] + L.p1[1]) / 2 - cy);
-    if (d < bd) { bd = d; bi = i; }
-  });
+  // 优先撤「刚用＋加进来的」那根（从后往前找），否则才撤最靠选区中心的：
+  // 以前一律撤中心那根 → 连按几次就把真缝一根根删掉，用户看到的是“行开始消失了”。
+  let bi = -1;
+  for (let i = arr.length - 1; i >= 0; i--) if (arr[i].added) { bi = i; break; }
+  if (bi < 0) {
+    const cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
+    let bd = Infinity;
+    arr.forEach((L, i) => {
+      const d = Math.hypot((L.p0[0] + L.p1[0]) / 2 - cx, (L.p0[1] + L.p1[1]) / 2 - cy);
+      if (d < bd) { bd = d; bi = i; }
+    });
+  }
   arr.splice(bi, 1);
+  arr.sort((u, v) => u.rho - v.rho);                  // 与服务端回传顺序对齐
+  setStatus(T('删掉一根，还剩 ' + arr.length + ' 根', arr.length + ' lines left'));
   runModelGrid();
 }
 $('#btnLineAuto').onclick = async () => {
