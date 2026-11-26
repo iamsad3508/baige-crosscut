@@ -1181,7 +1181,7 @@ cv.addEventListener('pointerdown', e => {
       S.drag = gh.move
         ? { kind: 'gmmove', p0x: pi.x, p0y: pi.y }
         : { kind: 'gmline', axis: gh.axis, idx: gh.idx, n: gh.n, p0x: pi.x, p0y: pi.y, off: 0,
-            rot: !!ev.shiftKey };            // 逐线模式：Shift+拖 = 转这一根线
+            rot: !!(e && e.shiftKey) };      // 逐线模式：Shift+拖 = 转这一根线
       cv.style.cursor = 'move';
       return;
     }
@@ -3756,14 +3756,25 @@ function setLine(v, keepSuggest) {
 function gmLinesFromLattice() {
   const g = S.gm;
   if (!g || !g.box) return null;
+  // 优先用服务端回传的**完整线集**（含最外两刀）——比从 bands 推更准，也不会少掉边界
+  if (g.lines_all && g.lines_all.a && g.lines_all.a.length >= 2) {
+    return { a: g.lines_all.a.map(L => ({ ang: L.ang, rho: L.rho, p0: L.p0.slice(), p1: L.p1.slice() })),
+             b: g.lines_all.b.map(L => ({ ang: L.ang, rho: L.rho, p0: L.p0.slice(), p1: L.p1.slice() })) };
+  }
   /* 优先用服务端刚回的那套「刀缝带」——里面已经是认过的真缝位置（含歪角），
      直接拿带子的中心线当线；只有拿不到带子时才退回按框等分。 */
   const bands = (g.bands || []).slice();
   const mk = (b) => {
     const q = b.quad;
-    const dx = q[1][0] - q[0][0], dy = q[1][1] - q[0][1];
-    const len = Math.hypot(dx, dy);
+    // 刀缝带是个细长四边形，但「哪条边是长边」不固定（按列行铺的时候长边是第 2 条边，逐线模式是第 1 条）。
+    // 早先固定用 0→1 当方向，结果竖缝全被当成 9px 的横线、rho 全相同 → 格子退化成 22 个。
+    const e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1]];
+    const e2 = [q[2][0] - q[1][0], q[2][1] - q[1][1]];
+    const l1 = Math.hypot(e1[0], e1[1]), l2 = Math.hypot(e2[0], e2[1]);
+    const e = l1 >= l2 ? e1 : e2;
+    const len = Math.max(l1, l2);
     if (len < 8) return null;
+    const dx = e[0], dy = e[1];
     const cx = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4;
     const cy = (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4;
     const ux = dx / len, uy = dy / len;
@@ -3773,30 +3784,29 @@ function gmLinesFromLattice() {
   };
   const A = bands.filter(b => b.axis === 'x').map(mk).filter(Boolean);
   const B = bands.filter(b => b.axis === 'y').map(mk).filter(Boolean);
-  const addEnds = (arr, box) => {
-    // 两端补上边界线：沿法线各外推一个中位间距（比直接用框边准，框边可能没贴到最外面那刀）
+  const addEnds = (arr, box, axis) => {
+    /* 两端补边界线：直接用**选区边**（用户的框就是贴着最外那两刀画的）。
+       早先按「中位间距外推一格」，结果两条边界线落在框外，最外圈格子全被裁掉 → 10×10 只剩 80 格。 */
     if (!arr.length) return;
-    const gaps = [];
-    for (let i = 1; i < arr.length; i++) {
-      const a = arr[i].ang * Math.PI / 180;
-      gaps.push(Math.abs(-(arr[i].p0[0] - arr[i - 1].p0[0]) * Math.sin(a)
-                       + (arr[i].p0[1] - arr[i - 1].p0[1]) * Math.cos(a)));
-    }
-    const gp = gaps.length ? gaps.sort((x, y) => x - y)[Math.floor(gaps.length / 2)] : 40;
-    [0, arr.length - 1].forEach((k, side) => {
-      const L = arr[k], a = L.ang * Math.PI / 180;
-      const nx = -Math.sin(a), ny = Math.cos(a), s = side ? gp : -gp;
-      arr.push({ ang: L.ang, rho: 0,
-                 p0: [L.p0[0] + nx * s, L.p0[1] + ny * s],
-                 p1: [L.p1[0] + nx * s, L.p1[1] + ny * s] });
-    });
+    const L0 = arr[0], L1 = arr[arr.length - 1];
+    const mkEdge = (coord, ang) => {
+      const a = ang * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+      if (axis === 'x') {                       // 竖线：x 固定
+        return { ang, rho: 0, p0: [coord, box[1] - 40], p1: [coord, box[3] + 40] };
+      }
+      return { ang, rho: 0, p0: [box[0] - 40, coord], p1: [box[2] + 40, coord] };
+    };
+    const e1 = mkEdge(axis === 'x' ? box[0] : box[1], L0.ang);
+    const e2 = mkEdge(axis === 'x' ? box[2] : box[3], L1.ang);
+    e1.edge = true; e2.edge = true;         // 服务端会把它吸附到最近的真缝上
+    arr.push(e1); arr.push(e2);
     // 排序不能看 x：横线全都跨同一个 x 区间，按 x 排会把顺序打乱
     const a0 = arr[0].ang * Math.PI / 180, n0x = -Math.sin(a0), n0y = Math.cos(a0);
     const key = L => ((L.p0[0] + L.p1[0]) / 2) * n0x + ((L.p0[1] + L.p1[1]) / 2) * n0y;
     arr.sort((u, v) => key(u) - key(v));
   };
   if (A.length >= 2 && B.length >= 2) {
-    addEnds(A, g.box); addEnds(B, g.box);
+    addEnds(A, g.box, 'x'); addEnds(B, g.box, 'y');
     [...A, ...B].forEach(L => {
       const r = L.ang * Math.PI / 180;
       L.rho = -L.p0[0] * Math.sin(r) + L.p0[1] * Math.cos(r);

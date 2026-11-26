@@ -3563,6 +3563,17 @@ def _model_geom(view, bbox, req):
             "cols": cols, "rows": rows, "trace": trace, "drag_x": _dx, "drag_y": _dy}
 
 
+def _wire_line(view, L):
+    """线（视图坐标）→ wire 坐标的线，ρ 按方向角口径重算。"""
+    a = float(L["ang"])
+    p0 = view.to_wire(L["p0"][0], L["p0"][1])
+    p1 = view.to_wire(L["p1"][0], L["p1"][1])
+    rho = -p0[0] * math.sin(math.radians(a)) + p0[1] * math.cos(math.radians(a))
+    return {"ang": round(a, 2), "rho": round(rho, 2),
+            "p0": [round(p0[0], 1), round(p0[1], 1)],
+            "p1": [round(p1[0], 1), round(p1[1], 1)]}
+
+
 def _line_model(view, labels, roles, union, lines, k):
     """逐线模式的统计：两族线求交成四边形格子，逐格数「格内剩余漆膜」。
 
@@ -3637,8 +3648,10 @@ def _line_model(view, labels, roles, union, lines, k):
             "k": float(view.len_out(k)),
             "pitch_x": float(view.len_out(float(np.median(gaps_a)) if gaps_a else 1.0)),
             "pitch_y": float(view.len_out(float(np.median(gaps_b)) if gaps_b else 1.0)),
-            "lines_a": [{"ang": L["ang"], "rho": L["rho"], "p0": L["p0"], "p1": L["p1"]} for L in A],
-            "lines_b": [{"ang": L["ang"], "rho": L["rho"], "p0": L["p0"], "p1": L["p1"]} for L in B],
+            # 线必须跟 bands/cells 一样换算回 wire 坐标，否则前端存下来的线是视图坐标，
+            # 第二次回传会被再按 wire→view 转一遍，几何越算越歪（实测格子从 100 掉到 80）。
+            "lines_a": [_wire_line(view, L) for L in A],
+            "lines_b": [_wire_line(view, L) for L in B],
             "bands": [{"axis": "x" if i < len(A) else "y",
                        "idx": i if i < len(A) else i - len(A),
                        "n": [round(-math.sin(math.radians(L["ang"])), 6),
@@ -3800,7 +3813,24 @@ def _grid_model(view, labels, roles, union, bbox, req):
 
     cell_area = (tot_a / len(cells)) if cells else max(1.0, (per_x - k) * (per_y - k))
     sc = view.len_out(1.0)                       # wire px / 视图 px；面积要平方
+
+    # 把**完整的一套线**（含两条边界）回传：逐线模式的起点要用它。
+    # 只给 bands 是不够的——bands 只画内侧线，缺了最外两刀，逐线算出来的最外圈格子会把缝算进面积里
+    # （实测同一张图：按列行 17.69%，逐线 24.12%）。
+    def _mk_line(pa, pb):
+        dx, dy = pb[0] - pa[0], pb[1] - pa[1]
+        a = math.degrees(math.atan2(dy, dx))
+        rho = -pa[0] * math.sin(math.radians(a)) + pa[1] * math.cos(math.radians(a))
+        return {"ang": round(a, 2), "rho": round(rho, 2),
+                "p0": [round(pa[0], 1), round(pa[1], 1)],
+                "p1": [round(pb[0], 1), round(pb[1], 1)]}
+
+    _la = [_mk_line(to_orig(u, yb[0] - 2.0), to_orig(u, yb[-1] + 2.0)) for u in xb]
+    _lb = [_mk_line(to_orig(xb[0] - 2.0, v), to_orig(xb[-1] + 2.0, v)) for v in yb]
+    lines_all = {"a": _la, "b": _lb}
+
     return {"ok": True, "warn": "", "model": True, "angle": ang,
+            "lines_all": lines_all,
             "cols": cols, "rows": rows, "k": float(view.len_out(k)),
             "pitch_x": float(view.len_out(per_x)), "pitch_y": float(view.len_out(per_y)),
             "box": [float(view.to_wire(x0, y0)[0]), float(view.to_wire(x0, y0)[1]),
@@ -4212,6 +4242,49 @@ def api_grid(req: GridReq):
                             "p0": q0, "p1": q1})
             return out
         lines = {"a": _mv(lines.get("a")), "b": _mv(lines.get("b"))}
+        # 边界线（前端标了 edge）吸附到框内最近的真缝：
+        # 用户画的框只是「大概贴着最外那刀」，直接用框边当边界会让最外一圈格子偏大、缝没扣干净。
+        for fam in ("a", "b"):
+            fam_lines = lines[fam]
+            if len(fam_lines) < 3:
+                continue
+            gaps = []
+            for i in range(1, len(fam_lines)):
+                L0, L1 = fam_lines[i - 1], fam_lines[i]
+                ang = math.radians(L0["ang"])
+                gaps.append(abs(-(L1["p0"][0] - L0["p0"][0]) * math.sin(ang)
+                                + (L1["p0"][1] - L0["p0"][1]) * math.cos(ang)))
+            pitch = float(np.median([g for g in gaps if g > 1] or [10.0]))
+            for k in (0, len(fam_lines) - 1):
+                L = fam_lines[k]
+                if not L.get("edge"):
+                    continue
+                ang = math.radians(L["ang"])
+                nx, ny = -math.sin(ang), math.cos(ang)
+                mx = (L["p0"][0] + L["p1"][0]) / 2.0
+                my = (L["p0"][1] + L["p1"][1]) / 2.0
+                if "_gw" not in dir():
+                    _gw = np.asarray(view.work["rgb"]).astype(np.float32)
+                    if _gw.ndim == 3:
+                        _gw = _gw.mean(2)
+                # 阈值必须按这张图的灰度来定：thr=0 时连续性恒为 1，会吸到"最亮"的地方而不是刀缝
+                _lo, _hi = float(np.percentile(_gw, 40)), float(np.percentile(_gw, 97))
+                _thr = _lo + 0.55 * max(1.0, _hi - _lo)
+                best = (0.0, 0.0)          # (得分, 偏移)
+                for off in np.arange(-0.40 * pitch, 0.40 * pitch + 0.01, 0.5):
+                    qx, qy = mx + nx * off, my + ny * off
+                    c_, m_ = lf._line_score(_gw, _thr, L["ang"], qx, qy,
+                                            min(_gw.shape) * 0.9)
+                    sc = c_ * m_
+                    if sc > best[0]:
+                        best = (sc, float(off))
+                if best[0] > 0 and abs(best[1]) > 0.4:
+                    off = best[1]
+                    L["p0"] = [L["p0"][0] + nx * off, L["p0"][1] + ny * off]
+                    L["p1"] = [L["p1"][0] + nx * off, L["p1"][1] + ny * off]
+                    L["rho"] = -L["p0"][0] * math.sin(ang) + L["p0"][1] * math.cos(ang)
+                    L.pop("edge", None)
+
         # 单根线的微调（前端拖哪根就传哪根的 dx/dy，视图 px）：沿这**根线自己**的法线挪
         if req.line_dx or req.line_dy:
             for fam, ds in (("a", req.line_dx), ("b", req.line_dy)):
