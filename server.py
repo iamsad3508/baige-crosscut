@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.52"      # 软件版本（发版时改）
+APP_VERSION = "2.53"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3642,7 +3642,13 @@ def _line_model(view, labels, roles, union, lines, k):
     pct = (100.0 * (1.0 - tot_k / max(tot_a, 1.0))) if has_cls else None
     gaps_a = [abs(A[i + 1]["rho"] - A[i]["rho"]) for i in range(len(A) - 1)]
     gaps_b = [abs(B[j + 1]["rho"] - B[j]["rho"]) for j in range(len(B) - 1)]
+    _wh = np.asarray(view.work["rgb"]).shape
+    _bx0, _by0 = view.to_wire(0, 0)
+    _bx1, _by1 = view.to_wire(_wh[1], _wh[0])
     return {"ok": True, "warn": "", "model": True, "lines": True,
+            # 前端「＋/－列行」要知道框在哪（没有 box 时 box[1] 会直接抛 undefined）
+            "box": [round(_bx0, 1), round(_by0, 1), round(_bx1, 1), round(_by1, 1)],
+            "cols": max(1, len(A) - 1), "rows": max(1, len(B) - 1),
             "angle": 0.0,
             "cols": max(1, len(A) - 1), "rows": max(1, len(B) - 1),
             "k": float(view.len_out(k)),
@@ -4212,7 +4218,17 @@ def api_grid(req: GridReq):
     if req.auto_lines or req.lines:
         lines = req.lines
         if (not lines) and req.auto_lines:
-            det = lf.detect_lines(sub, (0, 0, sub.shape[1], sub.shape[0]))
+            # 认线用「投影剖面 + 双边缘合并」那套（detect_lines5），并且**放大 2 倍**再认：
+            # 这批图一个格子只有 9~10 px，放大后自相关/剖面才站得住（实测全对数 1/11 → 3/11）。
+            _s2 = 2
+            _up = Image.fromarray(sub, "L").resize((sub.shape[1] * _s2, sub.shape[0] * _s2), Image.LANCZOS)
+            _up_a = np.asarray(_up).astype(np.float32)
+            det = lf.detect_lines5(_up_a, (0, 0, _up_a.shape[1], _up_a.shape[0]))
+            if det.get("ok"):
+                for k2 in ("a", "b"):
+                    for Ln in det[k2]:
+                        Ln["p0"] = [Ln["p0"][0] / _s2, Ln["p0"][1] / _s2]
+                        Ln["p1"] = [Ln["p1"][0] / _s2, Ln["p1"][1] / _s2]
             if not det.get("ok"):
                 return {"ok": False, "warn": "grid.nolines", "det": det,
                         "reason": L("没认出成对的两族刀缝（%s）——把框贴着整片百格画紧一点，"

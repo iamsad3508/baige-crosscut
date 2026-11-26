@@ -37,7 +37,7 @@ const S = {
   // 格网里「人改过」的标记：改了就不再让自动值覆盖（用户明确要求保留手改）
   gmColsManual: false, gmRowsManual: false, gmAngManual: false,
   gmCountsSig: '', gmAutoSig: '', samplesManual: false,
-  gmLine: false, gmLines: null,          // 逐线模式：线集合（每根线自己的角度/位置）
+  gmLine: false, gmLines: null, lastGm: null,   // 逐线模式：线集合（每根线自己的角度/位置）
 };
 
 /* 顶栏那些复选框：一律记住上次的选择。用户预期是"取消勾 → 刷新也还是取消"，
@@ -622,10 +622,22 @@ async function runModelGrid(extra) {
     }
     if (!g.ok) {
       S.gm = null;
+      // 逐线模式下自动认线失败：不要让人干瞪眼——立刻按「列/行 + 歪角」拆一套线出来，照样能算
+      if (S.gmLine && !S.gmLines && S.lastGm && S.lastGm.box) {
+        S.gm = S.lastGm;
+        S.gmLines = gmLinesFromLattice();
+        if (S.gmLines) {
+          setStatus(T('没认出刀缝，已按列/行拆好线：拖一下就能对准，或用＋/－列行手工增删',
+                      'Detection failed — lines seeded from your columns/rows; drag them into place or add/remove'));
+          scheduleGm(40);
+          return;
+        }
+        S.gm = null;
+      }
       const msg = g.reason || T('铺格失败：先在图上框住整片百格，再填列数/行数', 'Grid failed — frame the whole grid first');
       $('#gmInfo').textContent = msg; setStatus(msg); draw(); return;
     }
-    S.gm = g;
+    S.gm = g; S.lastGm = g;
     // ── 格数 / 歪角写回输入框（自动认出来的，人改过就不再覆盖）─────────────────
     let autoNote = '';
     if (g.roles_flipped && !S.samplesManual && S.samples.length >= 2) {
@@ -3815,7 +3827,9 @@ function gmLinesFromLattice() {
   }
   // 兜底：按「框 + 列行 + 歪角」等分拆线
   if (!g.cols || !g.rows) return null;
-  const [x0, y0, x1, y1] = g.box;
+  // 框以**选区**为准：逐线模式的响应里 box 是整张工作图，用它拆线会把线摊到整张图上
+  const _bb = (S.rois && S.rois[0] && S.rois[0].box) || g.box;
+  const [x0, y0, x1, y1] = _bb;
   const deg = (g.angle || 0) * Math.PI / 180, ca = Math.cos(deg), sa = Math.sin(deg);
   const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
   const rot = (du, dv) => [cx + du * ca - dv * sa, cy + du * sa + dv * ca];
@@ -3840,12 +3854,95 @@ function gmLinesFromLattice() {
 $('#chkLine').onchange = e => {
   S.gmLine = e.target.checked;
   S.gmLines = e.target.checked ? gmLinesFromLattice() : null;   // 先按现在的列/行拆；认缝另点按钮
+  const ops = $('#lineOps');
+  if (ops) ops.hidden = !e.target.checked;
   if (S.gmLine && S.exmode !== 'grid') { $('#selExmode').value = 'grid'; setExmode('grid'); }
   setStatus(S.gmLine ? T('逐线模式：不填列/行，直接认刀缝；拖线＝挪，Shift+拖＝转这根线',
                             'Per-line mode: no rows/cols — cuts are traced; drag = move, Shift+drag = rotate')
                      : T('已回到按列/行铺格', 'Back to columns/rows'));
   try { scheduleGm(60); } catch (_) {}
 };
+
+/* 逐线模式的「增删线」：不依赖认线准不准。
+   加线插在**最宽的那段**中间（间距不等时这才合理），删线删离框中心最近的那根。
+   这样即便自动认线少认/多认一根，用户点两下就能修好，不用退回去填行列。 */
+function lineNormalKey(L) {
+  const a = L.ang * Math.PI / 180;
+  const mx = (L.p0[0] + L.p1[0]) / 2, my = (L.p0[1] + L.p1[1]) / 2;
+  return -mx * Math.sin(a) + my * Math.cos(a);
+}
+/* 框的位置以「线本身的范围」为准：服务端回的 box 是整张工作图，
+   拿它来插线会把线插到图边上（实测点＋列直接抛 undefined）。 */
+function gmBoxFromLines() {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  if (!S.gmLines) return null;
+  for (const fam of ['a', 'b']) {
+    for (const L of S.gmLines[fam] || []) {
+      for (const q of [L.p0, L.p1]) {
+        x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]);
+        y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]);
+      }
+    }
+  }
+  return x1 > x0 && y1 > y0 ? [x0, y0, x1, y1] : null;
+}
+
+function lineInsert(fam) {
+  const arr = S.gmLines && S.gmLines[fam];
+  if (!arr || arr.length < 2) return;
+  const box = gmBoxFromLines(), axis = fam === 'a' ? 'x' : 'y';
+  if (!box) return;
+  const keyed = arr.map(L => ({ L, k: lineNormalKey(L) })).sort((u, v) => u.k - v.k);
+  let best = -1, gap = -1;
+  for (let i = 1; i < keyed.length; i++) {
+    const d = keyed[i].k - keyed[i - 1].k;
+    if (d > gap) { gap = d; best = i; }
+  }
+  if (best <= 0) return;
+  const A = keyed[best - 1].L, B = keyed[best].L;
+  const mid = { ang: (A.ang + B.ang) / 2 };
+  const t = (keyed[best - 1].k + keyed[best].k) / 2;
+  const mk = (p0, p1, ang, rho) => ({ ang, rho, p0, p1 });
+  const a = mid.ang * Math.PI / 180, nx = -Math.sin(a), ny = Math.cos(a);
+  if (axis === 'x') {
+    const x = (A.p0[0] + B.p0[0]) / 2;
+    const p0 = [x, box[1] - 30], p1 = [x, box[3] + 30];
+    const rho = -p0[0] * Math.sin(a) + p0[1] * Math.cos(a);
+    arr.push(mk(p0, p1, mid.ang, rho));
+  } else {
+    const y = (A.p0[1] + B.p0[1]) / 2;
+    const p0 = [box[0] - 30, y], p1 = [box[2] + 30, y];
+    const rho = -p0[0] * Math.sin(a) + p0[1] * Math.cos(a);
+    arr.push(mk(p0, p1, mid.ang, rho));
+  }
+  runModelGrid();
+}
+function lineDelete(fam) {
+  const arr = S.gmLines && S.gmLines[fam];
+  if (!arr || arr.length < 3) return;              // 至少留两根，否则围不出格子
+  const box = gmBoxFromLines();
+  if (!box) return;
+  const cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
+  let bi = 0, bd = Infinity;
+  arr.forEach((L, i) => {
+    const d = Math.hypot((L.p0[0] + L.p1[0]) / 2 - cx, (L.p0[1] + L.p1[1]) / 2 - cy);
+    if (d < bd) { bd = d; bi = i; }
+  });
+  arr.splice(bi, 1);
+  runModelGrid();
+}
+$('#btnLineAuto').onclick = async () => {
+  S.gmLines = null;                                // 清掉手上的线，让服务端自己认
+  setStatus(T('正在认线…', 'Detecting cuts…'));
+  await runModelGrid();
+  if (!S.gmLines) setStatus(T('这组线没认出来，用下面的「＋列/－列/＋行/－行」手工搭一套',
+                              'Detection failed — build the lines with +col/-col/+row/-row'));
+};
+$('#btnLineAddX').onclick = () => lineInsert('a');
+$('#btnLineDelX').onclick = () => lineDelete('a');
+$('#btnLineAddY').onclick = () => lineInsert('b');
+$('#btnLineDelY').onclick = () => lineDelete('b');
+
 $('#rngLine').oninput = e => setLine(e.target.value);
 $('#numLine').onchange = e => setLine(e.target.value);
 
