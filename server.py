@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.59"      # 软件版本（发版时改）
+APP_VERSION = "2.60"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4328,10 +4328,14 @@ def api_grid(req: GridReq):
                 else:
                     q0 = list(view.to_view(float(p0[0]), float(p0[1])))
                     q1 = list(view.to_view(float(p1[0]), float(p1[1])))
-                out.append({"ang": a,
-                            # 口径：ang 是方向角，法线 (−sin, cos)
-                            "rho": -q0[0] * math.sin(math.radians(a)) + q0[1] * math.cos(math.radians(a)),
-                            "p0": q0, "p1": q1})
+                # 坐标换算是**重建**字典，前端带来的标记必须一起带过来，否则 edge/added
+                # 在这里被悄悄丢掉 —— 表现为「点了对缝没反应」（实测 22 根线一根都没动）。
+                keep = {k: Ln[k] for k in ("edge", "added", "snap") if k in Ln}
+                d = {"ang": a,
+                     "rho": -q0[0] * math.sin(math.radians(a)) + q0[1] * math.cos(math.radians(a)),
+                     "p0": q0, "p1": q1}
+                d.update(keep)
+                out.append(d)
             return out
         lines = {"a": _mv(lines.get("a")), "b": _mv(lines.get("b"))}
         # 边界线（前端标了 edge）吸附到框内最近的真缝：
@@ -4347,8 +4351,8 @@ def api_grid(req: GridReq):
                 gaps.append(abs(-(L1["p0"][0] - L0["p0"][0]) * math.sin(ang)
                                 + (L1["p0"][1] - L0["p0"][1]) * math.cos(ang)))
             pitch = float(np.median([g for g in gaps if g > 1] or [10.0]))
-            for k in (0, len(fam_lines) - 1):
-                _Ln = fam_lines[k]
+            # 以前只吸首尾两根（那是给“框边”用的）；「对缝」要吸的是**所有**标了 edge 的线。
+            for k, _Ln in enumerate(fam_lines):
                 if not _Ln.get("edge"):
                     continue
                 ang = math.radians(_Ln["ang"])
