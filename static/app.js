@@ -508,7 +508,8 @@ function gmBody(extra) {
     auto_rows: !S.gmRowsManual && S.gmCountsSig !== gmRoiSig(),
     auto_angle: !S.gmAngManual,          // 框完就自己估歪角（只回建议，人改过就不再动）
     roles_auto: !S.samplesManual,
-    auto_lines: (S.gmLine && !S.gmLines) || false,
+    // 认线失败一次之后就不再赌认线，改走「按格距数格子」（否则每次都白发一轮请求）
+    auto_lines: (S.gmLine && !S.gmLines && !S.gmLatticeTry) || false,
     lines: (S.gmLine && S.gmLines) || null,        // 颜色是自动分的 → 允许服务端按格内面积纠正角色
     cols: +$('#gmCols').value || 0, rows: +$('#gmRows').value || 0,
     // 刀宽与「忽略细线宽度」合成一个数（S.line）：同一个物理量，两个框只会互相打架
@@ -685,11 +686,22 @@ async function runModelGrid(extra) {
   if (S.busy) { scheduleGm(200); return; }        // 分析还没跑完：排队，别丢
   // 选区动过（挪/缩放/转角度）而手上的线还是按旧框算的 → 作废重认。
   // 这是「调了框大小之后就认不准」的根源：旧线留在那儿，格子数和框对不上。
-  if (S.gmLine && S.gmLines && S.gmLinesSig && S.gmLinesSig !== gmRoiSig()) {
-    S.gmLines = null; S.gmLinesManual = false;
+  // 选区换过（取消重画 / 挪 / 缩放 / 转角）：线集合和手填的列/行**一起**作废。
+  // 只作废线集合是不够的——列/行还留着旧数，服务端就照旧数铺线，看起来就是“数量也对不上”。
+  const _rsig = gmRoiSig();
+  if (S.gmGridSig && S.gmGridSig !== _rsig) {
+    S.gmLinesManual = false;
+    if (S.gmLine) { S.gmLines = null; S.gmLinesSig = ''; }
+    S.gmColsManual = false; S.gmRowsManual = false; S.gmCountsSig = '';
+    S.gmLatticeTry = false;
   }
+  S.gmGridSig = _rsig;
+  // 逐线但手上没有线（刚换选区/刚勾选）：这一趟先让服务端按**新选区**算列/行，
+  // 拿到数之后自己铺线并对缝。以前直接 auto_lines，认不出就退回 10×10，线数自然对不上。
+  const needSeed = S.gmLine && !S.gmLines;
   setBusy(true);                            // 必须走 setBusy：直接改 S.busy 不会刷新「计算」按钮
-  setStatus(T('正在铺格…', 'Laying out the grid…'));
+  setStatus(T(needSeed ? '正在量这块选区的格数…' : '正在铺格…',
+              needSeed ? 'Measuring how many cells fit this region…' : 'Laying out the grid…'));
   const rsig0 = gmRoiSig();
   const wantC = !S.gmColsManual && S.gmCountsSig !== rsig0;
   const wantR = !S.gmRowsManual && S.gmCountsSig !== rsig0;
@@ -699,6 +711,8 @@ async function runModelGrid(extra) {
     if (!S.samples.length || (!S.samplesManual && S.gmAutoSig !== rsig0)) {
       if (await gmAutoSample(true)) S.gmAutoSig = rsig0;
     }
+    // needSeed 时优先让服务端认线（detect_lines5 在 8/9 这类图上才是对的；
+    // 纯格网那条“投影计数”会把 10×10 数成 5×4）。认不出时下面的兜底会按列/行拆一套。
     const g = await post('api/grid', gmBody(extra));
     // 选区在请求途中被删/移动过 → 这次结果作废（否则删完选区，格网又被旧响应贴回来）
     if (rsig0 !== gmRoiSig()) return;
@@ -718,6 +732,12 @@ async function runModelGrid(extra) {
     if (!g.ok) {
       S.gm = null;
       // 逐线模式下自动认线失败：不要让人干瞪眼——立刻按「列/行 + 歪角」拆一套线出来，照样能算
+      if (S.gmLine && !S.gmLines && !S.gmLatticeTry) {
+        S.gmLatticeTry = true;
+        setStatus(T('没认出刀缝，改按格距数格子…', 'Detection failed — counting cells from the pitch instead…'));
+        scheduleGm(30);
+        return;
+      }
       if (S.gmLine && !S.gmLines && ensureLines()) {
         S.gmLinesManual = false; S.gmLinesSig = gmRoiSig();
         setStatus(T('没认出刀缝，已按选区先搭一套线（10×10）：拖一下对准，或用＋/－列行手工增删',
@@ -729,6 +749,16 @@ async function runModelGrid(extra) {
       $('#gmInfo').textContent = msg; setStatus(msg); draw(); return;
     }
     S.gm = g; S.lastGm = g;
+    if (needSeed && g.cols >= 2 && g.rows >= 2) {
+      const L0 = gmLinesFromLattice({ cols: g.cols, rows: g.rows, angle: g.angle });
+      if (L0) {
+        S.gmLines = L0; S.gmLinesManual = false; S.gmLinesSig = gmRoiSig();
+        gmLinesSpanAll();
+        for (const fam of ['a', 'b']) for (const x of (S.gmLines[fam] || [])) x.edge = true;
+        scheduleGm(30);                       // 马上带线再算一遍（顺带各自对到最近的缝）
+        return;
+      }
+    }
     // 逐线模式：列/行输入框一律跟着**线集**走（线数−1），不让它留着上一套格网的数。
     // 用户看到「列 10 行 8」但实际是 7×9 条线，就会以为程序算错了——面板必须自洽。
     if (S.gmLine && g.lines_a) {
@@ -750,7 +780,8 @@ async function runModelGrid(extra) {
       const nA0 = g.lines_a.length - 1, nB0 = g.lines_b.length - 1;
       if (nA0 >= 1 && $('#gmCols')) $('#gmCols').value = nA0;
       if (nB0 >= 1 && $('#gmRows')) $('#gmRows').value = nB0;
-      S.gmColsManual = true; S.gmRowsManual = true;      // 别让自动格数再覆盖它
+      // 注意：**不能**把这里的值标成“手动”。它是线数派生的，标成手动后换选区也沿用旧数，
+      // 于是新选区永远只有旧的那几行几列（实测：换框后一直停在 5×4 线）。
       try { updateGmLines(); } catch (_) {}              // 立刻把这行刷成「线 N×M 条 → 格 K 个」
     }
     // ── 格数 / 歪角写回输入框（自动认出来的，人改过就不再覆盖）─────────────────
@@ -821,6 +852,7 @@ async function runModelGrid(extra) {
         a: _rebuild(S.gmLines && S.gmLines.a, g.lines_a),
         b: _rebuild(S.gmLines && S.gmLines.b, g.lines_b),
       };
+      for (const fam of ['a', 'b']) for (const L of S.gmLines[fam]) delete L.edge;   // 对过就别再对，免得越吸越偏
       gmLinesSpanAll();                                  // 端点按当前选区框铺好，把手才有地方站
       if (!S.gmLinesManual) S.gmLinesSig = gmRoiSig();   // 只有自动/拆出来的线才跟框绑定
     } else if (!S.gmLine) S.gmLines = null;
@@ -2981,6 +3013,10 @@ function clearAllRois() {
   if (!S.rois.length) return;
   S.rois = []; S.sel = -1;
   S.gm = null; S.gmDrag = null; S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] };   // 没选区了，格网不该还挂在那儿
+  // 取消选区 = 一切按框算的东西全作废：线集合、手填列/行、格数签名。
+  // 少清一样，重画的框就会沿用旧线数/旧列行（用户：“数量也对不上”）。
+  S.gmLines = null; S.gmLinesManual = false; S.gmLinesSig = '';
+  S.gmColsManual = false; S.gmRowsManual = false; S.gmCountsSig = ''; S.gmGridSig = ''; S.gmLatticeTry = false;
   if ($('#gmInfo')) $('#gmInfo').textContent = '';
   if ($('#gmTrace')) $('#gmTrace').textContent = '';
   dropOverlay();
@@ -3611,6 +3647,12 @@ async function saveRecord() {
         k_wire: S.line || 0, angle: S.gm.angle,   // 刀宽与「忽略细线宽度」已合并成一个数
         ox: (S.gmOff && S.gmOff.ox) || 0, oy: (S.gmOff && S.gmOff.oy) || 0,
         line_dx: S.gm.line_dx || [], line_dy: S.gm.line_dy || [],
+        // 逐线模式必须一起存：只存 cols/rows 的话，重开旧图按等分重铺，线永远对不上真缝
+        line_mode: !!S.gmLine,
+        lines: (S.gmLine && S.gmLines) ? {
+          a: S.gmLines.a.map(L => ({ ang: L.ang, rho: L.rho, p0: L.p0, p1: L.p1, added: !!L.added })),
+          b: S.gmLines.b.map(L => ({ ang: L.ang, rho: L.rho, p0: L.p0, p1: L.p1, added: !!L.added })),
+        } : null,
         snap: !!S.gmSnap, total_pct: (S.gm.total || {}).pct,
         total_kept: (S.gm.total || {}).kept, total_area: (S.gm.total || {}).area,
         cells: (S.gm.cells || []).map(c => ({ i: c.i, j: c.j, pct: c.pct, kept: c.kept })),
@@ -3688,6 +3730,16 @@ async function openRecord(rid) {
       S.gmOff = { ox: S.gmRec.ox || 0, oy: S.gmRec.oy || 0,
                   dx: (S.gmRec.line_dx || []).slice(), dy: (S.gmRec.line_dy || []).slice() };
       S.gmSnap = !!S.gmRec.snap;
+      // 逐线模式还原（v2.59）：旧记录里没有这两项就按普通格网处理
+      if ('line_mode' in S.gmRec) {
+        S.gmLine = !!S.gmRec.line_mode;
+        if ($('#chkLine')) $('#chkLine').checked = S.gmLine;
+        S.gmLines = (S.gmLine && S.gmRec.lines && S.gmRec.lines.a && S.gmRec.lines.b)
+          ? { a: S.gmRec.lines.a.slice(), b: S.gmRec.lines.b.slice() } : null;
+        S.gmLinesManual = !!S.gmLines;
+        S.gmLinesSig = gmRoiSig();
+        if (S.gmLines) gmLinesSpanAll();
+      }
       // 记录里存的列/行/歪角是当时的人工值：标成手改，别让自动认格数/自动定角把它覆盖掉
       S.gmColsManual = true; S.gmRowsManual = true; S.gmAngManual = true;
       updateGmLines();
@@ -4052,8 +4104,12 @@ function gmLinesFromLattice(opt) {
 
 $('#chkLine').onchange = e => {
   S.gmLine = e.target.checked;
-  S.gmLines = e.target.checked ? gmLinesFromLattice() : null;   // 先按现在的列/行拆；认缝另点按钮
-  if (S.gmLines) gmLinesSpanAll();
+  S.gmLines = e.target.checked ? gmLinesFromLattice() : null;   // 先按现在的列/行拆
+  if (S.gmLines) {
+    gmLinesSpanAll();
+    // 拆出来的是等分线，多半压不准：打上 edge 让这一轮就各自吸到最近的刀缝
+    for (const fam of ['a', 'b']) for (const L of (S.gmLines[fam] || [])) L.edge = true;
+  }
   S.gmLinesManual = false;
   S.gmLinesSig = S.gmLines ? gmRoiSig() : '';
   const ops = $('#lineOps');
@@ -4141,6 +4197,16 @@ function gmLinesSpanAll() {
   }
 }
 
+/* 对缝：给每根线打 edge 标记，服务端会把每根各自挪到附近最强的刀缝上。
+   这是「随便框一下」也能用的关键——线数由你（或拆线）定，位置交给缝。 */
+function lineSnapAll(silent) {
+  if (!ensureLines()) { if (!silent) setStatus(T('先在图上框一个选区', 'Frame a region first')); return; }
+  for (const fam of ['a', 'b']) for (const L of (S.gmLines[fam] || [])) L.edge = true;
+  S.gmLinesManual = true;
+  if (!silent) setStatus(T('把每根线吸到最近的刀缝…', 'Snapping lines to the nearest seams…'));
+  runModelGrid();
+}
+
 function lineInsert(fam) {
   if (!ensureLines()) { setStatus(T('先在图上框一个选区', 'Frame a region first')); return; }
   const arr = S.gmLines && S.gmLines[fam];
@@ -4214,6 +4280,7 @@ $('#btnLineAuto').onclick = async () => {
   if (!S.gmLines) setStatus(T('这组线没认出来，用下面的「＋列/－列/＋行/－行」手工搭一套',
                               'Detection failed — build the lines with +col/-col/+row/-row'));
 };
+if ($('#btnLineSnap')) $('#btnLineSnap').onclick = () => lineSnapAll(false);
 $('#btnLineAddX').onclick = () => lineInsert('a');
 $('#btnLineDelX').onclick = () => lineDelete('a');
 $('#btnLineAddY').onclick = () => lineInsert('b');
