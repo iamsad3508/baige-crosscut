@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.54"      # 软件版本（发版时改）
+APP_VERSION = "2.55"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4233,14 +4233,32 @@ def api_grid(req: GridReq):
             # 认线用「投影剖面 + 双边缘合并」那套（detect_lines5），并且**放大 2 倍**再认：
             # 这批图一个格子只有 9~10 px，放大后自相关/剖面才站得住（实测全对数 1/11 → 3/11）。
             _s2 = 2
-            _up = Image.fromarray(sub, "L").resize((sub.shape[1] * _s2, sub.shape[0] * _s2), Image.LANCZOS)
-            _up_a = np.asarray(_up).astype(np.float32)
-            det = lf.detect_lines5(_up_a, (0, 0, _up_a.shape[1], _up_a.shape[0]))
-            if det.get("ok"):
-                for k2 in ("a", "b"):
-                    for Ln in det[k2]:
-                        Ln["p0"] = [Ln["p0"][0] / _s2, Ln["p0"][1] / _s2]
-                        Ln["p1"] = [Ln["p1"][0] / _s2, Ln["p1"][1] / _s2]
+            # 框画大了（把格子外的背景/划痕也框进来）认线会直接失败，而"收紧一点"往往就成。
+            # 所以按 100% / 92% / 84% / 76% 由外往内试几档，取第一个认成功的；
+            # 这一步是为了让"手画的框不太准"不再等于"认不出来"。
+            det = None
+            _h0, _w0 = sub.shape[:2]
+            for _tight in (1.0, 0.92, 0.84, 0.76):
+                _mw = int(round(_w0 * (1.0 - _tight) / 2.0))
+                _mh = int(round(_h0 * (1.0 - _tight) / 2.0))
+                if _w0 - 2 * _mw < 40 or _h0 - 2 * _mh < 40:
+                    continue
+                _c = sub[_mh:_h0 - _mh, _mw:_w0 - _mw]
+                _up = Image.fromarray(_c, "L").resize((_c.shape[1] * _s2, _c.shape[0] * _s2), Image.LANCZOS)
+                _up_a = np.asarray(_up).astype(np.float32)
+                _d = lf.detect_lines5(_up_a, (0, 0, _up_a.shape[1], _up_a.shape[0]))
+                if _d.get("ok"):
+                    for k2 in ("a", "b"):                       # 换成「相对整框」的坐标
+                        for Ln in _d[k2]:
+                            Ln["p0"] = [Ln["p0"][0] / _s2 + _mw, Ln["p0"][1] / _s2 + _mh]
+                            Ln["p1"] = [Ln["p1"][0] / _s2 + _mw, Ln["p1"][1] / _s2 + _mh]
+                    _d["tight"] = _tight
+                    det = _d
+                    break
+                if det is None or _tight == 1.0:
+                    det = _d if det is None else det
+            _up = None
+            # 坐标上面已经在循环里换算回「整框」了，这里不能再除一次 _s2
             if not det.get("ok"):
                 return {"ok": False, "warn": "grid.nolines", "det": det,
                         "reason": L("没认出成对的两族刀缝（%s）——把框贴着整片百格画紧一点，"
@@ -4284,13 +4302,13 @@ def api_grid(req: GridReq):
                                 + (L1["p0"][1] - L0["p0"][1]) * math.cos(ang)))
             pitch = float(np.median([g for g in gaps if g > 1] or [10.0]))
             for k in (0, len(fam_lines) - 1):
-                L = fam_lines[k]
-                if not L.get("edge"):
+                _Ln = fam_lines[k]
+                if not _Ln.get("edge"):
                     continue
-                ang = math.radians(L["ang"])
+                ang = math.radians(_Ln["ang"])
                 nx, ny = -math.sin(ang), math.cos(ang)
-                mx = (L["p0"][0] + L["p1"][0]) / 2.0
-                my = (L["p0"][1] + L["p1"][1]) / 2.0
+                mx = (_Ln["p0"][0] + _Ln["p1"][0]) / 2.0
+                my = (_Ln["p0"][1] + _Ln["p1"][1]) / 2.0
                 if "_gw" not in dir():
                     _gw = np.asarray(view.work["rgb"]).astype(np.float32)
                     if _gw.ndim == 3:
@@ -4301,30 +4319,30 @@ def api_grid(req: GridReq):
                 best = (0.0, 0.0)          # (得分, 偏移)
                 for off in np.arange(-0.40 * pitch, 0.40 * pitch + 0.01, 0.5):
                     qx, qy = mx + nx * off, my + ny * off
-                    c_, m_ = lf._line_score(_gw, _thr, L["ang"], qx, qy,
+                    c_, m_ = lf._line_score(_gw, _thr, _Ln["ang"], qx, qy,
                                             min(_gw.shape) * 0.9)
                     sc = c_ * m_
                     if sc > best[0]:
                         best = (sc, float(off))
                 if best[0] > 0 and abs(best[1]) > 0.4:
                     off = best[1]
-                    L["p0"] = [L["p0"][0] + nx * off, L["p0"][1] + ny * off]
-                    L["p1"] = [L["p1"][0] + nx * off, L["p1"][1] + ny * off]
-                    L["rho"] = -L["p0"][0] * math.sin(ang) + L["p0"][1] * math.cos(ang)
-                    L.pop("edge", None)
+                    _Ln["p0"] = [_Ln["p0"][0] + nx * off, _Ln["p0"][1] + ny * off]
+                    _Ln["p1"] = [_Ln["p1"][0] + nx * off, _Ln["p1"][1] + ny * off]
+                    _Ln["rho"] = -_Ln["p0"][0] * math.sin(ang) + _Ln["p0"][1] * math.cos(ang)
+                    _Ln.pop("edge", None)
 
         # 单根线的微调（前端拖哪根就传哪根的 dx/dy，视图 px）：沿这**根线自己**的法线挪
         if req.line_dx or req.line_dy:
             for fam, ds in (("a", req.line_dx), ("b", req.line_dy)):
-                for i, L in enumerate(lines[fam]):
+                for i, _Ln in enumerate(lines[fam]):
                     if i >= len(ds) or not ds[i]:
                         continue
-                    a = math.radians(L["ang"])
+                    a = math.radians(_Ln["ang"])
                     nx, ny = -math.sin(a), math.cos(a)
                     d = float(view.len_in(ds[i]))
-                    L["p0"] = [L["p0"][0] + nx * d, L["p0"][1] + ny * d]
-                    L["p1"] = [L["p1"][0] + nx * d, L["p1"][1] + ny * d]
-                    L["rho"] = -L["p0"][0] * math.sin(a) + L["p0"][1] * math.cos(a)
+                    _Ln["p0"] = [_Ln["p0"][0] + nx * d, _Ln["p0"][1] + ny * d]
+                    _Ln["p1"] = [_Ln["p1"][0] + nx * d, _Ln["p1"][1] + ny * d]
+                    _Ln["rho"] = -_Ln["p0"][0] * math.sin(a) + _Ln["p0"][1] * math.cos(a)
         k = float(view.len_in(req.k_band or req.line_px or 8.0))
         out = _line_model(view, labels, roles, union, lines, k)
         if out.get("ok") and req.overlay:

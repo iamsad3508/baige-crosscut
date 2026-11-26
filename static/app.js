@@ -629,17 +629,12 @@ async function runModelGrid(extra) {
     if (!g.ok) {
       S.gm = null;
       // 逐线模式下自动认线失败：不要让人干瞪眼——立刻按「列/行 + 歪角」拆一套线出来，照样能算
-      if (S.gmLine && !S.gmLines && S.lastGm && S.lastGm.box) {
-        S.gm = S.lastGm;
-        S.gmLines = gmLinesFromLattice();
-        if (S.gmLines) {
-          S.gmLinesManual = false; S.gmLinesSig = gmRoiSig();
-          setStatus(T('没认出刀缝，已按列/行拆好线：拖一下就能对准，或用＋/－列行手工增删',
-                      'Detection failed — lines seeded from your columns/rows; drag them into place or add/remove'));
-          scheduleGm(40);
-          return;
-        }
-        S.gm = null;
+      if (S.gmLine && !S.gmLines && ensureLines()) {
+        S.gmLinesManual = false; S.gmLinesSig = gmRoiSig();
+        setStatus(T('没认出刀缝，已按选区先搭一套线（10×10）：拖一下对准，或用＋/－列行手工增删',
+                    'Detection failed — seeded 10×10 lines from your region; drag into place or add/remove'));
+        scheduleGm(40);
+        return;
       }
       const msg = g.reason || T('铺格失败：先在图上框住整片百格，再填列数/行数', 'Grid failed — frame the whole grid first');
       $('#gmInfo').textContent = msg; setStatus(msg); draw(); return;
@@ -3781,8 +3776,9 @@ function setLine(v, keepSuggest) {
 }
 /* 把当前这套「列×行 + 歪角」拆成一根根独立的线：每根线一个 (角度, 位置)。
    逐线模式默认走这条（不依赖认缝），认缝准不准都不影响，用户拖一下就能修。 */
-function gmLinesFromLattice() {
-  const g = S.gm;
+function gmLinesFromLattice(opt) {
+  // opt 用来在「还没有格网结果」时也能搭一套线（copy 一份，别改 S.gm）
+  const g = opt ? Object.assign({ lines_all: null, bands: null }, S.gm || {}, opt) : S.gm;
   if (!g || !g.box) return null;
   // 优先用服务端回传的**完整线集**（含最外两刀）——比从 bands 推更准，也不会少掉边界
   if (g.lines_all && g.lines_all.a && g.lines_all.a.length >= 2) {
@@ -3889,6 +3885,22 @@ function lineNormalKey(L) {
   const mx = (L.p0[0] + L.p1[0]) / 2, my = (L.p0[1] + L.p1[1]) / 2;
   return -mx * Math.sin(a) + my * Math.cos(a);
 }
+/* 没有线的时候先搭一套：＋/－ 按钮、拖线都得有东西可操作。
+   以前认线失败 → S.gmLines 是 null → 点＋列直接 return，看着就是“按钮没反应”。 */
+function ensureLines(cols, rows) {
+  if (S.gmLines && S.gmLines.a && S.gmLines.a.length >= 2) return true;
+  const bb = (S.rois && S.rois[0] && S.rois[0].box)
+          || (S.lastGm && S.lastGm.box) || (S.gm && S.gm.box);
+  if (!bb) return false;
+  const nc = cols || (S.gm && S.gm.cols) || 10;
+  const nr = rows || (S.gm && S.gm.rows) || 10;
+  const ang = (S.gm && typeof S.gm.angle === 'number') ? S.gm.angle : (+$('#gmAng').value || 0);
+  const L = gmLinesFromLattice({ box: bb, cols: nc, rows: nr, angle: ang });
+  if (!L) return false;
+  S.gmLines = L; S.gmLinesManual = true; S.gmLinesSig = gmRoiSig();
+  return true;
+}
+
 /* 框的位置以「线本身的范围」为准：服务端回的 box 是整张工作图，
    拿它来插线会把线插到图边上（实测点＋列直接抛 undefined）。 */
 function gmBoxFromLines() {
@@ -3906,6 +3918,7 @@ function gmBoxFromLines() {
 }
 
 function lineInsert(fam) {
+  if (!ensureLines()) { setStatus(T('先在图上框一个选区', 'Frame a region first')); return; }
   const arr = S.gmLines && S.gmLines[fam];
   if (!arr || arr.length < 2) return;
   S.gmLinesManual = true;
@@ -3937,6 +3950,7 @@ function lineInsert(fam) {
   runModelGrid();
 }
 function lineDelete(fam) {
+  if (!ensureLines()) { setStatus(T('先在图上框一个选区', 'Frame a region first')); return; }
   const arr = S.gmLines && S.gmLines[fam];
   if (!arr || arr.length < 3) return;              // 至少留两根，否则围不出格子
   S.gmLinesManual = true;
