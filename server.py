@@ -29,7 +29,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from typing import Optional
 from starlette.concurrency import run_in_threadpool
 
@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.55"      # 软件版本（发版时改）
+APP_VERSION = "2.56"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3415,6 +3415,29 @@ def _report_pdf(D):
     return bytes(pdf.output())
 
 
+def _sanitize_json(o):
+    """把请求里的 NaN / inf / 空值清掉，别让它变成 422。
+
+    前端一个输入框被清空（`+''` 得 0 没事，但 `parseFloat('')` 是 NaN），NaN 经 JSON.stringify
+    变成 null，pydantic 就回 "Input should be a valid number"，界面上只看到这句，什么都不出——
+    用户那边就是「按钮全都没用」。防线放服务端，因为这种脏值永远会再从别的地方冒出来。
+    """
+    if isinstance(o, dict):
+        out = {}
+        for k, v in o.items():
+            if v is None and k not in ("lines",):
+                continue                     # None = 没给 → 用默认值
+            out[k] = _sanitize_json(v)
+        return out
+    if isinstance(o, list):
+        return [_sanitize_json(v) for v in o]
+    if isinstance(o, bool):
+        return o
+    if isinstance(o, float):
+        return o if math.isfinite(o) else 0.0
+    return o
+
+
 class GridReq(AnalyzeReq):
     inset: float = 0.0           # 格子内缩（px，分析图口径）
     line_xs: list[float] = []    # 手动给定线位（回放/调试用，坐标为分析图口径）
@@ -3439,6 +3462,11 @@ class GridReq(AnalyzeReq):
     # ---- 逐线模式（v2.52）：不要行列数，直接给两组线，每根线自己的角度和位置 ----
     lines: dict | None = None    # {"a":[{"ang","rho","p0","p1"}...], "b":[...]}（wire px）
     auto_lines: bool = False     # 让服务端自己认线（认出来的线集合直接当格网）
+
+    @model_validator(mode="before")
+    @classmethod
+    def _clean(cls, data):
+        return _sanitize_json(data)
 
 
 def _model_geom(view, bbox, req):
@@ -3574,7 +3602,7 @@ def _wire_line(view, L):
             "p1": [round(p1[0], 1), round(p1[1], 1)]}
 
 
-def _line_model(view, labels, roles, union, lines, k):
+def _line_model(view, labels, roles, union, lines, k, allow_flip=False):
     """逐线模式的统计：两族线求交成四边形格子，逐格数「格内剩余漆膜」。
 
     与 _grid_model 的区别：这里没有 cols/rows/公共角度，格子是任意四边形
@@ -3611,6 +3639,18 @@ def _line_model(view, labels, roles, union, lines, k):
     for q in bands:
         bd.polygon([tuple(p) for p in q], fill=255)
     bandm = np.asarray(bm) > 127
+
+    # 角色复核（与 _grid_model 同一条判据）：刀缝露白面积大时「面积大=漆膜」会站错边。
+    # 基材集中在刀缝/崩边、漆膜盖住格子内部 → 在「扣掉刀带后的格子内部」再数一次。
+    # 逐线模式原来把 roles_flipped 写死 False，于是自动分色一旦反了，pct 直接变成 99.8%（实测 8.jpg）。
+    roles_flipped = False
+    if has_cls and allow_flip:
+        _inner = union & ~bandm
+        _nc = int((coat & _inner).sum())
+        _ns = int((sub & _inner).sum())
+        if _ns > 1.5 * max(1, _nc) and _ns >= 0.55 * max(1, _nc + _ns):
+            coat, sub = sub, coat
+            roles_flipped = True
 
     sc = view.len_out(1.0)
     out_cells, tot_a, tot_k = [], 0.0, 0.0
@@ -3681,7 +3721,9 @@ def _line_model(view, labels, roles, union, lines, k):
             "line_dx": [], "line_dy": [],
             "trace": {"ok_x": True, "ok_y": True, "n_x": len(A), "n_y": len(B),
                       "used_x": True, "used_y": True, "per_line": True},
-            "roles_flipped": False, "cell_coat_frac": None,
+            "roles_flipped": roles_flipped, "cell_coat_frac": (
+                round(float((coat & (union & ~bandm)).sum()) / max(1.0, float((union & ~bandm).sum())), 4)
+                if has_cls else None),
             "need_samples": (not has_cls),
             "total": {"pct": pct,
                       "area": round(tot_a * sc * sc, 1),
@@ -4344,7 +4386,7 @@ def api_grid(req: GridReq):
                     _Ln["p1"] = [_Ln["p1"][0] + nx * d, _Ln["p1"][1] + ny * d]
                     _Ln["rho"] = -_Ln["p0"][0] * math.sin(a) + _Ln["p0"][1] * math.cos(a)
         k = float(view.len_in(req.k_band or req.line_px or 8.0))
-        out = _line_model(view, labels, roles, union, lines, k)
+        out = _line_model(view, labels, roles, union, lines, k, allow_flip=bool(req.roles_auto))
         if out.get("ok") and req.overlay:
             try:
                 side = _res_to_side(req.res, sess.full_img())

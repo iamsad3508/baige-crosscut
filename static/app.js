@@ -56,7 +56,19 @@ function post(path, body, method, signal) {
   if (signal) opt.signal = signal;
   return fetch(path, opt).then(async r => {
     if (r.status === 404) throw new Error(T('图片已过期（分析缓存被换出），请重新「打开图片」上传一次', 'The image expired (analysis cache evicted) — upload it again with “Open image”'));
-    if (!r.ok) throw new Error((await r.text()).slice(0, 200) || ('HTTP ' + r.status));
+    if (!r.ok) {
+      // 422（pydantic）的 detail 是数组，直接显示原文用户只看到 "Input should be a valid number"，
+      // 看不出是哪个输入框的锅 —— 把字段名提出来
+      const txt = await r.text();
+      let msg = '';
+      try {
+        const j = JSON.parse(txt);
+        if (Array.isArray(j.detail)) {
+          msg = j.detail.map(d => ((d.loc || []).slice(1).join('.') || 'body') + ': ' + d.msg).join(' / ');
+        } else if (typeof j.detail === 'string') msg = j.detail;
+      } catch (_) {}
+      throw new Error(msg || txt.slice(0, 200) || ('HTTP ' + r.status));
+    }
     return r.json();
   });
 }
@@ -415,8 +427,26 @@ function gmHitAt(ex, ey) {
   return null;
 }
 
+/* 数字框被清空时 parseFloat('') = NaN，NaN 经 JSON 变成 null，后端直接 422，
+   界面上就只剩一句 "input should be a valid number"，所有按钮跟着失效。 */
+function sanNums(o) {
+  // 对象里的 NaN/Infinity 直接**删掉这个键**（= 没给，用服务端默认值），别替换成 0：
+  // purity=0 与「没给」是两回事，替换成 0 会让未分类像素全算进去，数直接翻倍。
+  if (Array.isArray(o)) return o.map(v => (typeof v === 'number' && !isFinite(v)) ? 0 : sanNums(v));
+  if (o && typeof o === 'object') {
+    const out = {};
+    for (const k in o) {
+      const v = o[k];
+      if (typeof v === 'number' && !isFinite(v)) continue;
+      out[k] = sanNums(v);
+    }
+    return out;
+  }
+  return o;
+}
+
 function gmBody(extra) {
-  return Object.assign({
+  return sanNums(Object.assign({
     // 格网一律用 full（= 画布这张 wire 图）算：预览分辨率下裁出来的内容与画布上的框对不上，
     // 认缝会跑空（实测同一张图 full 认 11 条、prev 只认 1 条）
     id: S.id, res: 'full', rois: S.rois.map(r => ({ box: r.box, ang: r.ang })),
@@ -437,7 +467,7 @@ function gmBody(extra) {
     ox: S.gmOff.ox, oy: S.gmOff.oy,
     line_dx: S.gmOff.dx.slice(), line_dy: S.gmOff.dy.slice(),
     overlay: !!S.showOverlay,
-  }, extra || {});
+  }, extra || {}));
 }
 
 /* 选区的“位置签名”：框挪了才重新认格数/重新分色，参数一动就重来只会让数字跳 */
@@ -702,6 +732,18 @@ async function runModelGrid(extra) {
     if (S.gmAuto) g.auto_samples = true;
     S.gmPitch = $('#gmPitch') ? (+$('#gmPitch').value || 0) : 0;   // 格距( mm )输入已撤，面积一律 px²
     $('#gmInfo').textContent = gmSummary(g) + (autoNote ? '　·　' + autoNote : '');
+    // 逐线模式：把「认到几条线 / 几格 / 丢了几格 / 实际刀宽」固定写出来。
+    // 用户原话：「就没见过哪里有丢几格认出几条线这几个字」——只在状态栏说一遍是不够的，会被下一条消息盖掉。
+    if (S.gmLine && g.lines_a) {
+      const nA = g.lines_a.length, nB = g.lines_b.length;
+      const nC = (g.cells || []).length;
+      const drop = g.cells_dropped ? T(' · 丢 ' + g.cells_dropped + ' 格', ' · ' + g.cells_dropped + ' dropped') : '';
+      const kw = g.k_used ? T(' · 刀宽 ' + g.k_used, ' · blade ' + g.k_used) : '';
+      if ($('#gmTrace')) {
+        $('#gmTrace').textContent = T(`线 ${nA}×${nB} 条 · 格 ${nC} 个${drop}${kw}`,
+                                      `${nA}×${nB} lines · ${nC} cells${drop}${kw}`);
+      }
+    }
     if (S.exmode === 'grid') { try { setGridCard(g); } catch (_) {} }
     // 用 shift_*（最终位置比等分挪了多少）提示；line_* 现在只回显用户自己的拖拽量
     const snapD = [].concat(g.shift_dx || g.line_dx || [], g.shift_dy || g.line_dy || []).map(Math.abs);
