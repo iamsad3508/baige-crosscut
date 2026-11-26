@@ -375,28 +375,8 @@ function drawModelGrid() {
     }
   }
 
-  const b = g.box, a0 = toScreen(b[0] + gx, b[1] + gy);
-  const noSmp = g.total.pct == null;
-  const main = noSmp
-    ? T('还没吸色：点一下漆膜、再点一下露底', 'No samples yet: click coating, then bare')
-    : T('框选区脱落 ', 'region removal ') + fmt(g.total.pct, 1) + '%';
-  const sub = (noSmp ? T('格子已按你的列/行铺好', 'Grid laid out from your columns/rows')
-    : gmAreaText(g.total.kept) + T(' / 合计 ', ' of ') + gmAreaText(g.total.area))
-    + ' · ' + g.cols + '×' + g.rows + ' · ' + T('刀宽 ', 'blade ') + Math.round(g.k) + 'px';
-  ctx.font = '800 20px system-ui, sans-serif';
-  const w1 = ctx.measureText(main).width;
-  ctx.font = '600 12px system-ui, sans-serif';
-  const w2 = ctx.measureText(sub).width;
-  const bw2 = Math.max(w1, w2) + 18;
-  ctx.fillStyle = 'rgba(8,10,16,.88)';
-  ctx.fillRect(a0.x, a0.y - 52, bw2, 48);
-  ctx.fillStyle = noSmp ? '#ffd88a' : gridColor(g.total.pct) + '1)';
-  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-  ctx.font = '800 20px system-ui, sans-serif';
-  ctx.fillText(main, a0.x + 9, a0.y - 50);
-  ctx.font = '600 12px system-ui, sans-serif';
-  ctx.fillStyle = 'rgba(225,235,250,.85)';
-  ctx.fillText(sub, a0.x + 9, a0.y - 25);
+  // 角上的数字不在这儿画：跟别的判法一样，统一由 drawRois 的 R1 小标签出（同一字号、同一内容）。
+  // 这里以前画了个 20px 的深色大块，用户看着比常规标签大一倍。
   ctx.restore();
 }
 
@@ -996,6 +976,11 @@ function drawRois() {
     if (S.rows && S.rows.length === S.rois.length) {
       t += '  ' + fmt(S.rows[i].pct, 1) + '%  ' + S.rows[i].astm;
       if (Math.abs(r.ang) > 0.5) t += '  ' + (r.ang > 0 ? '+' : '') + Math.round(r.ang) + '°';
+    } else if (S.exmode === 'grid' && S.gm && S.gm.total && S.gm.total.pct != null
+               && S.rois.length === 1 && S.gm.box) {
+      // 格网判法不跑像素分析，S.rows 是空的 → 用格网的合计填这一行（只有一个选区时才对得上）
+      t += '  ' + fmt(S.gm.total.pct, 1) + '%  ' + (S.gm.grade || '');
+      if (Math.abs(S.gm.angle || 0) > 0.5) t += '  ' + (S.gm.angle > 0 ? '+' : '') + Math.round(S.gm.angle) + '°';
     }
     texts.push(t);
   });
