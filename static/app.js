@@ -38,6 +38,7 @@ const S = {
   gmColsManual: false, gmRowsManual: false, gmAngManual: false,
   gmCountsSig: '', gmAutoSig: '', samplesManual: false,
   gmLine: false, gmLines: null, lastGm: null,   // 逐线模式：线集合（每根线自己的角度/位置）
+  gmLinesSig: '', gmLinesManual: false,         // 线集合是按哪个选区算的 / 是不是人手工改过的
 };
 
 /* 顶栏那些复选框：一律记住上次的选择。用户预期是"取消勾 → 刷新也还是取消"，
@@ -593,6 +594,11 @@ async function runModelGrid(extra) {
   if (!S.id) { setStatus(T('先打开一张图', 'Open an image first')); return; }
   if (!S.rois.length) { setStatus(T('先在图上拖一个选区，把整片百格框住', 'Draw a region around the grid first')); return; }
   if (S.busy) { scheduleGm(200); return; }        // 分析还没跑完：排队，别丢
+  // 选区动过（挪/缩放/转角度）而手上的线还是按旧框算的 → 作废重认。
+  // 这是「调了框大小之后就认不准」的根源：旧线留在那儿，格子数和框对不上。
+  if (S.gmLine && S.gmLines && S.gmLinesSig && S.gmLinesSig !== gmRoiSig()) {
+    S.gmLines = null; S.gmLinesManual = false;
+  }
   setBusy(true);                            // 必须走 setBusy：直接改 S.busy 不会刷新「计算」按钮
   setStatus(T('正在铺格…', 'Laying out the grid…'));
   const rsig0 = gmRoiSig();
@@ -627,6 +633,7 @@ async function runModelGrid(extra) {
         S.gm = S.lastGm;
         S.gmLines = gmLinesFromLattice();
         if (S.gmLines) {
+          S.gmLinesManual = false; S.gmLinesSig = gmRoiSig();
           setStatus(T('没认出刀缝，已按列/行拆好线：拖一下就能对准，或用＋/－列行手工增删',
                       'Detection failed — lines seeded from your columns/rows; drag them into place or add/remove'));
           scheduleGm(40);
@@ -685,8 +692,16 @@ async function runModelGrid(extra) {
     // 服务端回传的是「相对理想等分的总偏移」，吸附过之后必须同步回来，否则下次拖线会叠错
     if (g.line_dx) S.gmOff.dx = g.line_dx.slice();
     if (g.line_dy) S.gmOff.dy = g.line_dy.slice();
-    if (g.lines_a && S.gmLine) S.gmLines = { a: g.lines_a, b: g.lines_b };
-    else if (!S.gmLine) S.gmLines = null;
+    if (g.lines_a && S.gmLine) {
+      S.gmLines = { a: g.lines_a, b: g.lines_b };
+      if (!S.gmLinesManual) S.gmLinesSig = gmRoiSig();   // 只有自动/拆出来的线才跟框绑定
+    } else if (!S.gmLine) S.gmLines = null;
+    // 有线被丢掉（两线太近、或线跑到选区外）要说出来，不然只看到格子数少、不知道为什么
+    if (S.gmLine && g.cells_dropped > 0) {
+      const tail = T('（有 ' + g.cells_dropped + ' 格被丢掉：线跑到选区外，或两根线贴太近）',
+                     ' (' + g.cells_dropped + ' cells dropped: lines outside the region or too close together)');
+      $('#gmInfo').textContent = ($('#gmInfo').textContent || '') + tail;
+    }
     S.gmSnap = !!(extra && extra.snap);          // 记录里存“这次是不是对过线”，重开时照原样复原
     if (g.overlay_url) loadOverlay(g.overlay_url);
     if (S.gmAuto) g.auto_samples = true;
@@ -1194,6 +1209,7 @@ cv.addEventListener('pointerdown', e => {
         ? { kind: 'gmmove', p0x: pi.x, p0y: pi.y }
         : { kind: 'gmline', axis: gh.axis, idx: gh.idx, n: gh.n, p0x: pi.x, p0y: pi.y, off: 0,
             rot: !!(e && e.shiftKey) };      // 逐线模式：Shift+拖 = 转这一根线
+      if (S.gmLine) S.gmLinesManual = true;         // 拖过的线是人摆的，别再被自动认线覆盖
       cv.style.cursor = 'move';
       return;
     }
@@ -3854,6 +3870,8 @@ function gmLinesFromLattice() {
 $('#chkLine').onchange = e => {
   S.gmLine = e.target.checked;
   S.gmLines = e.target.checked ? gmLinesFromLattice() : null;   // 先按现在的列/行拆；认缝另点按钮
+  S.gmLinesManual = false;
+  S.gmLinesSig = S.gmLines ? gmRoiSig() : '';
   const ops = $('#lineOps');
   if (ops) ops.hidden = !e.target.checked;
   if (S.gmLine && S.exmode !== 'grid') { $('#selExmode').value = 'grid'; setExmode('grid'); }
@@ -3890,6 +3908,7 @@ function gmBoxFromLines() {
 function lineInsert(fam) {
   const arr = S.gmLines && S.gmLines[fam];
   if (!arr || arr.length < 2) return;
+  S.gmLinesManual = true;
   const box = gmBoxFromLines(), axis = fam === 'a' ? 'x' : 'y';
   if (!box) return;
   const keyed = arr.map(L => ({ L, k: lineNormalKey(L) })).sort((u, v) => u.k - v.k);
@@ -3920,6 +3939,7 @@ function lineInsert(fam) {
 function lineDelete(fam) {
   const arr = S.gmLines && S.gmLines[fam];
   if (!arr || arr.length < 3) return;              // 至少留两根，否则围不出格子
+  S.gmLinesManual = true;
   const box = gmBoxFromLines();
   if (!box) return;
   const cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
@@ -3932,7 +3952,9 @@ function lineDelete(fam) {
   runModelGrid();
 }
 $('#btnLineAuto').onclick = async () => {
-  S.gmLines = null;                                // 清掉手上的线，让服务端自己认
+  // 认线要连歪角一起重估：存下来的旧歪角会让拆线整片转错，认出来自然不对
+  S.gmAngManual = false;
+  S.gmLines = null; S.gmLinesManual = false; S.gmLinesSig = '';   // 清掉手上的线，让服务端自己认
   setStatus(T('正在认线…', 'Detecting cuts…'));
   await runModelGrid();
   if (!S.gmLines) setStatus(T('这组线没认出来，用下面的「＋列/－列/＋行/－行」手工搭一套',

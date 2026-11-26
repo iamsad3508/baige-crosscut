@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.53"      # 软件版本（发版时改）
+APP_VERSION = "2.54"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3597,6 +3597,13 @@ def _line_model(view, labels, roles, union, lines, k):
                 "reason": L("这两组线没围成格子：A %d 根 / B %d 根，角度 %s°——"
                             "可能有两根几乎平行，或有一根落在选区外" % (len(A), len(B), angs[:8]),
                             "These lines do not form cells: A=%d, B=%d, angles %s" % (len(A), len(B), angs[:8]))}
+    # 刀缝带宽度不能大过格距的一半：小格子（这批图一格只有 10 px、刀宽 6 px）按原 k 扣，
+    # 整格会被扣光 → 格子面积算成 0 被丢掉（实测 9a 认对 11×11 却丢 55 格）。
+    _gaps = [abs(A[i + 1]["rho"] - A[i]["rho"]) for i in range(len(A) - 1)]
+    _gaps += [abs(B[j + 1]["rho"] - B[j]["rho"]) for j in range(len(B) - 1)]
+    _pitch = float(np.median([g for g in _gaps if g > 1e-6] or [k * 3]))
+    k_eff = float(min(k, 0.45 * _pitch))
+    k = max(1.0, k_eff)
     # 刀缝带：所有线都扣（边界线也扣，但格内本来就不含框外，不会影响结果）
     bands = [lf.band_quad(L, k, (0, 0, W, H)) for L in (A + B)]
     bm = Image.new("L", (W, H), 0)
@@ -3666,6 +3673,11 @@ def _line_model(view, labels, roles, union, lines, k):
                                  round(view.to_wire(p[0], p[1])[1], 1)] for p in bands[i]]}
                       for i, L in enumerate(A + B)],
             "cells": out_cells,
+            # 期望格子数 vs 实际：差出来的那些是被「面积太小 / 落在选区外」丢掉的，
+            # 前端要照着提示，否则用户只看到格子数少、不知道是线的问题
+            "k_used": round(float(view.len_out(k)), 2),
+            "cells_expect": max(0, (len(A) - 1) * (len(B) - 1)),
+            "cells_dropped": max(0, (len(A) - 1) * (len(B) - 1) - len(out_cells)),
             "line_dx": [], "line_dy": [],
             "trace": {"ok_x": True, "ok_y": True, "n_x": len(A), "n_y": len(B),
                       "used_x": True, "used_y": True, "per_line": True},

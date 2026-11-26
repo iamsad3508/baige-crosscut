@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>百格分析 — ASTM D3359 / ISO 2409（用 DeepSeek API 开发）</title>
-<link rel="stylesheet" href="style.css?v=276">
+<link rel="stylesheet" href="style.css?v=279">
 </head>
 <body>
 <div class="topbar">
@@ -275,6 +275,8 @@
             <button id="btnLineDelX" title="删掉离框中心最近的那根竖线">－列</button>
             <button id="btnLineAddY" title="在最宽的那一行中间插一根横线">＋行</button>
             <button id="btnLineDelY" title="删掉离框中心最近的那根横线">－行</button>
+            <span class="muted" style="font-size:10px;line-height:1.2;max-width:190px"
+                  data-i18n="gm.linehint">框要把最外两条刀缝也包进来，否则会少数一列/一行</span>
           </span>
           <button id="btnGmReset" data-i18n="gm.reset" title="把拖过的线位与整体偏移归零">线位归零</button>
         </div>
@@ -345,7 +347,7 @@
     </div>
   </aside>
 </main>
-<script src="i18n.js?v=276"></script>
-<script src="app.js?v=276"></script>
+<script src="i18n.js?v=279"></script>
+<script src="app.js?v=279"></script>
 </body>
 </html>
