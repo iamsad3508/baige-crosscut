@@ -64,7 +64,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.49"      # 软件版本（发版时改）
+APP_VERSION = "2.50"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3936,8 +3936,50 @@ def api_autosample(req: AutoSampleReq):
                 v = cc.rgb_to_lab(np.array(c, np.float32))
                 return float(np.hypot(float(v[1]), float(v[2])))
 
-            coat_rgb, sub_rgb = (bright, dark) if n_b >= n_d else (dark, bright)
-            n_coat = max(n_b, n_d)
+            # 「谁盖住面积」不如「谁成块、谁成网」：漆膜被刀缝切成一个个格子（连通块很多、
+            # 单块占比小），基材是连通的一整张线网（块很少、最大块几乎占满）。
+            # 光靠面积会在两种常见情况下判反：刀缝很宽（露白过半）、掉块成片（基材占多数）。
+            def _topo(mask):
+                tot = float(mask.sum())
+                if tot < 200:
+                    return 0, 1.0
+                step = max(1, int(round(max(mask.shape) / 320.0)))
+                sm = mask[::step, ::step]
+                lab, _runs, stats = cc._components(sm)
+                areas = sorted((v[0] for v in stats.values()), reverse=True)
+                if not areas:
+                    return 0, 1.0
+                n = sum(1 for a in areas if a >= 0.004 * float(sm.sum()))
+                return n, (areas[0] / max(1.0, float(sum(areas))))
+
+            # 腐蚀：细线先没、格子还在（项目只有 numpy + PIL，不引 scipy/opencv）
+            def _survive(mask, rad):
+                k = 2 * int(rad) + 1
+                im = Image.fromarray((mask * 255).astype(np.uint8)).filter(ImageFilter.MinFilter(k))
+                return float((np.asarray(im) > 127).sum()) / max(1.0, float(mask.sum()))
+
+            # d 是「像素列表」上的布尔（px = rgb[m]），拓扑要二维图：按同样的 C 序填回家
+            d2 = np.zeros(m.shape, bool)
+            d2[m] = d
+            s2 = m & ~d2
+            nb, bigb = _topo(d2)
+            ndk, bigd = _topo(s2)
+            thick = "area"
+            # 连通块数量差 3 倍以上 → 多的那簇是漆膜（格子被刀缝切开，块数≈格数）
+            if max(nb, ndk) >= 3 * max(1, min(nb, ndk)) and max(nb, ndk) >= 4:
+                coat_is_bright = nb > ndk
+                thick = "cells"
+            else:
+                rad = max(2, int(round(0.02 * min(m.shape))))
+                s_b, s_d = _survive(d2, rad), _survive(s2, rad)
+                if max(s_b, s_d) > 0 and max(s_b, s_d) >= 1.6 * max(1e-6, min(s_b, s_d)):
+                    coat_is_bright = s_b > s_d
+                    thick = "shape"
+                else:
+                    coat_is_bright = n_b >= n_d      # 都分不出来 → 退回面积（多数情况是漆膜）
+
+            coat_rgb, sub_rgb = (bright, dark) if coat_is_bright else (dark, bright)
+            n_coat = n_b if coat_is_bright else n_d
             if _chroma(coat_rgb) < 8.0:
                 other, n_other = (dark, n_d) if n_coat == n_b else (bright, n_b)
                 if _chroma(other) >= 12.0 and n_other >= 0.15 * total:
@@ -3954,7 +3996,8 @@ def api_autosample(req: AutoSampleReq):
                          "pick may be wrong — click the intact coating, then the bare substrate" % (100 * frac))
             return {"ok": True, "samples": samples, "span": sp, "auto_tol": _auto_tol_of(sp),
                     "ratio_bright": round(float(d.mean()), 3),
-                    "coat_frac": round(frac, 3), "warn": warn}
+                    "coat_frac": round(frac, 3), "role_by": thick,
+                    "shape": [round(float(nb), 1), round(float(ndk), 1)], "warn": warn}
 
 
 def _count_estimate(gray, box):

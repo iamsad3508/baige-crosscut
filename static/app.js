@@ -531,6 +531,7 @@ function gmSummary(g) {
 /* 自动分色：按亮度把选区像素分两簇给一对色样。只是起点，图上点一下可改 */
 async function gmAutoSample(silent) {
   if (!S.id || !S.rois.length) return false;
+  if (S.samplesManual) return false;          // 人定过的颜色：换框/重算都不重分
   try {
     const r = await post('api/autosample', {
       id: S.id, res: S.res, rois: S.rois.map(x => ({ box: x.box, ang: x.ang || 0 })),
@@ -623,6 +624,19 @@ async function runModelGrid(extra) {
     const g = await post('api/grid', gmBody(extra));
     // 选区在请求途中被删/移动过 → 这次结果作废（否则删完选区，格网又被旧响应贴回来）
     if (rsig0 !== gmRoiSig()) return;
+    // 新图默认刀宽是 1 px，格网里刀宽=扣掉的刀缝带：用实测缝宽当起点，再重算一次。
+    // （格网判法不再跑像素分析，就没有人给刀宽兜底了 —— 1 px 会把整条缝都算成格内脱落。）
+    if (!S.lineManual && (S.lineSrc === 'default' || S.lineSrc === 'keep')
+        && g.ok && g.trace && g.trace.w_x > 1.5 && Math.abs(g.trace.w_x - S.line) > 0.5) {
+      S.line = Math.max(1, Math.round(g.trace.w_x));
+      markLineSrc('auto');
+      if ($('#rngLine')) $('#rngLine').value = Math.min(25, S.line);
+      if ($('#numLine')) $('#numLine').value = S.line;
+      setStatus(T('刀宽按实测缝宽起算 ' + S.line + ' px（刀缝带扣掉的宽度）；偏小会把缝边算成脱落，可在 k 曲线里挑一档',
+        `Blade width starts from the measured cut width, ${S.line} px — pick another row in the k curve if it is too narrow`));
+      scheduleGm(30);
+      return;
+    }
     if (!g.ok) {
       S.gm = null;
       const msg = g.reason || T('铺格失败：先在图上框住整片百格，再填列数/行数', 'Grid failed — frame the whole grid first');
@@ -659,6 +673,15 @@ async function runModelGrid(extra) {
     if (!S.gmAngManual && typeof g.angle === 'number' && Math.abs(g.angle - (+$('#gmAng').value || 0)) > 0.05) {
       $('#gmAng').value = g.angle;
       autoNote += (autoNote ? '　·　' : '') + T(`歪角自动估到 ${g.angle}°`, `Tilt auto-estimated at ${g.angle}°`);
+    } else if (!S.gmAngManual && g.angle_est != null && Math.abs(g.angle_est) < 0.2) {
+      // 估出来就是正的：也要说一句，否则用户以为「定角没生效」
+      autoNote += (autoNote ? '　·　' : '') + T('歪角估到 0°（格阵是正的，不用转）',
+        'Tilt estimated 0° — the grid is already square');
+    }
+    // 刀宽还是没给（1 px = 新图默认）：刀缝带整条算成脱落，数一定偏大，得说清楚
+    if (S.line <= 1 && !S.lineManual) {
+      autoNote += (autoNote ? '　·　' : '') + T('刀宽还没量到，现在按 1 px 算，数会偏大——到量尺页量一条刀缝，或点下面 k 曲线挑一档',
+        'No blade width measured yet (using 1 px), so numbers run high — measure a cut on the ruler tab, or pick a row in the k curve');
     }
     if (S.gmOff.dx.length !== Math.max(0, g.cols - 1) || S.gmOff.dy.length !== Math.max(0, g.rows - 1)) {
       S.gmOff.dx = new Array(Math.max(0, g.cols - 1)).fill(0);
@@ -705,9 +728,9 @@ async function runModelGrid(extra) {
       : (trOk ? trNote : T('格网已铺好：橙带=你设的刀宽（扣掉不算），逐格是剩余漆膜；线不齐可直接拖那一根',
           'Grid laid out — orange = the blade width you excluded')));
     draw();
-    // 格网判法下 k 就是刀宽：铺完格顺手把 k 曲线扫出来。analyze() 在「还没吸色」时是**提前 return**
-    // 的（不进 finally），所以第一次框完表一定是空的 —— 用户报「k 曲线不显示」就是这条路径。
-    if (S.exmode === 'grid' && S.samples.length >= 2) { try { ensureKnee().catch(() => {}); } catch (_) {} }
+    // 格网判法下 k 曲线**不自动扫**：刀宽是用户自己给的参数，自动扫一遍既慢（4 秒）又容易被当成
+    // “程序自己定了刀宽”。要看得点面板上那行「扫一遍 k」。
+    try { updateKneeHint(); } catch (_) {}
   } catch (e) {
     setStatus(String(e.message || e));
   } finally {
@@ -1882,6 +1905,15 @@ function updateKneeHint() {
   const el = $('#kneeInfo'); if (!el) return;
   if (S.knee && S.knee.rows && S.knee.rows.length) { renderKnee(); return; }
   if (S.exmode === 'width') { renderKnee(); return; }             // 按露底分布：统一由 renderKnee 出一句“扫没扫/定没定”
+  if (S.exmode === 'grid') {
+    // 格网判法下 k 就是刀宽：不主动扫，给一行可点的入口（用户点了才花那 4 秒）
+    el.innerHTML = '<a href="#" id="kneeScanLink" style="opacity:.8">'
+      + T('k 曲线（= 刀宽）：点这里扫一遍 k=1…16（约 4 秒）', 'k curve (= blade width): click to scan k=1…16 (~4 s)')
+      + '</a>';
+    const a = $('#kneeScanLink');
+    if (a) a.onclick = ev => { ev.preventDefault(); ensureKnee(true).catch(() => {}); };
+    return;
+  }
   el.innerHTML = '<span style="opacity:.65">'
     + T('k 曲线：框好选区、吸完两个颜色（或打开已有记录）就会自动扫一次（约 4 秒）；'
       + '这里会列出 k=1…16 的块数和露底，点任意一档可直接用它。',
@@ -2403,7 +2435,7 @@ async function runSemi() {
     const det = await post('api/autorun', { ...semiBody, detect_only: true }, undefined, ac.signal);
     if (my !== S.seq) return;
     if (!det.ok) throw new Error(det.reason || T('认色失败', 'colour detection failed'));
-    if (det.samples) { S.samples = det.samples.map(s => ({ rgb: s.rgb, role: s.role })); S.selSample = -1; }
+    if (det.samples && !S.samplesManual) { S.samples = det.samples.map(s => ({ rgb: s.rgb, role: s.role })); S.selSample = -1; }
     if (typeof det.tol === 'number') { S.tol = det.tol; $('#rngTol').value = S.tol; $('#numTol').value = S.tol; }
     if (det.span != null) S.span = det.span;
     syncParams(); syncSampleUI();
@@ -2423,7 +2455,7 @@ async function runSemi() {
       setBusy(false);
       return;
     }
-    if (r.samples) { S.samples = r.samples.map(s => ({ rgb: s.rgb, role: s.role })); S.selSample = -1; }
+    if (r.samples && !S.samplesManual) { S.samples = r.samples.map(s => ({ rgb: s.rgb, role: s.role })); S.selSample = -1; }
     if (typeof r.tol === 'number') S.tol = r.tol;
     if (typeof r.line_px === 'number' && !(S.exmode === 'auto' || S.exmode === 'auto_blk')) {
       S.line = r.line_px; S.widthTouched = true;      // 半自动给的就是这张图的宽度，别再被建议值顶掉
@@ -2803,7 +2835,9 @@ async function afterSamplesChanged() {
   await refreshSpan();                 // 角色变了间距就变，自动容差跟着走
   const hasCoat = S.samples.some(s => s.role === 'coat');
   const hasSub = S.samples.some(s => s.role === 'sub');
-  if (S.samples.length >= 2 && hasCoat && hasSub) analyze();
+  if (S.samples.length >= 2 && hasCoat && hasSub) {
+    if (S.exmode === 'grid') scheduleGm(); else analyze();     // 格网判法只重算格网
+  }
   else setResult(T('颜色角色还没齐：至少需要一行「漆膜」和一行「基材」。\n' +
     '在下面的列表里点一行选中，再点上面的「设为漆膜 / 设为基材」按钮改过来。',
     'The colour roles are not complete: you need at least one coating and one substrate row.\n' +
@@ -2816,6 +2850,7 @@ function setSampleRole(role) {
   if (i < 0 || !S.samples[i]) { setStatus(T('还没有颜色样本：先在图上点一下漆膜、再点一下基材', 'No colour samples yet — click the coating, then the substrate')); return; }
   if (S.samples[i].role === role) { setStatus(T('这一行已经是「' + roleName(role) + '」了', 'This row is already “' + roleName(role) + '”')); return; }
   S.samples[i].role = role;
+  S.samplesManual = true;          // 人改过的颜色：换框、自动分色都不许再动
   setStatus(T(`第 ${i + 1} 个样本（RGB ${S.samples[i].rgb.join(',')}）→ ${roleName(role)}`,
     `Sample ${i + 1} (RGB ${S.samples[i].rgb.join(',')}) → ${roleName(role)}`));
   afterSamplesChanged();
@@ -2827,6 +2862,7 @@ function delSampleSel() {
   const i = S.selSample;
   if (i < 0 || !S.samples[i]) { setStatus(T('还没有颜色样本可删', 'No colour sample to delete')); return; }
   S.samples.splice(i, 1);
+  S.samplesManual = true;          // 删掉的也是人定的
   S.selSample = Math.min(S.samples.length - 1, i);
   afterSamplesChanged();
 }

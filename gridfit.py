@@ -226,49 +226,49 @@ def estimate_angle(gray, span=8.0, max_dim=700, coarse=0.5, fine=0.05):
     best = max((score(a), a) for a in np.arange(best[1] - coarse, best[1] + coarse + 1e-9, fine))
     return round(float(best[1]), 2)
 
-def snap_lines(gray, angle, xb, yb, per_x, per_y, center, span=0.30, sigma=1.5):
+def snap_lines(gray, angle, xb, yb, per_x, per_y, center, span=0.30, sigma=1.5,
+               sign_x=0, sign_y=0):
     """把每根等分线各自吸附到它那一道刀缝上。返回 (dx, dy)，视图 px，内部线用。
 
     判据不是「这一列平均比较暗」——那样格中央一片阴影也会赢，线就被吸到格子中间去
     （「自动对线对在格子中间」就是这个原因）。真正的缝要同时满足两条：
-      1) 连续性：这一列/行里绝大多数都暗（缝从一头贯到另一头；阴影斑块只占一小段）
-      2) 暗度：这一列/行的典型暗度（p75，不用均值，免得一头亮一头暗把值拉低）
-    得分 = 连续性 × 暗度；连续性 < 0.45 一律不动（宁可不挪，也不挪错）。
+      1) 连续性：这一列/行里绝大多数都带该极性偏差（缝从一头贯到另一头；阴影斑块只占一小段）
+      2) 典型偏离量（p75，不用均值，免得一头亮一头暗把值拉低）
+    得分 = 连续性 × 偏离量；连续性 < 0.45 一律不动（宁可不挪，也不挪错）。
+
+    **极性必须两个都试**：早期只有「暗缝」一支，遇到亮刀缝（露出白底材）的图，
+    暗的那一支会锁到漆膜块上——用户看到的就是「自动对线之后线全跑到漆膜上」。
+    这里每个方向都试 ±，取「峰更细」的那组：刀缝是细线，漆膜是宽块（按宽度定，不看强度）。
+    `sign_x/sign_y` 传 1/-1 可直接指定（trace_grid 已经认过极性时用）。
     """
     g = np.asarray(gray).astype(np.uint8)
     fill = int(np.median(g))
     r = np.asarray(Image.fromarray(g, "L").rotate(
         angle, resample=Image.BILINEAR, center=center, fillcolor=fill)).astype(np.float32)
     bg = _gauss_bg(r, max(9.0, 0.06 * min(r.shape)))
-    raw = np.clip(bg - r, 0, None)
+    signed = bg - r
 
     # 只在框内统计：框外没有缝，拉进来只会把峰压平
     x0 = int(max(0, math.floor(min(xb)) + 1))
-    x1 = int(min(raw.shape[1] - 1, math.ceil(max(xb)) - 1))
+    x1 = int(min(signed.shape[1] - 1, math.ceil(max(xb)) - 1))
     y0 = int(max(0, math.floor(min(yb)) + 1))
-    y1 = int(min(raw.shape[0] - 1, math.ceil(max(yb)) - 1))
-    sub = raw[y0:y1, x0:x1] if (x1 - x0 > 8 and y1 - y0 > 8) else raw
-    p95 = float(np.percentile(sub, 95))
-    if p95 <= 0:
-        return [0.0] * len(xb), [0.0] * len(yb)
-    thr = 0.35 * p95
+    y1 = int(min(signed.shape[0] - 1, math.ceil(max(yb)) - 1))
+    per_x = float(per_x) if per_x and per_x > 2 else 1.0
+    per_y = float(per_y) if per_y and per_y > 2 else 1.0
 
-    cont_x, cont_y = (sub > thr).mean(axis=0), (sub > thr).mean(axis=1)
-    dark_x, dark_y = np.percentile(sub, 75, axis=0), np.percentile(sub, 75, axis=1)
-
-    def one(cont, dark, pos, per, off):
+    def one(cont, full, pos, per, off):
+        """返回 (shift, 峰宽)；不动的返回 (0.0, None)。"""
         n = cont.size
-        full = cont * dark                    # 整条剖面的得分（找峰、比次峰都用它）
         p = pos - off
         lo = int(max(0, p - span * per))
         hi = int(min(n - 1, p + span * per))
         if hi - lo < 3:
-            return 0.0
+            return 0.0, None
         seg = full[lo:hi]
         j = lo + int(np.argmax(seg))          # 全局下标（seg 只是切片）
         if cont[j] < 0.45 or full[j] <= 0:
-            return 0.0                        # 不是一条贯通的线 → 保持等分
-        # 缝有一定宽度，单看最暗那一列会在沟里左右抖 ±几像素 → 取峰附近平台的重心
+            return 0.0, None                  # 不是一条贯通的线 → 保持等分
+        # 缝有一定宽度，单看最强那一列会在沟里左右抖 ±几像素 → 取峰附近平台的重心
         a = j
         while a > lo and full[a - 1] >= 0.6 * full[j]:
             a -= 1
@@ -278,19 +278,56 @@ def snap_lines(gray, angle, xb, yb, per_x, per_y, center, span=0.30, sigma=1.5):
         w = full[a:b + 1]
         cen = a + (float((w * np.arange(a, b + 1)).sum() / w.sum()) - a) if w.sum() > 0 else float(j)
         shift = cen - p
-        # 不动比乱动好：小于 8% 格距的偏差视作“本来就对”，一格刀宽内的抖动没有意义
-        if abs(shift) < 0.08 * per:
-            return 0.0
+        wdt = float(b - a + 1)
         if abs(shift) > 0.20 * per:           # 太远一定不是这道缝
-            return 0.0
-        return float(shift)
+            return 0.0, wdt
+        if abs(shift) < 0.08 * per:           # 本来就在缝上：不动，但把宽度记下来（选极性要用）
+            return 0.0, wdt
+        return float(shift), wdt
 
-    dx = [0.0] * len(xb)
-    dy = [0.0] * len(yb)
-    for i in range(1, len(xb) - 1):
-        dx[i] = one(cont_x, dark_x, xb[i], per_x, x0)
-    for j in range(1, len(yb) - 1):
-        dy[j] = one(cont_y, dark_y, yb[j], per_y, y0)
+    def run_axis(sign, positions, per, axis):
+        raw = np.clip(sign * signed, 0, None)
+        sub = raw[y0:y1, x0:x1] if (x1 - x0 > 8 and y1 - y0 > 8) else raw
+        p95 = float(np.percentile(sub, 95))
+        if p95 <= 0:
+            return [0.0] * len(positions), [], 0
+        thr = 0.35 * p95
+        if axis == "x":
+            cont = (sub > thr).mean(axis=0)
+            dark = np.percentile(sub, 75, axis=0)
+            off = x0
+        else:
+            cont = (sub > thr).mean(axis=1)
+            dark = np.percentile(sub, 75, axis=1)
+            off = y0
+        full = cont * dark
+        out = [0.0] * len(positions)
+        widths = []
+        moved = 0
+        for i in range(1, len(positions) - 1):
+            sh, wd = one(cont, full, positions[i], per, off)
+            out[i] = sh
+            if wd is not None:
+                widths.append(wd)
+            if sh != 0.0:
+                moved += 1
+        return out, widths, moved
+
+    def pick(positions, per, axis, hint):
+        best = None
+        for sign in ((float(hint),) if hint else (1.0, -1.0)):
+            shifts, widths, moved = run_axis(sign, positions, per, axis)
+            if not widths:
+                continue
+            med_w = float(np.median(widths))
+            # 刀缝比漆膜块细得多：峰宽更小的那一支才是缝
+            key = (med_w, -moved)
+            if best is None or key < best[0]:
+                best = (key, shifts)
+        return best[1] if best else [0.0] * len(positions)
+
+    dx = pick(xb, per_x, "x", sign_x)
+    dy = pick(yb, per_y, "y", sign_y)
     return dx, dy
 
 # ---------------------------------------------------------------- 认缝 → 按缝铺线
