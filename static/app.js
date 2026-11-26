@@ -621,6 +621,8 @@ async function runModelGrid(extra) {
       if (await gmAutoSample(true)) S.gmAutoSig = rsig0;
     }
     const g = await post('api/grid', gmBody(extra));
+    // 选区在请求途中被删/移动过 → 这次结果作废（否则删完选区，格网又被旧响应贴回来）
+    if (rsig0 !== gmRoiSig()) return;
     if (!g.ok) {
       S.gm = null;
       const msg = g.reason || T('铺格失败：先在图上框住整片百格，再填列数/行数', 'Grid failed — frame the whole grid first');
@@ -1157,15 +1159,9 @@ cv.addEventListener('pointerdown', e => {
     return;
   }
   if (S.mode === 'pick') { tapPending = { kind: 'pick', x: ex, y: ey }; return; }
-  if (S.mode === 'ruler') {
-    const p = toImg(ex, ey);
-    S.drag = { kind: 'ruler', a: p, b: p };
-    clearTimeout(S.rulerFadeT);
-    S.rulerSeg = [p.x, p.y, p.x, p.y];
-    return;
-  }
-  // 模型格网：先判是不是在抓某根线 / 整体拖
-  if (S.mode === 'rect' && S.gm) {
+  // 模型格网：只在「量尺」页才抓线/整体拖。框选页要能安心编辑选区（以前刀缝会抢点击），
+  // 量尺页则相反——只跟量尺和格网打交道。
+  if (S.mode === 'ruler' && S.gm) {
     const gh = gmHitAt(ex, ey);
     if (gh) {
       const pi = toImg(ex, ey);
@@ -1176,6 +1172,14 @@ cv.addEventListener('pointerdown', e => {
       return;
     }
   }
+  if (S.mode === 'ruler') {
+    const p = toImg(ex, ey);
+    S.drag = { kind: 'ruler', a: p, b: p };
+    clearTimeout(S.rulerFadeT);
+    S.rulerSeg = [p.x, p.y, p.x, p.y];
+    return;
+  }
+  if (S.mode !== 'rect') return;          // 其余页签不碰选区
   // rect 模式
   const hit = hitAt(ex, ey);
   const p = toImg(ex, ey);
@@ -1377,8 +1381,9 @@ cv.addEventListener('pointerup', e => {
     S.gmCountsSig = ''; S.gmAutoSig = '';
     dropOverlay();                              // 旧覆盖层是按上一组选区算的
     refreshRoiList(); syncRoiAngle(); draw();
-    if (S.semi) scheduleSemi(); else analyze();     // 连续拖框时合并成一次计算
-    scheduleGm();                                  // 判法=格网：框完就自己认缝、铺格、统计
+    if (S.exmode === 'grid') scheduleGm();            // 判法=格网：只跑格网，不跑像素分析/扫 k
+    else if (S.semi) scheduleSemi();
+    else analyze();                                    // 连续拖框时合并成一次计算
     return;
   }
   if (d.kind === 'ruler') {
@@ -1387,7 +1392,10 @@ cv.addEventListener('pointerup', e => {
     if (Math.hypot(b.x - a.x, b.y - a.y) >= 4) measureGroove(a, b);
     draw(); return;
   }
-  if (d.moved) { refreshRoiList(); analyze(); scheduleGm(); }
+  if (d.moved) {
+    refreshRoiList();
+    if (S.exmode === 'grid') scheduleGm(); else { analyze(); scheduleGm(); }
+  }
   draw();
 });
 
@@ -2728,9 +2736,30 @@ function clearAllRois() {
 function deleteRoi(i) {
   S.rois.splice(i, 1);
   if (S.sel >= S.rois.length) S.sel = S.rois.length - 1;
+  // 删掉选区，属于它的块（蚂蚁线/块号）必须跟着消失。原来的 block 数据是按 ROI 下标存的，
+  // 不删就会留在画布上；而且 rois 一变 blocksSig() 就对不上 → 整片被画成 32% 透明，
+  // 用户看到的就是“块没消失、只是变浅了”。这里连数据和签名一起收拾干净。
+  let hadBlocks = false;
+  if (S.blocks && Array.isArray(S.blocks.rois)) {
+    if (i < S.blocks.rois.length) { S.blocks.rois.splice(i, 1); hadBlocks = true; }
+    if (Array.isArray(S.blocks.excluded) && i < S.blocks.excluded.length) S.blocks.excluded.splice(i, 1);
+    if (!S.blocks.rois.length) S.blocks = null;          // 一个选区都不剩 → 别再画
+    else {
+      try { S.blocks.sig = blocksSig(); } catch (_) {}    // 剩下的块仍然有效，别让它们变淡
+      try { renderBlocks(); } catch (_) {}
+    }
+  }
+  if (hadBlocks) { try { applyBlocks(); } catch (_) {} }
+  // 格网挂在选地上：最后一个选区没了，格网必须先撤掉再重画（否则 draw 会拿旧格网配上已删的选区）
+  const lastGone = (S.exmode === 'grid' && !S.rois.length && S.gm);
+  if (lastGone) S.gm = null;
   dropOverlay();
   refreshRoiList(); syncRoiAngle(); draw();
-  if (S.samples.length) debouncedAnalyze();
+  if (S.exmode === 'grid') {
+    if (S.rois.length) scheduleGm();
+    else if (lastGone) { if ($('#gmInfo')) $('#gmInfo').textContent = ''; if ($('#gmTrace')) $('#gmTrace').textContent = ''; }
+  }
+  else if (S.samples.length) debouncedAnalyze();
 }
 
 function syncSampleUI() {
@@ -2812,7 +2841,10 @@ function syncRoiAngle() {
 /* ------------------------------------------------------------------ 事件绑定 */
 $('#btnOpen').onclick = () => $('#fileInput').click();
 $('#fileInput').onchange = e => { upload(e.target.files[0]); e.target.value = ''; };
-$('#btnCalc').onclick = () => { analyze(); if (S.exmode === 'grid') scheduleGm(60); };
+$('#btnCalc').onclick = () => {
+  if (S.exmode === 'grid') { scheduleGm(60); return; }   // 格网判法下「计算」= 重算格网，不跑像素分析
+  analyze();
+};
 $('#btnFit').onclick = fitView;
 $('#btnOne').onclick = zoomOne;
 $('#btnReport').onclick = () => download('api/export/report', (S.name || T('结果', 'result')).replace(/\.[^.]+$/, '') + T('_百格报告.pdf', '_crosscut_report.pdf'));
@@ -2950,13 +2982,19 @@ function setExmode(v) {
   else if (v === 'width') setStatus(T('按露底分布：沿用当前 ' + S.line + ' px（手改标记已清；切回按块数回落会重新按判法定 k）',
         `By bare distribution: keeping ${S.line} px (the manual flag is cleared; switching back to block count re-derives k)`));
   else if (v === 'grid') {
+    S.knee = null;                                       // 换判据了，上一条判法的曲线不能留着（格网下 k=刀宽，重新扫）
     // 半自动：框选由人做，认缝/分色/铺格/统计由程序做完；列/行/刀宽留给人数值微调
     setStatus(T('按刀缝格网：在图上框住整片百格就自动跑完（列/行在上面，刀宽=量尺页的「忽略细线宽度」）',
       'By cut grid: just frame the whole grid — tracing, colouring and statistics run automatically'));
     scheduleGm(300);
   }
   S.blocks = null;
-  if (S.id && S.samples.length >= 2 && S.rois.length) analyze();
+  // 判法=格网：只跑格网（认缝/铺格/统计），不跑像素分析——否则切过去会莫名其妙扫一遍 k、
+  // 顺带跑「按块数回落」，用户看到的就是“选了第三种还在算原来的东西”。
+  if (S.exmode === 'grid') {
+    try { renderKnee(); } catch (_) {}
+    scheduleGm(300);
+  } else if (S.id && S.samples.length >= 2 && S.rois.length) analyze();
 }
 $('#selExmode').onchange = e => setExmode(e.target.value);
 
@@ -3607,7 +3645,7 @@ function setTol(v) {
   if (wasAuto) setStatus(T(`已切到手动容差 ${S.tol}（想恢复自动就勾回「自动容差」）`,
       `Switched to manual tolerance ${S.tol} (tick “Auto tolerance” to go back)`));
   updateSpan();
-  debouncedAnalyze();
+  if (S.exmode === 'grid') scheduleGm(); else debouncedAnalyze();   // 格网判法下只重算格网
 }
 $('#rngTol').oninput = e => setTol(e.target.value, true);
 $('#numTol').onchange = e => setTol(e.target.value, false);
@@ -3640,7 +3678,7 @@ function setPurity(v) {
   S.purity = Math.round(clamp(+v, 0.5, 0.99) * 100) / 100;
   $('#rngPurity').value = S.purity; $('#numPurity').value = S.purity.toFixed(2);
   updatePurityInfo();
-  debouncedAnalyze();
+  if (S.exmode === 'grid') scheduleGm(); else debouncedAnalyze();
 }
 $('#rngPurity').oninput = e => setPurity(e.target.value);
 $('#numPurity').onchange = e => setPurity(e.target.value);
@@ -3658,7 +3696,8 @@ function setLine(v, keepSuggest) {
   try { scheduleGm(400); } catch (_) {}       // 改阈值＝改刀宽，格网立刻重算，不用再点按钮
   try { localStorage.setItem('baige.line', String(S.line)); } catch (_) {}
   if (!keepSuggest) { S.suggestHold = null; S.widthTouched = true; }   // 用户自己改的：本图内不再用建议值覆盖
-  debouncedAnalyze();
+  // 判法=格网时刀宽就是格网的刀带宽：只重算格网，别再跑一遍像素分析（会顺带扫 k、跑“按块数回落”）
+  if (S.exmode !== 'grid') debouncedAnalyze();
 }
 $('#rngLine').oninput = e => setLine(e.target.value);
 $('#numLine').onchange = e => setLine(e.target.value);
@@ -3723,7 +3762,8 @@ $('#selRes').onchange = e => changeRes(e.target.value);
 function setRoiAngle(v) {
   if (S.sel < 0 || !S.rois[S.sel]) return;
   S.rois[S.sel].ang = Math.round(+v * 10) / 10;
-  syncRoiAngle(); refreshRoiList(); draw(); debouncedAnalyze();
+  syncRoiAngle(); refreshRoiList(); draw();
+  if (S.exmode === 'grid') scheduleGm(); else debouncedAnalyze();
 }
 /* 拖拽上传 */
 ['dragenter', 'dragover'].forEach(ev => wrap.addEventListener(ev, e => {
