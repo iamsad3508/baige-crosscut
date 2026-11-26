@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.61"      # 软件版本（发版时改）
+APP_VERSION = "2.62"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3625,6 +3625,14 @@ def _line_model(view, labels, roles, union, lines, k, allow_flip=False):
                 "reason": L("这两组线没围成格子：A %d 根 / B %d 根，角度 %s°——"
                             "可能有两根几乎平行，或有一根落在选区外" % (len(A), len(B), angs[:8]),
                             "These lines do not form cells: A=%d, B=%d, angles %s" % (len(A), len(B), angs[:8]))}
+    # 两族的**输出顺序必须固定**：a 永远是竖刀线（方向角≈90°）、b 永远横刀线。
+    # 认线回来时顺序不固定（实测同一框给出 a=近水平、b=近竖直），而前端按「a=竖线」画/派生列数，
+    # 顺序一反整族线就画成垂直方向、看着像“线飞了”。格子是求交出来的，换个顺序不影响统计。
+    def _vert_frac(fam):
+        return float(np.median([abs(np.sin(np.radians(L["ang"]))) for L in fam] or [0.0]))
+    if len(A) and len(B) and _vert_frac(A) < _vert_frac(B):
+        A, B = B, A
+
     # 刀缝带宽度不能大过格距的一半：小格子（这批图一格只有 10 px、刀宽 6 px）按原 k 扣，
     # 整格会被扣光 → 格子面积算成 0 被丢掉（实测 9a 认对 11×11 却丢 55 格）。
     _gaps = [abs(A[i + 1]["rho"] - A[i]["rho"]) for i in range(len(A) - 1)]
@@ -4284,22 +4292,47 @@ def api_grid(req: GridReq):
             # 这一步是为了让"手画的框不太准"不再等于"认不出来"。
             det = None
             _h0, _w0 = sub.shape[:2]
+            # 时间预算：一次 detect_lines5 在线上机器要好几秒，四档全试就是十几秒，
+            # 前端“正在计算”一直转（用户：计算停不下来）。超过预算就不再试下一档，
+            # 用手上最好的那份（成功优先，否则最后那次）。
+            _t_budget = float(os.environ.get("BAIGE_DET_BUDGET", "7.0"))
+            _dcache = globals().setdefault("_DET_CACHE", {})
+            _t0 = time.time()
             for _tight in (1.0, 0.92, 0.84, 0.76):
+                if det is not None and det.get("ok"):
+                    break
+                if time.time() - _t0 > _t_budget:
+                    break
                 _mw = int(round(_w0 * (1.0 - _tight) / 2.0))
                 _mh = int(round(_h0 * (1.0 - _tight) / 2.0))
                 if _w0 - 2 * _mw < 40 or _h0 - 2 * _mh < 40:
                     continue
                 _c = sub[_mh:_h0 - _mh, _mw:_w0 - _mw]
-                _up = Image.fromarray(_c, "L").resize((_c.shape[1] * _s2, _c.shape[0] * _s2), Image.LANCZOS)
+                # 紧了之后框小了，再放大 2 倍意义不大且更慢：只对「原框」用 2×，收紧档用 1.5×
+                _dk = (req.id, gx0, gy0, _w0, _h0, _tight)
+                _hit = _dcache.get(_dk)
+                if _hit is not None:
+                    det = _hit
+                    if det.get("ok"):
+                        break
+                    continue
+                # 放大倍数按“这块裁图多大”定，不是一律 2×：
+                # 小格子（一格 9~10 px）必须放大才站得住，但 649×341 这种大框已经够了，
+                # 再放大 2× 只会让 detect_lines5 慢十几秒（线上就是“计算停不下来”）。
+                _sc = max(1.0, min(float(_s2), 700.0 / max(1, max(_c.shape[:2]))))
+                _up = Image.fromarray(_c, "L").resize((int(_c.shape[1] * _sc), int(_c.shape[0] * _sc)), Image.LANCZOS)
                 _up_a = np.asarray(_up).astype(np.float32)
                 _d = lf.detect_lines5(_up_a, (0, 0, _up_a.shape[1], _up_a.shape[0]))
+                if not _d.get("ok"):
+                    _dcache[_dk] = _d          # 失败也记住，别在同一个框上反复算
                 if _d.get("ok"):
                     for k2 in ("a", "b"):                       # 换成「相对整框」的坐标
                         for Ln in _d[k2]:
-                            Ln["p0"] = [Ln["p0"][0] / _s2 + _mw, Ln["p0"][1] / _s2 + _mh]
-                            Ln["p1"] = [Ln["p1"][0] / _s2 + _mw, Ln["p1"][1] / _s2 + _mh]
+                            Ln["p0"] = [Ln["p0"][0] / _sc + _mw, Ln["p0"][1] / _sc + _mh]
+                            Ln["p1"] = [Ln["p1"][0] / _sc + _mw, Ln["p1"][1] / _sc + _mh]
                     _d["tight"] = _tight
                     det = _d
+                    _dcache[_dk] = _d
                     break
                 if det is None or _tight == 1.0:
                     det = _d if det is None else det
