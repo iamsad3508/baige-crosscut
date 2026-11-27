@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.72"      # 软件版本（发版时改）
+APP_VERSION = "2.73"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4398,6 +4398,34 @@ def api_grid(req: GridReq):
                 if _w0 - 2 * _mw < 40 or _h0 - 2 * _mh < 40:
                     continue
                 _c = sub[_mh:_h0 - _mh, _mw:_w0 - _mw]
+                # ── 大框按原分辨率认线（不放大、不下采样）─────────────────────
+                # 放大/回缩会让族角度多偏约 4°：同一个 719 框，原分辨率认出来 -3.0°，
+                # 走放大+LANCZOS 之后是 -7.0°，而 585px 上 4° 就是 40px ≈ 半个格距
+                # —— 正是“一头压第二条缝、另一头压第一条缝”的来源。
+                # 顺带把 rho 也换算到 ROI 坐标（以前只换 p0/p1，rho 留在裁图缩放帧里，
+                # 面板“间距 0×0 px”和 _line_model 的格距都因此算错）。
+                if min(_c.shape[:2]) >= 400 and _tight >= 0.999:
+                    _dk = (req.id, req.res, gx0, gy0, _w0, _h0, -1.0)
+                    _hit = _dcache.get(_dk)
+                    if _hit is not None:
+                        _f = _fit(_hit)
+                        if _f < _best_fit:
+                            _best, _best_fit = _hit, _f
+                        continue
+                    _dn = lf.detect_lines5(_c.astype(np.float32), (0, 0, _c.shape[1], _c.shape[0]))
+                    if _dn.get("ok"):
+                        for k2 in ("a", "b"):
+                            for Ln in _dn[k2]:
+                                _ar = math.radians(float(Ln.get("ang") or 0.0))
+                                Ln["rho"] = float(Ln.get("rho") or 0.0) - _mw * math.sin(_ar) + _mh * math.cos(_ar)
+                                Ln["p0"] = [Ln["p0"][0] + _mw, Ln["p0"][1] + _mh]
+                                Ln["p1"] = [Ln["p1"][0] + _mw, Ln["p1"][1] + _mh]
+                        _dn["tight"] = -1.0
+                        _dcache[_dk] = _dn
+                        _f = _fit(_dn)
+                        if _f < _best_fit:
+                            _best, _best_fit = _dn, _f
+                    continue
                 # 紧了之后框小了，再放大 2 倍意义不大且更慢：只对「原框」用 2×，收紧档用 1.5×
                 _dk = (req.id, req.res, gx0, gy0, _w0, _h0, _tight)
                 _hit = _dcache.get(_dk)
