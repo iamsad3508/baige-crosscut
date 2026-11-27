@@ -578,8 +578,9 @@ function updateGmLines() {
     const nA = S.gmLines.a.length, nB = S.gmLines.b.length;
     const nC = S.gm && S.gm.cells ? S.gm.cells.length : 0;
     const drop = S.gm && S.gm.cells_dropped ? T('，丢 ' + S.gm.cells_dropped + ' 格', ', ' + S.gm.cells_dropped + ' dropped') : '';
-    extra = T(`（逐线：线 ${nA}×${nB} 条 → 格 ${nC} 个${drop}）`,
-              ` (per-line: ${nA}×${nB} lines → ${nC} cells${drop})`);
+    const nt = S.gm && S.gm.cells_trunc ? T('，边缘残格 ' + S.gm.cells_trunc + ' 个未计入', ', ' + S.gm.cells_trunc + ' edge-clipped not counted') : '';
+    extra = T(`（逐线：线 ${nA}×${nB} 条 → 格 ${nC} 个${drop}${nt}）`,
+              ` (per-line: ${nA}×${nB} lines → ${nC} cells${drop}${nt})`);
     // 按格距还该有几根线：对不上就把差额明说，省得用户自己盯着数
     const ex = S.gm && S.gm.expect;
     if (ex && ex.gap) {
