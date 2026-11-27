@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.62"      # 软件版本（发版时改）
+APP_VERSION = "2.63"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4293,15 +4293,52 @@ def api_grid(req: GridReq):
             det = None
             _h0, _w0 = sub.shape[:2]
             # 时间预算：一次 detect_lines5 在线上机器要好几秒，四档全试就是十几秒，
-            # 前端“正在计算”一直转（用户：计算停不下来）。超过预算就不再试下一档，
-            # 用手上最好的那份（成功优先，否则最后那次）。
-            _t_budget = float(os.environ.get("BAIGE_DET_BUDGET", "7.0"))
+            # 前端“正在计算”一直转（用户：计算停不下来）。超过预算就不再试下一档。
+            _t_budget = float(os.environ.get("BAIGE_DET_BUDGET", "6.0"))
             _dcache = globals().setdefault("_DET_CACHE", {})
             _t0 = time.time()
-            for _tight in (1.0, 0.92, 0.84, 0.76):
-                if det is not None and det.get("ok"):
-                    break
-                if time.time() - _t0 > _t_budget:
+
+            # ── 选哪一档：以前「取第一个成功」，于是同一个框一次给 9×6、一次给 7×4 ──
+            # 现在拿**这张图的格距**当尺子给每档打分，取得分最好的一档：
+            # 间距该≈格距、线数该≈边长/格距+1；间距只有格距一半的（双重缝）重罚。
+            # 同一张图同一个框 → 同一套分 → 同一个结果，不再抖。
+            try:
+                _ref = _count_estimate(gray, (gx0, gy0, gx1, gy1))
+            except Exception:
+                _ref = None
+            _pp = getattr(sess, "gm_pitch", None) or (None, None)
+            _px = (_ref or {}).get("pitch_x") or _pp[0]
+            _py = (_ref or {}).get("pitch_y") or _pp[1]
+
+            def _fit(dd):
+                """0 = 最像；越大越不像。没有格距参照时恒为 0（等于沿用“先成功先用”）。"""
+                if not dd or not dd.get("ok"):
+                    return 1e6
+                sc = 0.0
+                for fam, pref, span in (("a", _px, _w0), ("b", _py, _h0)):
+                    LL = dd.get(fam) or []
+                    if len(LL) < 2:
+                        return 1e6
+                    mid = sorted(((x["p0"][0] + x["p1"][0]) / 2.0 if fam == "a"
+                                  else (x["p0"][1] + x["p1"][1]) / 2.0) for x in LL)
+                    gaps = [b2 - a2 for a2, b2 in zip(mid, mid[1:]) if b2 - a2 > 1e-6]
+                    g = float(np.median(gaps)) if gaps else 0.0
+                    if pref and pref > 2:
+                        if g > 0:
+                            sc += 3.0 * abs(g / pref - 1.0)
+                            if g < 0.45 * pref:
+                                sc += 3.0            # 双重缝：一格认成两格
+                        sc += 0.8 * abs(len(LL) - round(span / pref + 1.0))
+                return sc
+
+            _best, _best_fit = None, 1e9
+            _levels_tried = []
+            # 0.76 那档几乎不出好结果，只会多花一次认线的时间，去掉
+            for _tight in (1.0, 0.92, 0.84):
+                _levels_tried.append(_tight)
+                if _best is not None and _best_fit <= 1.2:
+                    break                            # 已经贴合格距，不再多算
+                if _best is not None and time.time() - _t0 > _t_budget:
                     break
                 _mw = int(round(_w0 * (1.0 - _tight) / 2.0))
                 _mh = int(round(_h0 * (1.0 - _tight) / 2.0))
@@ -4309,12 +4346,12 @@ def api_grid(req: GridReq):
                     continue
                 _c = sub[_mh:_h0 - _mh, _mw:_w0 - _mw]
                 # 紧了之后框小了，再放大 2 倍意义不大且更慢：只对「原框」用 2×，收紧档用 1.5×
-                _dk = (req.id, gx0, gy0, _w0, _h0, _tight)
+                _dk = (req.id, req.res, gx0, gy0, _w0, _h0, _tight)
                 _hit = _dcache.get(_dk)
                 if _hit is not None:
-                    det = _hit
-                    if det.get("ok"):
-                        break
+                    _f = _fit(_hit)
+                    if _f < _best_fit:
+                        _best, _best_fit = _hit, _f
                     continue
                 # 放大倍数按“这块裁图多大”定，不是一律 2×：
                 # 小格子（一格 9~10 px）必须放大才站得住，但 649×341 这种大框已经够了，
@@ -4331,12 +4368,12 @@ def api_grid(req: GridReq):
                             Ln["p0"] = [Ln["p0"][0] / _sc + _mw, Ln["p0"][1] / _sc + _mh]
                             Ln["p1"] = [Ln["p1"][0] / _sc + _mw, Ln["p1"][1] / _sc + _mh]
                     _d["tight"] = _tight
-                    det = _d
                     _dcache[_dk] = _d
-                    break
-                if det is None or _tight == 1.0:
-                    det = _d if det is None else det
+                _f = _fit(_d)
+                if _f < _best_fit:
+                    _best, _best_fit = _d, _f
             _up = None
+            det = _best if _best is not None else {"ok": False, "why": "none", "a": [], "b": []}
             # 坐标上面已经在循环里换算回「整框」了，这里不能再除一次 _s2
             if not det.get("ok"):
                 return {"ok": False, "warn": "grid.nolines", "det": det,
@@ -4428,6 +4465,10 @@ def api_grid(req: GridReq):
                     _Ln["rho"] = -_Ln["p0"][0] * math.sin(a) + _Ln["p0"][1] * math.cos(a)
         k = float(view.len_in(req.k_band or req.line_px or 8.0))
         out = _line_model(view, labels, roles, union, lines, k, allow_flip=bool(req.roles_auto))
+        if (not req.lines) and req.auto_lines:
+            # 诊断用：哪一档被选中、评分多少（前端不显示，看日志/接口排障用）
+            out["det"] = {"tight": det.get("tight"), "fit": round(float(_best_fit), 2),
+                          "levels": _levels_tried}
         if out.get("ok") and req.overlay:
             try:
                 side = _res_to_side(req.res, sess.full_img())
