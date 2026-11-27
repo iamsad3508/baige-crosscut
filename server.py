@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.63"      # 软件版本（发版时改）
+APP_VERSION = "2.64"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4408,6 +4408,10 @@ def api_grid(req: GridReq):
                 out.append(d)
             return out
         lines = {"a": _mv(lines.get("a")), "b": _mv(lines.get("b"))}
+        # 对缝/去重前后的备份：吸附只能“挪好”，绝不能把线弄少（实测 11 根被吸成 7 根）
+        _snap_before = {f: [{"ang": x["ang"], "rho": x["rho"],
+                             "p0": list(x["p0"]), "p1": list(x["p1"])} for x in lines[f]]
+                        for f in ("a", "b")}
         # 边界线（前端标了 edge）吸附到框内最近的真缝：
         # 用户画的框只是「大概贴着最外那刀」，直接用框边当边界会让最外一圈格子偏大、缝没扣干净。
         for fam in ("a", "b"):
@@ -4422,6 +4426,8 @@ def api_grid(req: GridReq):
                                 + (L1["p0"][1] - L0["p0"][1]) * math.cos(ang)))
             pitch = float(np.median([g for g in gaps if g > 1] or [10.0]))
             # 以前只吸首尾两根（那是给“框边”用的）；「对缝」要吸的是**所有**标了 edge 的线。
+            _taken = []                    # 本轮已经被吸过去的 rho（同族内不许两条线占同一条缝）
+            _scores = {}
             for k, _Ln in enumerate(fam_lines):
                 if not _Ln.get("edge"):
                     continue
@@ -4438,6 +4444,10 @@ def api_grid(req: GridReq):
                 _thr = _lo + 0.55 * max(1.0, _hi - _lo)
                 best = (0.0, 0.0)          # (得分, 偏移)
                 for off in np.arange(-0.40 * pitch, 0.40 * pitch + 0.01, 0.5):
+                    # 别吸到别人已经占住的那条缝上：否则两根线重叠成一根
+                    _rho_c = _Ln["rho"] + off
+                    if any(abs(_rho_c - _r0) < 0.55 * pitch for _r0 in _taken):
+                        continue
                     qx, qy = mx + nx * off, my + ny * off
                     c_, m_ = lf._line_score(_gw, _thr, _Ln["ang"], qx, qy,
                                             min(_gw.shape) * 0.9)
@@ -4449,7 +4459,37 @@ def api_grid(req: GridReq):
                     _Ln["p0"] = [_Ln["p0"][0] + nx * off, _Ln["p0"][1] + ny * off]
                     _Ln["p1"] = [_Ln["p1"][0] + nx * off, _Ln["p1"][1] + ny * off]
                     _Ln["rho"] = -_Ln["p0"][0] * math.sin(ang) + _Ln["p0"][1] * math.cos(ang)
+                    _taken.append(_Ln["rho"])
+                    _scores[k] = best[0]
                     _Ln.pop("edge", None)
+
+        # ── 去重：同族里间距不到「中位格距一半」的两根，基本是同一根缝 ──
+        # 来源有两种：认线把一根缝认成两根；或者两条线各自吸附时吸到同一条缝（实测 4 px 一对，
+        # 用户看到的就是“线乱成一团”）。这里统一按投影排序 + 最小间距剔一遍。
+        for fam in ("a", "b"):
+            _fl = lines[fam]
+            if len(_fl) < 3:
+                continue
+            _pr = []
+            for _Lx in _fl:
+                _ax = math.radians(_Lx["ang"])
+                _pr.append(-_Lx["p0"][0] * math.sin(_ax) + _Lx["p0"][1] * math.cos(_ax))
+            _ord = sorted(range(len(_fl)), key=lambda i2: _pr[i2])
+            _gp = [_pr[_ord[i2 + 1]] - _pr[_ord[i2]] for i2 in range(len(_ord) - 1)]
+            _med = float(np.median([g for g in _gp if g > 1e-6] or [0.0]))
+            if _med <= 2:
+                continue
+            _keep = []
+            for i2 in _ord:
+                if _keep and abs(_pr[i2] - _pr[_keep[-1]]) < 0.5 * _med:
+                    continue                     # 和上一根挤在一起：丢掉后面这根
+                _keep.append(i2)
+            if len(_keep) < len(_fl):
+                lines[fam] = [_fl[i2] for i2 in _keep]
+        # 兜底护栏：这一步之后线比之前少，就整族还原（宁可不对缝，也不能少线）
+        for fam in ("a", "b"):
+            if len(lines[fam]) < len(_snap_before[fam]):
+                lines[fam] = _snap_before[fam]
 
         # 单根线的微调（前端拖哪根就传哪根的 dx/dy，视图 px）：沿这**根线自己**的法线挪
         if req.line_dx or req.line_dy:

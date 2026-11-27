@@ -749,10 +749,13 @@ async function runModelGrid(extra) {
       $('#gmInfo').textContent = msg; setStatus(msg); draw(); return;
     }
     S.gm = g; S.lastGm = g;
-    if (needSeed && g.cols >= 2 && g.rows >= 2) {
+    // 注意：认线成功时 g.lines_a 已经有线了，这里**不能**再按 cols/rows 铺一套等分线上去
+    // ——那是把认好的真缝线换成等分线，再一对缝就挤成一团（用户：先勾逐线再画框，线乱成一团）。
+    if (needSeed && g.cols >= 2 && g.rows >= 2 && !(g.lines_a && g.lines_a.length)) {
       const L0 = gmLinesFromLattice({ cols: g.cols, rows: g.rows, angle: g.angle });
       if (L0) {
         S.gmLines = L0; S.gmLinesManual = false; S.gmLinesSig = gmRoiSig();
+        S.gmLinesFromDetect = false;          // 等分兜底出来的，需要靠对缝压到真缝上
         gmLinesSpanAll();
         for (const fam of ['a', 'b']) for (const x of (S.gmLines[fam] || [])) x.edge = true;
         scheduleGm(30);                       // 马上带线再算一遍（顺带各自对到最近的缝）
@@ -853,6 +856,8 @@ async function runModelGrid(extra) {
         b: _rebuild(S.gmLines && S.gmLines.b, g.lines_b),
       };
       for (const fam of ['a', 'b']) for (const L of S.gmLines[fam]) delete L.edge;   // 对过就别再对，免得越吸越偏
+      // 这批线是「认出来的」还是「按列行等分出来的」——决定以后要不要再对缝
+      S.gmLinesFromDetect = !!(needSeed && g.lines_a && g.lines_a.length);
       gmLinesSpanAll();                                  // 端点按当前选区框铺好，把手才有地方站
       if (!S.gmLinesManual) S.gmLinesSig = gmRoiSig();   // 只有自动/拆出来的线才跟框绑定
     } else if (!S.gmLine) S.gmLines = null;
@@ -3015,7 +3020,7 @@ function clearAllRois() {
   S.gm = null; S.gmDrag = null; S.gmOff = { ox: 0, oy: 0, dx: [], dy: [] };   // 没选区了，格网不该还挂在那儿
   // 取消选区 = 一切按框算的东西全作废：线集合、手填列/行、格数签名。
   // 少清一样，重画的框就会沿用旧线数/旧列行（用户：“数量也对不上”）。
-  S.gmLines = null; S.gmLinesManual = false; S.gmLinesSig = '';
+  S.gmLines = null; S.gmLinesManual = false; S.gmLinesSig = ''; S.gmLinesFromDetect = false;
   S.gmColsManual = false; S.gmRowsManual = false; S.gmCountsSig = ''; S.gmGridSig = ''; S.gmLatticeTry = false;
   if ($('#gmInfo')) $('#gmInfo').textContent = '';
   if ($('#gmTrace')) $('#gmTrace').textContent = '';
@@ -4104,12 +4109,13 @@ function gmLinesFromLattice(opt) {
 
 $('#chkLine').onchange = e => {
   S.gmLine = e.target.checked;
-  S.gmLines = e.target.checked ? gmLinesFromLattice() : null;   // 先按现在的列/行拆
-  if (S.gmLines) {
-    gmLinesSpanAll();
-    // 拆出来的是等分线，多半压不准：打上 edge 让这一轮就各自吸到最近的刀缝
-    for (const fam of ['a', 'b']) for (const L of (S.gmLines[fam] || [])) L.edge = true;
-  }
+  // 勾上就**先认线**（不再拿等分线顶上）：认线现在是 2~3 秒、且结果可复现，
+  // 认不出来时 runModelGrid 里的兜底会按格距铺一套等分线再对缝。
+  // 让“先勾后画”和“先画后勾”走同一条路，两种顺序结果就一致了。
+  S.gmLines = null;
+  S.gmLinesFromDetect = false;
+  S.gmLinesManual = false;
+  S.gmGridSig = S.rois.length ? gmRoiSig() : '';
   S.gmLinesManual = false;
   S.gmLinesSig = S.gmLines ? gmRoiSig() : '';
   const ops = $('#lineOps');
