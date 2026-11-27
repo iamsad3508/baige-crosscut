@@ -580,6 +580,24 @@ function updateGmLines() {
     const drop = S.gm && S.gm.cells_dropped ? T('，丢 ' + S.gm.cells_dropped + ' 格', ', ' + S.gm.cells_dropped + ' dropped') : '';
     extra = T(`（逐线：线 ${nA}×${nB} 条 → 格 ${nC} 个${drop}）`,
               ` (per-line: ${nA}×${nB} lines → ${nC} cells${drop})`);
+    // 按格距还该有几根线：对不上就把差额明说，省得用户自己盯着数
+    const ex = S.gm && S.gm.expect;
+    if (ex && ex.gap) {
+      // 框边离最近那根线多远：超过 0.35 格距就是“框没贴着最外一刀”，最外一圈格子会偏
+      const worst = [];
+      for (const [k, g0] of [['margin_a', ex.gap[0]], ['margin_b', ex.gap[1]]]) {
+        const m = ex[k];
+        if (!m || !g0) continue;
+        const over = Math.max(...m) / g0;
+        if (over > 0.35) worst.push(Math.round(Math.max(...m)));
+      }
+      if (worst.length) {
+        extra += T(`　⚠️ 框边离最近的刀缝还有 ${worst.join(' / ')} px，`
+                   + `建议贴着最外一刀重新框（现在最外一圈格子偏大，百分比会虚高）`,
+                   ` ⚠️ frame edge is ${worst.join(' / ')} px from the nearest cut`
+                   + ` — re-frame tight to the outermost cuts`);
+      }
+    }
   }
   el.textContent = T(`→ 竖刀线 ${c + 1} 条 ／ 横刀线 ${r + 1} 条（刀线比格子多 1）`,
                      `→ ${c + 1} vertical cuts / ${r + 1} horizontal cuts (one more than cells)`) + extra;

@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.64"      # 软件版本（发版时改）
+APP_VERSION = "2.65"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4509,7 +4509,33 @@ def api_grid(req: GridReq):
             # 诊断用：哪一档被选中、评分多少（前端不显示，看日志/接口排障用）
             out["det"] = {"tight": det.get("tight"), "fit": round(float(_best_fit), 2),
                           "levels": _levels_tried}
-        if out.get("ok") and req.overlay:
+        # 面板提示：框边离最近的刀缝多远（不管这一轮是认线还是带线回算，都要给）
+        try:
+            def _med_gap(fam):
+                mid = sorted((x["p0"][0] + x["p1"][0]) / 2.0 if fam == "a"
+                             else (x["p0"][1] + x["p1"][1]) / 2.0 for x in lines[fam])
+                gp = [b - a for a, b in zip(mid, mid[1:]) if b - a > 1e-6]
+                return float(np.median(gp)) if gp else 0.0
+            _ga, _gb = _med_gap("a"), _med_gap("b")
+
+            def _margins(fam, lo, hi):
+                mid = sorted((x["p0"][0] + x["p1"][0]) / 2.0 if fam == "a"
+                             else (x["p0"][1] + x["p1"][1]) / 2.0 for x in lines[fam])
+                if len(mid) < 2:
+                    return None
+                return [round(float(view.len_out(max(0.0, mid[0] - lo))), 1),
+                        round(float(view.len_out(max(0.0, hi - mid[-1]))), 1)]
+
+            # 只报「框边离刀缝多远」这个不会骗人的量：> 0.35 格距就说明框没贴着最外一刀。
+            # （“按格距应有几根”在框切穿边缘格子时是错的：808 px 宽 / 77 px 格距算出 11 根，
+            #   实际框内只有 10 根缝，照它提示会让人白补一根。）
+            out["expect"] = {
+                "gap": [round(float(view.len_out(_ga)), 1), round(float(view.len_out(_gb)), 1)],
+                "margin_a": _margins("a", gx0, gx1),
+                "margin_b": _margins("b", gy0, gy1),
+            }
+        except Exception:
+            pass
             try:
                 side = _res_to_side(req.res, sess.full_img())
                 out["overlay_url"] = _build_overlay(
