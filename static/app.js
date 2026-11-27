@@ -535,7 +535,7 @@ async function runSep() {
     setStatus(T('先在格网里填列数/行数', 'Set columns/rows first')); return;
   }
   if (S.busy) return;
-  setBusy(true);
+  setBusy(true, T('分离刀缝（按你设的列/行切）…', 'Splitting the cuts (by your columns/rows)…'));
   setStatus(T('正在分离刀缝…', 'Separating the cuts…'));
   const out = $('#sepOut');
   try {
@@ -718,7 +718,9 @@ async function runModelGrid(extra) {
   // 逐线但手上没有线（刚换选区/刚勾选）：这一趟先让服务端按**新选区**算列/行，
   // 拿到数之后自己铺线并对缝。以前直接 auto_lines，认不出就退回 10×10，线数自然对不上。
   const needSeed = S.gmLine && !S.gmLines;
-  setBusy(true);                            // 必须走 setBusy：直接改 S.busy 不会刷新「计算」按钮
+  // 必须走 setBusy：直接改 S.busy 不会刷新「计算」按钮
+  setBusy(true, needSeed ? T('认刀缝（这一步最慢，最长约 9 秒）…', 'Tracing cuts (slowest step, up to ~9 s)…')
+                         : T('统计格网…', 'Measuring cells…'));
   setStatus(T(needSeed ? '正在量这块选区的格数…' : '正在铺格…',
               needSeed ? 'Measuring how many cells fit this region…' : 'Laying out the grid…'));
   const rsig0 = gmRoiSig();
@@ -976,7 +978,7 @@ async function runGrid() {
   if (!S.id) { setStatus(T('先打开一张图', 'Open an image first')); return; }
   if (!S.rois.length) { setStatus(T('先在图上拖一个选区，再自动找格子', 'Draw a region first')); return; }
   if (S.busy) return;
-  setBusy(true);
+  setBusy(true, T('找格子（投影计数）…', 'Fitting the grid (projection)…'));
   setStatus(T('正在找格子…', 'Fitting the grid…'));
   try {
     const g = await post('api/grid', {
@@ -2050,7 +2052,24 @@ function refreshCalcBtn() {
   $('#btnCalc').disabled = b;
   $('#btnCalc').textContent = b ? t('res.calculating') : t('btn.calc');
 }
-function setBusy(b) { S.busy = b; refreshCalcBtn(); }
+function setBusy(b, label) { S.busy = b; refreshCalcBtn(); bgTask(b ? (label || T('正在计算…', 'Working…')) : ''); }
+
+/* 左下角「后台在算什么」：一直转到算完，带秒数。
+   用户原话「干等会以为挂掉的」——服务端认线最坏要几秒，没这个提示就像死机。 */
+let bgT0 = 0, bgLabel = '', bgTimer = null;
+function bgTask(label) {
+  const el = $('#bgTask');
+  if (bgTimer) { clearInterval(bgTimer); bgTimer = null; }
+  if (!el) return;
+  if (!label) { el.hidden = true; el.textContent = ''; bgLabel = ''; return; }
+  bgLabel = label; bgT0 = Date.now(); el.hidden = false; el.textContent = label;
+  bgTimer = setInterval(() => {
+    const e2 = $('#bgTask');
+    if (!e2 || e2.hidden) return;
+    const s = (Date.now() - bgT0) / 1000;
+    e2.textContent = bgLabel + '　' + (s < 10 ? s.toFixed(1) : s.toFixed(0)) + 's';
+  }, 200);
+}
 
 /* 刀缝值从哪来：自动算的 / 沿用的 / 手设的 / 量尺量的 / 记录里的。
    “沿用”是最容易被误当成结果的一种——算不出 k 时它就是上一次的值。 */
@@ -2321,7 +2340,7 @@ async function analyze() {
   }
   // 两种判法各走各的：按块数回落 → 先扫 k；按宽度 → 只等服务器的露底分布建议值，不扫 k（免得两套规则重复算）
   const my = ++S.seq;
-  setBusy(true);
+  setBusy(true, T('像素分析（k 曲线 / 逐行统计）…', 'Pixel analysis (k curve / per-row)…'));
   try {
     // 扫 k 曲线（按块数回落）也要算进"计算中"：这一趟要 4 秒左右，之前按钮在这段时间还写着
     // "计算"，而后台其实已经在忙，看着像没点动。按露底分布不扫 k（只用建议值），所以那边切换及时。
@@ -2704,7 +2723,7 @@ async function runSemi() {
   const my = ++S.seq;
   if (S.autoAbort) { try { S.autoAbort.abort(); } catch (_) {} }
   const ac = new AbortController(); S.autoAbort = ac;
-  setBusy(true);
+  setBusy(true, T('半自动：认色…', 'Semi-auto: detecting colours…'));
   try {
     const prevRows = S.autoRows ? S.autoRows.map(x => ({ ...x })) : null;
     const semiBody = { id: S.id, res: S.res, soft: false, roi_native: !!S.roiNative,
@@ -2718,6 +2737,17 @@ async function runSemi() {
     if (typeof det.tol === 'number') { S.tol = det.tol; $('#rngTol').value = S.tol; $('#numTol').value = S.tol; }
     if (det.span != null) S.span = det.span;
     syncParams(); syncSampleUI();
+    // 判法=刀缝格网：格网的刀宽就是「忽略细线宽度」，k 曲线（按块数回落）在这里没有意义。
+    // 以前无条件跑 ensureKnee()，于是选了格网还去扫一遍 k，用户看到的就是“半自动一开就开始算块回落”。
+    const _gridMode = (S.exmode === 'grid' || S.gmLine);
+    if (_gridMode) {
+      // 色样已经认好，剩下的交给格网那条路（它自己认缝、铺格、统计，并且自己管左下角的进度）
+      if (my !== S.seq) return;
+      setBusy(false);
+      S.gmAutoSig = gmRoiSig();              // 这一轮已经自动分过色，别在格网里再分一次
+      scheduleGm(0);
+      return;
+    }
     await ensureKnee();                     // 判法定 k（面板里那张表也在这步出来）
     if (my !== S.seq) return;
     // 哪种判法定 k：按块数回落 → 用判法的 k；按宽度 → 不传，让服务器按露底分布猜（就是它原来的做法）
