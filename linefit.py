@@ -334,6 +334,61 @@ def detect_lines(gray, box, max_lines=26):
 
 
 # ---------------------------------------------------------------- 线集合 → 格子
+def align_family(gray, fam, box, target=None, span=8.0, step=0.5):
+    """把整族线拧成同一角度（平行），位置不动。
+
+    认线的族角度来自 Hough 峰按 5° 分箱的中心（精度上限 ±2.5°），实测整族偏 6.2°：
+    586px 宽就是 65px ≈ 一个格距，画出来一头压第二条缝、一头压第一条缝。
+
+    target 给了就用它（**首选**：调用方用 gridfit.estimate_angle 量出来的真角度）；
+    没给才在 ±span 上扫 _line_score 之和 —— 但注意这个目标函数不可靠
+    （实测把 -7° 选成 -13.4°，因为它奖励“线上暗像素多”，斜穿漆膜也满足）。
+
+    线由 (ang, rho) 决定，p0/p1 是 `_clip` 派生的，所以必须走 _clip 重建；
+    自己按长度算端点会让所有线挤到同一位置（实测 36 格→6 格）。
+    """
+    if len(fam) < 3:
+        return fam
+    x0, y0, x1, y1 = [int(round(v)) for v in box]
+    L_use = float(min(x1 - x0, y1 - y0)) * 0.9
+    mids = [((L["p0"][0] + L["p1"][0]) / 2.0, (L["p0"][1] + L["p1"][1]) / 2.0) for L in fam]
+    a0 = float(np.median([L["ang"] for L in fam]))
+    if target is not None:
+        t = float(target)
+        while t - a0 > 90.0:
+            t -= 180.0
+        while a0 - t > 90.0:
+            t += 180.0
+    else:
+        best_s, t = -1.0, a0
+
+        def total(at):
+            s = 0.0
+            for (mx, my) in mids:
+                c, m = _line_score(gray, 0.0, at, mx, my, L_use)
+                s += c * m
+            return s
+
+        for at in np.arange(a0 - span, a0 + span + 1e-9, step):
+            s = total(at)
+            if s > best_s:
+                best_s, t = s, float(at)
+    # 位置只能用 rho：detect_lines5 返回的 p0/p1 不是「每根线各自的线段」
+    # （它们的中点在所有线上几乎相同，拿中点算位置会让整族挤到一处——实测 36 格→6 格）。
+    # 保持「离原点最近的那一点」不动：rho' = rho * cos(角度差)。
+    out = []
+    for L in fam:
+        a_l = float(L.get("ang") or 0.0)
+        rho = float(L.get("rho") or 0.0) * math.cos(math.radians(t - a_l))
+        seg = _clip(t, rho, (x0, y0, x1, y1))
+        if not seg:
+            out.append(L)
+            continue
+        out.append({"ang": round(t, 2), "rho": round(rho, 2),
+                    "score": L.get("score", 0), "p0": seg[0], "p1": seg[1]})
+    return out
+
+
 def norm(a, b):
     """把两族的线各自排序（沿自身法线方向），并保证第二族方向与第一族大致垂直。"""
     def key(L):
