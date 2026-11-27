@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.70"      # 软件版本（发版时改）
+APP_VERSION = "2.71"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4218,6 +4218,21 @@ def api_autosample(req: AutoSampleReq):
                     "shape": [round(float(nb), 1), round(float(ndk), 1)], "warn": warn}
 
 
+_CNT_CACHE = {}
+
+
+def _count_estimate_cached(key, gray, box):
+    """数格很贵（自相关 + 逐缝复核），同一个框重复问是常态（改刀宽/加线都只改参数）。
+    结果按 key 缓存；失败也缓存，否则失败的那次会被反复重算。"""
+    if key in _CNT_CACHE:
+        return _CNT_CACHE[key]
+    out = _count_estimate(gray, box)
+    _CNT_CACHE[key] = out
+    if len(_CNT_CACHE) > 256:
+        _CNT_CACHE.clear()
+    return out
+
+
 def _count_estimate(gray, box):
     """自己在选区里数格数：估角 → 转正 → 自相关定格距 → 格数 = 边长 / 格距。
 
@@ -4328,7 +4343,8 @@ def api_grid(req: GridReq):
             # 间距该≈格距、线数该≈边长/格距+1；间距只有格距一半的（双重缝）重罚。
             # 同一张图同一个框 → 同一套分 → 同一个结果，不再抖。
             try:
-                _ref = _count_estimate(gray, (gx0, gy0, gx1, gy1))
+                _ref = _count_estimate_cached((req.id, req.res, gx0, gy0, gx1, gy1), gray,
+                                              (gx0, gy0, gx1, gy1))
             except Exception:
                 _ref = None
             _pp = getattr(sess, "gm_pitch", None) or (None, None)
@@ -4358,10 +4374,15 @@ def api_grid(req: GridReq):
 
             _best, _best_fit = None, 1e9
             _levels_tried = []
-            # 0.76 那档几乎不出好结果，只会多花一次认线的时间，去掉
-            for _tight in (1.0, 0.92, 0.84):
+            # 试哪几档（可配）：档数直接乘耗时。用户那个 786×784 的框三档跑了 31 s，
+            # 读屏上就是“挂了”。默认两档，需要时可以 BAIGE_DET_LEVELS=1.0,0.92,0.84 加回来。
+            for _tight in [float(v) for v in
+                           (os.environ.get("BAIGE_DET_LEVELS") or "1.0,0.92,0.84").split(",") if v.strip()]:
                 _levels_tried.append(_tight)
-                if _best is not None and _best_fit <= 1.2:
+                # 够好就收：实测用户那个 786×784 的框，三档分别是 fit 3.12 / 3.26 / 8.16，
+                # 最好的是第一档——却因为阈值 1.2 陪跑了两档，19 s 变 7 s 的差距就在这里。
+                # 3.5 的取值保证“第一档明显不像（>3.5）时仍会往下试”。
+                if _best is not None and _best_fit <= 3.5:
                     break                            # 已经贴合格距，不再多算
                 if _best is not None and time.time() - _t0 > _t_budget:
                     break
@@ -4395,6 +4416,10 @@ def api_grid(req: GridReq):
                     _d["tight"] = _tight
                     _dcache[_dk] = _d
                 _f = _fit(_d)
+                if os.environ.get("BAIGE_DET_DEBUG"):
+                    print("[det] tight=%.2f ok=%s fit=%.2f a=%d b=%d" % (
+                        _tight, bool(_d.get("ok")), _f,
+                        len(_d.get("a") or []), len(_d.get("b") or [])), flush=True)
                 if _f < _best_fit:
                     _best, _best_fit = _d, _f
             _up = None
@@ -4578,7 +4603,8 @@ def api_grid(req: GridReq):
         want_c = req.auto_counts or req.auto_cols
         want_r = req.auto_counts or req.auto_rows
         if want_c or want_r or req.cols < 2 or req.rows < 2:
-            cnt = _count_estimate(gray, (gx0, gy0, gx1, gy1))
+            cnt = _count_estimate_cached((req.id, req.res, gx0, gy0, gx1, gy1), gray,
+                                         (gx0, gy0, gx1, gy1))
             # 格数采用策略：认缝复核过（trace）直接用；只量到格距（period）也先用上——
             # 用户要的是"框完就自动"，而格距是自相关量出来的、残差过闸的，比默认 9×7 靠谱得多。
             # 面板必须写明这是按格距算的、可以改。实测用户那张 CrossScan 截图：按格距 11×11 +
