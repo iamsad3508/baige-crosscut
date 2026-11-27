@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.67"      # 软件版本（发版时改）
+APP_VERSION = "2.68"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -3701,16 +3701,12 @@ def _line_model(view, labels, roles, union, lines, k, allow_flip=False):
     # 被框边切掉大块的格子（框没贴紧最外一刀时最外一圈就是这种）不能按整格算权重：
     # 它只有半格大，却和整格一样占一份，脱落率会被拉偏。只把面积 >= 0.6×中位数 的格子算进百分比，
     # 被切掉的单独计数报给界面（用户看得到“哪几格没算”）。
-    _use = [c for c in out_cells if not c.get("clipped")]
+    # 只**报**被框裁到的残格数，不把它从百分比里剔除：
+    # 实测 9a 全框剔一格就从 17.50% 变成 14.57%（−3 个点），而那一格本来就是用户框进来的
+    # 一部分，剔掉反而和厂家的数对不上。宁可保留并如实标出“有 N 格被框切到”。
     _trunc = [c for c in out_cells if c.get("clipped")]
-    if len(_use) >= 4:
-        _ta = sum(c["area"] for c in _use)
-        _tk = sum(c["kept"] for c in _use)
-        pct = (100.0 * (1.0 - _tk / max(_ta, 1.0))) if has_cls else None
-    else:
-        _use, _trunc = out_cells, []
-        pct = (100.0 * (1.0 - tot_k / max(tot_a, 1.0))) if has_cls else None
-    pct_all = (100.0 * (1.0 - tot_k / max(tot_a, 1.0))) if has_cls else None
+    pct = (100.0 * (1.0 - tot_k / max(tot_a, 1.0))) if has_cls else None
+    pct_all = pct
     gaps_a = [abs(A[i + 1]["rho"] - A[i]["rho"]) for i in range(len(A) - 1)]
     gaps_b = [abs(B[j + 1]["rho"] - B[j]["rho"]) for j in range(len(B) - 1)]
     # 回传格距（wire px）：前端刀宽还是默认 1 px 时按它给一个起点
@@ -4239,6 +4235,7 @@ def _count_estimate(gray, box):
         fill = int(np.median(sub))
         rot = np.asarray(Image.fromarray(sub, "L").rotate(ang, resample=Image.BILINEAR, fillcolor=fill))
         r = gf.fit(rot)
+
         if not r.get("ok"):
             return None
         px, py = float(r.get("period_x") or 0), float(r.get("period_y") or 0)
