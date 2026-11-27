@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.68"      # 软件版本（发版时改）
+APP_VERSION = "2.69"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4316,7 +4316,10 @@ def api_grid(req: GridReq):
             _h0, _w0 = sub.shape[:2]
             # 时间预算：一次 detect_lines5 在线上机器要好几秒，四档全试就是十几秒，
             # 前端“正在计算”一直转（用户：计算停不下来）。超过预算就不再试下一档。
-            _t_budget = float(os.environ.get("BAIGE_DET_BUDGET", "6.0"))
+            # 时间预算必须**大于**四档（现在三档）全跑一遍的最坏耗时，否则同一个框在机器忙的时候
+            # 会跑到一半就停，不同档给不同结果 —— 用户看到的就是“有时线会乱，有时不会”。
+            # 认线结果是可复现优先，慢就慢（有缓存，同框第二次 0.3s）。
+            _t_budget = float(os.environ.get("BAIGE_DET_BUDGET", "60.0"))
             _dcache = globals().setdefault("_DET_CACHE", {})
             _t0 = time.time()
 
