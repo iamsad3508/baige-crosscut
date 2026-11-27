@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.65"      # 软件版本（发版时改）
+APP_VERSION = "2.66"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4228,8 +4228,15 @@ def _count_estimate(gray, box):
             return None
         if float(r.get("resid_x") or 0) > 0.12 * px or float(r.get("resid_y") or 0) > 0.12 * py:
             return None
-        cols = int(round((x1 - x0) / px))
-        rows = int(round((y1 - y0) / py))
+        # 格数怎么数：先除以格距，再用**实测峰位条数**纠一次。
+        # 只除不数会在“刚好 10.5 格”这种框上出 11（用户实测：808 px / 77 px = 10.5 → 11 列，
+        # 比真值多一整列，百分比直接偏低）；峰位是数出来的，不四舍五入。
+        _nx = len(r.get("xs") or [])
+        _ny = len(r.get("ys") or [])
+        _cx = int(round((x1 - x0) / px))
+        _cy = int(round((y1 - y0) / py))
+        cols = int(_nx) if (2 <= _nx <= 40 and abs(_nx - _cx) <= 1) else _cx
+        rows = int(_ny) if (2 <= _ny <= 40 and abs(_ny - _cy) <= 1) else _cy
         if not (2 <= cols <= 40 and 2 <= rows <= 40):
             return None
         t = gf.trace_grid(gray, ang, ((x0 + x1) / 2.0, (y0 + y1) / 2.0), (x0, y0, x1, y1), cols, rows)
