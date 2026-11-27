@@ -535,7 +535,8 @@ async function runSep() {
     setStatus(T('先在格网里填列数/行数', 'Set columns/rows first')); return;
   }
   if (S.busy) return;
-  setBusy(true, T('分离刀缝（按你设的列/行切）…', 'Splitting the cuts (by your columns/rows)…'));
+  setBusy(true, T('分离刀缝（按你设的列/行切）…', 'Splitting the cuts (by your columns/rows)…'),
+          [bgBoxText(), $('#gmCols').value + '×' + $('#gmRows').value + T(' 列行', ' cols×rows')].filter(Boolean).join(' · '));
   setStatus(T('正在分离刀缝…', 'Separating the cuts…'));
   const out = $('#sepOut');
   try {
@@ -602,6 +603,17 @@ function updateGmLines() {
   }
   el.textContent = T(`→ 竖刀线 ${c + 1} 条 ／ 横刀线 ${r + 1} 条（刀线比格子多 1）`,
                      `→ ${c + 1} vertical cuts / ${r + 1} horizontal cuts (one more than cells)`) + extra;
+  // 左下角收尾：把这次真正算出来的数字留在那儿 2.6 秒（否则进度条一闪就没，看不出发生了什么）
+  if (S.gm && S.gmLines && S.gmLine) {
+    const nA = S.gmLines.a.length, nB = S.gmLines.b.length;
+    const nC = S.gm.cells ? S.gm.cells.length : 0;
+    const avg = S.gm.cells && S.gm.cells.length
+      ? (S.gm.cells.reduce((s2, x) => s2 + x.pct, 0) / S.gm.cells.length).toFixed(2) : '';
+    bgDone(T(`线 ${nA}×${nB} → ${nC} 格` + (avg ? `，平均 ${avg}%` : ''), ''),
+           /⚠/.test(extra));
+  } else if (S.gm && S.gm.cells) {
+    bgDone(T(`格网 ${c}×${r} → ${S.gm.cells.length} 格`, ''), /⚠/.test(extra));
+  }
 }
 
 function gmSummary(g) {
@@ -719,8 +731,11 @@ async function runModelGrid(extra) {
   // 拿到数之后自己铺线并对缝。以前直接 auto_lines，认不出就退回 10×10，线数自然对不上。
   const needSeed = S.gmLine && !S.gmLines;
   // 必须走 setBusy：直接改 S.busy 不会刷新「计算」按钮
-  setBusy(true, needSeed ? T('认刀缝（这一步最慢，最长约 9 秒）…', 'Tracing cuts (slowest step, up to ~9 s)…')
-                         : T('统计格网…', 'Measuring cells…'));
+  setBusy(true,
+          needSeed ? T('认刀缝（最慢的一步）…', 'Tracing cuts (slowest step)…') : T('统计格网…', 'Measuring cells…'),
+          [bgBoxText(), S.gmLine ? T('逐线', 'per-line') : T('格网', 'grid'),
+           (S.gmCols && S.gmRows) ? (S.gmCols + '×' + S.gmRows + T(' 列行', ' cols×rows')) : '']
+            .filter(Boolean).join(' · '));
   setStatus(T(needSeed ? '正在量这块选区的格数…' : '正在铺格…',
               needSeed ? 'Measuring how many cells fit this region…' : 'Laying out the grid…'));
   const rsig0 = gmRoiSig();
@@ -2052,23 +2067,58 @@ function refreshCalcBtn() {
   $('#btnCalc').disabled = b;
   $('#btnCalc').textContent = b ? t('res.calculating') : t('btn.calc');
 }
-function setBusy(b, label) { S.busy = b; refreshCalcBtn(); bgTask(b ? (label || T('正在计算…', 'Working…')) : ''); }
+function setBusy(b, label, sub) { S.busy = b; refreshCalcBtn(); bgTask(b ? (label || T('正在计算…', 'Working…')) : '', b ? sub : ''); }
 
 /* 左下角「后台在算什么」：一直转到算完，带秒数。
    用户原话「干等会以为挂掉的」——服务端认线最坏要几秒，没这个提示就像死机。 */
-let bgT0 = 0, bgLabel = '', bgTimer = null;
-function bgTask(label) {
+let bgT0 = 0, bgLabel = '', bgSub = '', bgTimer = null, bgHold = null;
+
+/* 左下角那块「后台在算什么」。三行：
+   第 1 行 阶段 + 秒数；第 2 行 这次算的是哪个框、什么判法；第 3 行 算完的收尾数字。 */
+function bgTask(label, sub) {
   const el = $('#bgTask');
   if (bgTimer) { clearInterval(bgTimer); bgTimer = null; }
+  if (bgHold) { clearTimeout(bgHold); bgHold = null; }
   if (!el) return;
-  if (!label) { el.hidden = true; el.textContent = ''; bgLabel = ''; return; }
-  bgLabel = label; bgT0 = Date.now(); el.hidden = false; el.textContent = label;
+  if (!label) {
+    if (bgHold) return;                  // 收尾那行还挂着（bgDone），别被 setBusy(false) 提前关掉
+    el.hidden = true; el.innerHTML = ''; bgLabel = ''; bgSub = ''; return;
+  }
+  bgLabel = label; bgSub = sub || ''; bgT0 = Date.now();
+  el.hidden = false;
+  el.innerHTML = '<div class="bg1"><b>' + label + '</b><span class="bgt">0.0s</span></div>' +
+                 (bgSub ? '<div class="bg2">' + bgSub + '</div>' : '') +
+                 '<div class="bg3" hidden></div>';
   bgTimer = setInterval(() => {
     const e2 = $('#bgTask');
     if (!e2 || e2.hidden) return;
     const s = (Date.now() - bgT0) / 1000;
-    e2.textContent = bgLabel + '　' + (s < 10 ? s.toFixed(1) : s.toFixed(0)) + 's';
+    const t = e2.querySelector('.bgt');
+    if (t) t.textContent = (s < 10 ? s.toFixed(1) : s.toFixed(0)) + 's';
   }, 200);
+}
+
+/* 算完停 2.6 秒再收：留一行收尾数字，否则一闪就没了，用户不知道刚才算了什么 */
+function bgDone(text, warn) {
+  const el = $('#bgTask');
+  if (!el || el.hidden) return;
+  if (bgTimer) { clearInterval(bgTimer); bgTimer = null; }
+  const s = ((Date.now() - bgT0) / 1000).toFixed(1);
+  const t = el.querySelector('.bgt');
+  if (t) t.textContent = s + 's';
+  const l3 = el.querySelector('.bg3');
+  if (l3 && text) {
+    l3.hidden = false;
+    l3.innerHTML = (warn ? '<span class="bgw">⚠ ' : '<span>✓ ') + text + '</span>';
+  }
+  bgHold = setTimeout(() => { const e3 = $('#bgTask'); if (e3) { e3.hidden = true; e3.innerHTML = ''; } }, 2600);
+}
+
+/* 当前那个框的尺寸，给进度条第二行当上下文 */
+function bgBoxText() {
+  const r = (S.rois && S.rois[0] && S.rois[0].box) || null;
+  if (!r) return '';
+  return '框 ' + Math.round(r[2] - r[0]) + '×' + Math.round(r[3] - r[1]) + 'px';
 }
 
 /* 刀缝值从哪来：自动算的 / 沿用的 / 手设的 / 量尺量的 / 记录里的。
@@ -2340,7 +2390,9 @@ async function analyze() {
   }
   // 两种判法各走各的：按块数回落 → 先扫 k；按宽度 → 只等服务器的露底分布建议值，不扫 k（免得两套规则重复算）
   const my = ++S.seq;
-  setBusy(true, T('像素分析（k 曲线 / 逐行统计）…', 'Pixel analysis (k curve / per-row)…'));
+  setBusy(true, T('像素分析（k 曲线 / 逐行统计）…', 'Pixel analysis (k curve / per-row)…'),
+          [bgBoxText(), T('k=', 'k=') + S.line + 'px',
+           T('判法 ', 'mode ') + S.exmode].filter(Boolean).join(' · '));
   try {
     // 扫 k 曲线（按块数回落）也要算进"计算中"：这一趟要 4 秒左右，之前按钮在这段时间还写着
     // "计算"，而后台其实已经在忙，看着像没点动。按露底分布不扫 k（只用建议值），所以那边切换及时。
@@ -2723,7 +2775,8 @@ async function runSemi() {
   const my = ++S.seq;
   if (S.autoAbort) { try { S.autoAbort.abort(); } catch (_) {} }
   const ac = new AbortController(); S.autoAbort = ac;
-  setBusy(true, T('半自动：认色…', 'Semi-auto: detecting colours…'));
+  setBusy(true, T('半自动：认色…', 'Semi-auto: detecting colours…'),
+          [bgBoxText(), T('判法 ', 'mode ') + S.exmode].filter(Boolean).join(' · '));
   try {
     const prevRows = S.autoRows ? S.autoRows.map(x => ({ ...x })) : null;
     const semiBody = { id: S.id, res: S.res, soft: false, roi_native: !!S.roiNative,

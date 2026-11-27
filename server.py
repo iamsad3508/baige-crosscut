@@ -65,7 +65,7 @@ MAX_ROI_PIXELS = 8_000_000
 
 # 算法版本：每次改动会影响判级数值的代码（吸色、容差、刀缝、判级阈值）就 +1。
 # 记录里存的是当时的版本，重开时能看出"数字为什么和存档不一样"。
-APP_VERSION = "2.71"      # 软件版本（发版时改）
+APP_VERSION = "2.72"      # 软件版本（发版时改）
 ALGO_VERSION = "2.15"      # 算法版本（改判级数值就 +1）
 
 app = FastAPI(title="百格分析", docs_url=None, redoc_url=None, openapi_url=None)
@@ -4364,6 +4364,10 @@ def api_grid(req: GridReq):
                                   else (x["p0"][1] + x["p1"][1]) / 2.0) for x in LL)
                     gaps = [b2 - a2 for a2, b2 in zip(mid, mid[1:]) if b2 - a2 > 1e-6]
                     g = float(np.median(gaps)) if gaps else 0.0
+                    # 间距抖动 = 线咬在刀缝的一侧而不是中心（用户说的“对不准”）。
+                    # 实测同一个框：一档给 72~82（极差 10），另一档给 74~79（极差 5），后者才对。
+                    if len(gaps) >= 3 and g > 2:
+                        sc += 0.45 * float(np.std(gaps))      # 单位是 px：抖 ±3px 加 1.4 分
                     if pref and pref > 2:
                         if g > 0:
                             sc += 3.0 * abs(g / pref - 1.0)
@@ -4377,12 +4381,15 @@ def api_grid(req: GridReq):
             # 试哪几档（可配）：档数直接乘耗时。用户那个 786×784 的框三档跑了 31 s，
             # 读屏上就是“挂了”。默认两档，需要时可以 BAIGE_DET_LEVELS=1.0,0.92,0.84 加回来。
             for _tight in [float(v) for v in
-                           (os.environ.get("BAIGE_DET_LEVELS") or "1.0,0.92,0.84").split(",") if v.strip()]:
+                           (os.environ.get("BAIGE_DET_LEVELS") or "1.0,0.92").split(",") if v.strip()]:
                 _levels_tried.append(_tight)
                 # 够好就收：实测用户那个 786×784 的框，三档分别是 fit 3.12 / 3.26 / 8.16，
                 # 最好的是第一档——却因为阈值 1.2 陪跑了两档，19 s 变 7 s 的差距就在这里。
                 # 3.5 的取值保证“第一档明显不像（>3.5）时仍会往下试”。
-                if _best is not None and _best_fit <= 3.5:
+                # 准确优先：门槛回到 1.2。3.5 那种“快”是用第二档更整齐的线换来的，
+                # 用户一眼就看出来“对不准”，不划算。现在靠「间距抖动」打分选档，
+                # 慢也慢在看得见的地方（左下角有秒数）。
+                if _best is not None and _best_fit <= 1.2:
                     break                            # 已经贴合格距，不再多算
                 if _best is not None and time.time() - _t0 > _t_budget:
                     break
