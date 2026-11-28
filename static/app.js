@@ -1735,37 +1735,70 @@ cv.addEventListener('contextmenu', e => {
   e.preventDefault();
   if (!S.img) return;
   const q = evPos(e), p = toImg(q.x, q.y);
+  if (S.mode !== 'rect') return;                 // 只在「框选」页右键才动选区
   for (let i = S.rois.length - 1; i >= 0; i--) {
     if (poi(S.rois[i], p.x, p.y)) { deleteRoi(i); return; }
   }
-  // 点在框**外**也当删除（以前框外右键没反应；手机上又根本没有右键）
-  if (S.rois.length) clearAllRois();
+  // 点在框**外**也当删除（以前框外右键没反应）——只删一个，别把别的选区一起清掉；
+  // 并且只在「框选」页生效：吸色/量尺/块确认页右键不该动选区
+  if (S.mode === 'rect') _delOneRoi(p);
 });
 
-/* 手机没有右键：画布上长按 550ms（手指不动）＝同一个动作。
-   框内长按＝删这个框，框外长按＝清空选区。 */
+/* 手机没有右键：画布上「框外」长按 550ms（手指不动）＝删除框选区。
+   三条护栏，都是为了不把双指缩放/拖框搞坏：
+   ① 只对触摸/笔生效（鼠标有右键）；
+   ② 双指手势（ptrs.size > 1）一律不武装，第二根手指一落就取消；
+   ③ 手指移动超过 10px 取消。 */
 let _lpT = null, _lpXY = null;
 function _lpCancel() { if (_lpT) { clearTimeout(_lpT); _lpT = null; } _lpXY = null; }
+
+/* 删「一个」选区：优先当前选中的；只有一个就删它；多个就删离点击点最近的。
+   以前一律 clearAllRois()，用户一长按整片选区都没了。 */
+function _delOneRoi(p) {
+  if (!S.rois.length) return false;
+  if (S.sel >= 0 && S.sel < S.rois.length) { deleteRoi(S.sel); return true; }
+  if (S.rois.length === 1) { deleteRoi(0); return true; }
+  let best = -1, bd = 1e18;
+  S.rois.forEach((r, i) => {
+    const d = Math.hypot(p.x - (r.box[0] + r.box[2]) / 2, p.y - (r.box[1] + r.box[3]) / 2);
+    if (d < bd) { bd = d; best = i; }
+  });
+  if (best < 0) return false;
+  deleteRoi(best);
+  return true;
+}
+
+/* 自己数触摸指头：不能用 ptrs —— 双指缩放时 ptrs 里有没有值取决于是谁先注册的，
+   实测合成事件下它是 0，靠它挡不住误删。 */
+const _touches = new Set();
 cv.addEventListener('pointerdown', e => {
-  if (!S.img || e.button === 2) return;
+  if (!S.img) return;
+  if (e.pointerType !== 'mouse') _touches.add(e.pointerId);
+  _lpCancel();                                  // 任何新按下都先取消上一次的倒计时
+  if (e.pointerType === 'mouse') return;        // 鼠标用右键
+  if (S.mode !== 'rect') return;                // 只在「框选」页长按才删（吸色/量尺/块确认页不删）
+  if (_touches.size > 1) return;                // 双指：这是缩放，不删
   _lpXY = [e.clientX, e.clientY];
   _lpT = setTimeout(() => {
     _lpT = null;
-    if (S.drag) return;                       // 正在拖框/拖线：别把选区当长按删掉
+    if (S.drag) return;                         // 正在拖框/拖线
+    if (_touches.size > 1) return;
+    if (S.mode !== 'rect') return;
     const q = evPos(e), p = toImg(q.x, q.y);
-    // 只有**框外**长按才删（框内长按照顾“按住框边准备拖”的手势，不能误删；
-    // 鼠标用户删框内还是右键）
     for (let i = S.rois.length - 1; i >= 0; i--) {
-      if (poi(S.rois[i], p.x, p.y)) return;
+      if (poi(S.rois[i], p.x, p.y)) return;      // 框内长按不删（留着给“按住框边要拖”）
     }
-    if (S.rois.length) clearAllRois();
+    _delOneRoi(p);
   }, 550);
 });
 cv.addEventListener('pointermove', e => {
   if (!_lpT || !_lpXY) return;
-  if (Math.hypot(e.clientX - _lpXY[0], e.clientY - _lpXY[1]) > 10) _lpCancel();
+  if (_touches.size > 1 || Math.hypot(e.clientX - _lpXY[0], e.clientY - _lpXY[1]) > 10) _lpCancel();
 });
-['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => cv.addEventListener(ev, _lpCancel));
+['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => cv.addEventListener(ev, e => {
+  if (e && e.pointerType !== 'mouse' && e.pointerId != null) _touches.delete(e.pointerId);
+  _lpCancel();
+}));
 cv.addEventListener('wheel', e => {
   if (!S.img) return;
   e.preventDefault();
