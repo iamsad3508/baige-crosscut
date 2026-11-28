@@ -1482,6 +1482,7 @@ cv.addEventListener('pointerdown', e => {
 
 cv.addEventListener('pointermove', e => {
   if (!S.img) return;
+  if (S.lpLock) return;                          // 长按刚删过框：这次手势剩余部分一律不动画布
   const { x: ex, y: ey } = evPos(e);
   if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, { x: ex, y: ey });
   if (pinch && ptrs.size >= 2) { e.preventDefault(); pinchMove(); return; }
@@ -1742,6 +1743,9 @@ cv.addEventListener('pointercancel', e => {
 cv.addEventListener('contextmenu', e => {
   e.preventDefault();
   if (!S.img) return;
+  // Android 长按 = contextmenu（约 500ms 就发，比 550ms 定时器还早）：
+  // 这条必须走 _lpDeleteAt，把拖拽冻结掉，否则删完 R1 剩下的框会跟着手指滑。
+  if (_touches.size > 0 || (e.pointerType && e.pointerType !== 'mouse')) { _lpDeleteAt(e.clientX, e.clientY); return; }
   const q = evPos(e), p = toImg(q.x, q.y);
   if (S.mode !== 'rect') return;                 // 只在「框选」页右键才动选区
   for (let i = S.rois.length - 1; i >= 0; i--) {
@@ -1771,6 +1775,29 @@ function _delOneRoi(p) {
   return false;
 }
 
+/* 手机长按删框的唯一入口：删掉手指底下那个，并把这次手势彻底冻住。
+   Android 长按会先发 contextmenu（约 500ms），比我们的 550ms 定时器还早，
+   所以两条路必须都走这里，并用 _lpDone 去重，否则会各删一个。 */
+let _lpDone = 0;
+function _lpDeleteAt(cx, cy) {
+  if (!S.img || S.mode !== 'rect' || !S.rois.length) return false;
+  const q = evPos({ clientX: cx, clientY: cy });
+  const p = toImg(q.x, q.y);
+  let on = -1;
+  for (let i = S.rois.length - 1; i >= 0; i--) {
+    if (poi(S.rois[i], p.x, p.y)) { on = i; break; }
+  }
+  if (on < 0) return false;                      // 没压着框：什么都不做
+  _lpDone = Date.now();
+  _lpFired = true;
+  S.lpLock = true;                               // 手指还按着：这次手势剩余部分不动画布
+  S.drag = null;
+  document.body.classList.remove('dragging');
+  deleteRoi(on);
+  draw();
+  return true;
+}
+
 /* 自己数触摸指头：不能用 ptrs —— 双指缩放时 ptrs 里有没有值取决于是谁先注册的，
    实测合成事件下它是 0，靠它挡不住误删。 */
 const _touches = new Set();
@@ -1797,14 +1824,8 @@ cv.addEventListener('pointerdown', e => {
       if (poi(S.rois[i], p.x, p.y)) { on = i; break; }
     }
     if (on < 0) return;
-    // 立即删掉手指底下那个，然后把这次手势彻底冻住：
-    // S.lpLock → pointermove 什么都不做（否则按着的另一个框会跟着手指滑）
-    // _lpFired → pointerup 直接 return（否则抬手会在原位补画一个新框）
-    _lpFired = true;
-    S.lpLock = true;
-    S.drag = null;
-    deleteRoi(on);
-    draw();
+    if (Date.now() - _lpDone < 800) return;    // contextmenu 那条路已经删过了
+    _lpDeleteAt(e.clientX, e.clientY);
   }, 550);
 });
 cv.addEventListener('pointermove', e => {

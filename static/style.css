@@ -34,6 +34,8 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border:2px solid #fff
   border-bottom:1px solid var(--line);position:relative;z-index:5}
 .brand{font-weight:700;font-size:14px;letter-spacing:.2px;margin-right:6px;white-space:nowrap}
 .brand small{font-weight:400;color:var(--ink3);font-size:11px;margin-left:6px}
+/* 手机上 .brand small 是隐藏的，版本号要单独留着可见：排查“改了像没改”全靠它 */
+#verTag{display:inline!important;opacity:.75}
 .devcredit{font-size:11px;color:var(--ink3);border:1px solid var(--line);border-radius:6px;
   padding:3px 7px;white-space:nowrap;flex:0 0 auto;letter-spacing:.2px}
 .spacer{flex:1}
