@@ -1642,6 +1642,11 @@ cv.addEventListener('pointerup', e => {
       else if (t.kind === 'pick') { pickAt(t.x, t.y); return; }
     }
   }
+  if (_lpFired) {                                  // 长按已经删过框：这次抬手别再画新框/改选中
+    _lpFired = false; tapPending = null; S.drag = null;
+    document.body.classList.remove('dragging');
+    draw(); return;
+  }
   const d = S.drag;
   S.drag = null;
   document.body.classList.remove('dragging');
@@ -1749,23 +1754,18 @@ cv.addEventListener('contextmenu', e => {
    ① 只对触摸/笔生效（鼠标有右键）；
    ② 双指手势（ptrs.size > 1）一律不武装，第二根手指一落就取消；
    ③ 手指移动超过 10px 取消。 */
-let _lpT = null, _lpXY = null;
+let _lpT = null, _lpXY = null, _lpFired = false;
 function _lpCancel() { if (_lpT) { clearTimeout(_lpT); _lpT = null; } _lpXY = null; }
 
-/* 删「一个」选区：优先当前选中的；只有一个就删它；多个就删离点击点最近的。
-   以前一律 clearAllRois()，用户一长按整片选区都没了。 */
+/* 删「手指底下那一个」选区。
+   早期版本按 S.sel 删 → 用户长按 R2 却删掉了正激活的 R3；
+   再早还一律 clearAllRois() → 一删整片都没了。现在只认点击位置：
+   压在哪个框上就删哪个，压不到框就什么都不做。 */
 function _delOneRoi(p) {
-  if (!S.rois.length) return false;
-  if (S.sel >= 0 && S.sel < S.rois.length) { deleteRoi(S.sel); return true; }
-  if (S.rois.length === 1) { deleteRoi(0); return true; }
-  let best = -1, bd = 1e18;
-  S.rois.forEach((r, i) => {
-    const d = Math.hypot(p.x - (r.box[0] + r.box[2]) / 2, p.y - (r.box[1] + r.box[3]) / 2);
-    if (d < bd) { bd = d; best = i; }
-  });
-  if (best < 0) return false;
-  deleteRoi(best);
-  return true;
+  for (let i = S.rois.length - 1; i >= 0; i--) {
+    if (poi(S.rois[i], p.x, p.y)) { deleteRoi(i); return true; }
+  }
+  return false;
 }
 
 /* 自己数触摸指头：不能用 ptrs —— 双指缩放时 ptrs 里有没有值取决于是谁先注册的，
@@ -1773,7 +1773,11 @@ function _delOneRoi(p) {
 const _touches = new Set();
 cv.addEventListener('pointerdown', e => {
   if (!S.img) return;
-  if (e.pointerType !== 'mouse') _touches.add(e.pointerId);
+  if (e.pointerType !== 'mouse') {
+    if (e.isPrimary) _touches.clear();       // 新的一次触摸：先清掉可能残留的旧指头
+    // 手机上手指抬在画布外时 cv 收不到 pointerup，残一条旧记录就再也长按不动了
+    _touches.add(e.pointerId);
+  }
   _lpCancel();                                  // 任何新按下都先取消上一次的倒计时
   if (e.pointerType === 'mouse') return;        // 鼠标用右键
   if (S.mode !== 'rect') return;                // 只在「框选」页长按才删（吸色/量尺/块确认页不删）
@@ -1781,24 +1785,33 @@ cv.addEventListener('pointerdown', e => {
   _lpXY = [e.clientX, e.clientY];
   _lpT = setTimeout(() => {
     _lpT = null;
-    if (S.drag) return;                         // 正在拖框/拖线
     if (_touches.size > 1) return;
     if (S.mode !== 'rect') return;
     const q = evPos(e), p = toImg(q.x, q.y);
+    // 只在「压着某个框」时才算长按删除。框外长按不删（以前会删 S.sel，删错人）
+    let on = -1;
     for (let i = S.rois.length - 1; i >= 0; i--) {
-      if (poi(S.rois[i], p.x, p.y)) return;      // 框内长按不删（留着给“按住框边要拖”）
+      if (poi(S.rois[i], p.x, p.y)) { on = i; break; }
     }
-    _delOneRoi(p);
+    if (on < 0) return;
+    // 关键：撤掉这次按下已经开始的“画新框”手势，否则抬手时会在原位置又画一个框，
+    // 删掉的那个位置被新框顶替，看上去就像“删了 R2 却冒出个新 R2”。
+    _lpFired = true;
+    S.drag = null;
+    deleteRoi(on);
+    draw();
   }, 550);
 });
 cv.addEventListener('pointermove', e => {
   if (!_lpT || !_lpXY) return;
   if (_touches.size > 1 || Math.hypot(e.clientX - _lpXY[0], e.clientY - _lpXY[1]) > 10) _lpCancel();
 });
-['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => cv.addEventListener(ev, e => {
+// 抬手/取消挂在 window 上（capture）：手指在画布外抬起也能收到，否则 _touches 会留残指
+['pointerup', 'pointercancel'].forEach(ev => window.addEventListener(ev, e => {
   if (e && e.pointerType !== 'mouse' && e.pointerId != null) _touches.delete(e.pointerId);
   _lpCancel();
-}));
+}, true));
+cv.addEventListener('pointerleave', _lpCancel);
 cv.addEventListener('wheel', e => {
   if (!S.img) return;
   e.preventDefault();
@@ -3217,7 +3230,10 @@ function deleteRoi(i) {
   if (lastGone) S.gm = null;
   dropOverlay();
   refreshRoiList(); syncRoiAngle(); draw();
-  if (S.exmode === 'grid') {
+  // 半自动没开 → 删除也不自动重算（用户要求：没开半自动就别替他跑；要算按「计算」）
+  if (!S.semi) {
+    if (!S.rois.length && lastGone) { if ($('#gmInfo')) $('#gmInfo').textContent = ''; if ($('#gmTrace')) $('#gmTrace').textContent = ''; }
+  } else if (S.exmode === 'grid') {
     if (S.rois.length) scheduleGm();
     else if (lastGone) { if ($('#gmInfo')) $('#gmInfo').textContent = ''; if ($('#gmTrace')) $('#gmTrace').textContent = ''; }
   }
