@@ -1180,7 +1180,7 @@ function drawRois() {
   S.rois.forEach((r, i) => {
     const cps = cornersOf(r).map(p => toScreen(p.x, p.y));
     const sel = i === S.sel;
-    const pending = (S.lpHi === i);            // 长按待删：松手就删，先标成红色让用户看清是哪个
+
     ctx.beginPath();
     ctx.moveTo(cps[0].x, cps[0].y);
     for (let k = 1; k < 4; k++) ctx.lineTo(cps[k].x, cps[k].y);
@@ -1191,9 +1191,9 @@ function drawRois() {
     ctx.lineWidth = sel ? 6.5 : 5;
     ctx.strokeStyle = 'rgba(0,0,0,.62)';
     ctx.stroke();
-    ctx.setLineDash(sel || pending ? [] : [8, 5]);   // 选中=实线，未选中=虚线（不靠颜色区分）
+    ctx.setLineDash(sel ? [] : [8, 5]);        // 选中=实线，未选中=虚线（不靠颜色区分）
     ctx.lineWidth = sel ? 2.8 : 2;
-    ctx.strokeStyle = pending ? '#ff4d4d' : sel ? '#ffd400' : '#ffffff';
+    ctx.strokeStyle = sel ? '#ffd400' : '#ffffff';
     ctx.stroke();
     ctx.restore();
     if (sel) {
@@ -1643,12 +1643,10 @@ cv.addEventListener('pointerup', e => {
       else if (t.kind === 'pick') { pickAt(t.x, t.y); return; }
     }
   }
-  if (_lpTarget >= 0) {                            // 长按待删：抬手才真删，且不再画新框/改选中
-    const _t2 = _lpTarget;
-    _lpTarget = -1; _lpFired = false; S.lpHi = null;
-    tapPending = null; S.drag = null;
+  if (_lpFired) {                                  // 长按已经删过框：解冻，这次抬手不再画框/改选中
+    _lpFired = false; S.lpLock = false; tapPending = null; S.drag = null;
     document.body.classList.remove('dragging');
-    deleteRoi(_t2); setStatus(''); draw(); return;
+    draw(); return;
   }
   const d = S.drag;
   S.drag = null;
@@ -1799,25 +1797,18 @@ cv.addEventListener('pointerdown', e => {
       if (poi(S.rois[i], p.x, p.y)) { on = i; break; }
     }
     if (on < 0) return;
-    // 长按只「标记”，松手才真的删：
-    // 按住不动 0.5s 就删，手指抖一下/还要不要删都来不及，用户根本分不清删了哪个。
-    // 标记后：① 撤掉正在进行的画框/拖框手势（否则抬手会补画一个新框、或拖走另一个框）
-    //        ② 手指再移动超过 14px 就取消（可以滑开反悔）
-    _lpTarget = on;
+    // 立即删掉手指底下那个，然后把这次手势彻底冻住：
+    // S.lpLock → pointermove 什么都不做（否则按着的另一个框会跟着手指滑）
+    // _lpFired → pointerup 直接 return（否则抬手会在原位补画一个新框）
     _lpFired = true;
+    S.lpLock = true;
     S.drag = null;
-    S.lpHi = on;
+    deleteRoi(on);
     draw();
-    setStatus(T('松手删除 R' + (on + 1) + '；滑开取消', 'Release to delete R' + (on + 1) + ' — slide away to cancel'));
   }, 550);
 });
 cv.addEventListener('pointermove', e => {
-  if (_lpTarget >= 0) {                      // 待删中：移动就反悔，别拖别的框
-    if (_lpXY && Math.hypot(e.clientX - _lpXY[0], e.clientY - _lpXY[1]) > 14) {
-      _lpTarget = -1; _lpFired = false; S.lpHi = null; setStatus(''); draw();
-    }
-    return;
-  }
+  if (S.lpLock) return;                      // 长按已经删过框：这次手势剩余部分一律不动画布
   if (!_lpT || !_lpXY) return;
   if (_touches.size > 1 || Math.hypot(e.clientX - _lpXY[0], e.clientY - _lpXY[1]) > 10) _lpCancel();
 });
