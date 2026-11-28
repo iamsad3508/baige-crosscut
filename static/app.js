@@ -1700,9 +1700,13 @@ cv.addEventListener('pointerup', e => {
     S.gmCountsSig = ''; S.gmAutoSig = ''; S.gmLines = null;   // 新框：逐线的线集合重新认
     dropOverlay();                              // 旧覆盖层是按上一组选区算的
     refreshRoiList(); syncRoiAngle(); draw();
-    if (S.exmode === 'grid') scheduleGm();            // 判法=格网：只跑格网，不跑像素分析/扫 k
-    else if (S.semi) scheduleSemi();
-    else analyze();                                    // 连续拖框时合并成一次计算
+    // 半自动没开 → 框完**不自动算**（用户要求：别替他先跑一遍，等他按「计算」或勾半自动）
+    if (S.semi) {
+      if (S.exmode === 'grid') scheduleGm();          // 判法=格网：只跑格网，不跑像素分析/扫 k
+      else scheduleSemi();
+    }
+    // 半自动没开：到这里就结束，什么都不跑（以前这里有一句 else analyze()，
+    // 于是“关闭半自动”照样会 analyze → knee → autosample → blocks → grid 全跑一遍）
     return;
   }
   if (d.kind === 'ruler') {
@@ -1734,7 +1738,34 @@ cv.addEventListener('contextmenu', e => {
   for (let i = S.rois.length - 1; i >= 0; i--) {
     if (poi(S.rois[i], p.x, p.y)) { deleteRoi(i); return; }
   }
+  // 点在框**外**也当删除（以前框外右键没反应；手机上又根本没有右键）
+  if (S.rois.length) clearAllRois();
 });
+
+/* 手机没有右键：画布上长按 550ms（手指不动）＝同一个动作。
+   框内长按＝删这个框，框外长按＝清空选区。 */
+let _lpT = null, _lpXY = null;
+function _lpCancel() { if (_lpT) { clearTimeout(_lpT); _lpT = null; } _lpXY = null; }
+cv.addEventListener('pointerdown', e => {
+  if (!S.img || e.button === 2) return;
+  _lpXY = [e.clientX, e.clientY];
+  _lpT = setTimeout(() => {
+    _lpT = null;
+    if (S.drag) return;                       // 正在拖框/拖线：别把选区当长按删掉
+    const q = evPos(e), p = toImg(q.x, q.y);
+    // 只有**框外**长按才删（框内长按照顾“按住框边准备拖”的手势，不能误删；
+    // 鼠标用户删框内还是右键）
+    for (let i = S.rois.length - 1; i >= 0; i--) {
+      if (poi(S.rois[i], p.x, p.y)) return;
+    }
+    if (S.rois.length) clearAllRois();
+  }, 550);
+});
+cv.addEventListener('pointermove', e => {
+  if (!_lpT || !_lpXY) return;
+  if (Math.hypot(e.clientX - _lpXY[0], e.clientY - _lpXY[1]) > 10) _lpCancel();
+});
+['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => cv.addEventListener(ev, _lpCancel));
 cv.addEventListener('wheel', e => {
   if (!S.img) return;
   e.preventDefault();
@@ -4209,8 +4240,27 @@ function gmLinesFromLattice(opt) {
   return { a: AA, b: BB };
 }
 
+/* 列/行（以及 ＋列/－列/＋行/－行）只在「逐线」模式下影响结果：
+   逐线关着的时候点了也不动（格网判法自己认刀缝），所以直接禁用——
+   能按却没用＝用户以为坏了。 */
+function syncLineGate() {
+  const on = !!S.gmLine;
+  ['#gmCols', '#gmRows'].forEach(sel => {
+    const el = $(sel);
+    if (!el) return;
+    el.disabled = !on;
+    el.title = on ? '' : T('只有勾上「逐线」才用得上：格网判法自己认刀缝，列/行不参与',
+                           'Only used in per-line mode — the seam-grid method finds the cuts itself');
+  });
+  ['#btnLineAuto', '#btnLineSnap', '#btnLineAddX', '#btnLineDelX', '#btnLineAddY', '#btnLineDelY']
+    .forEach(sel => { const el = $(sel); if (el) el.disabled = !on; });
+  const ops = $('#lineOps');
+  if (ops) ops.hidden = !on;
+}
+
 $('#chkLine').onchange = e => {
   S.gmLine = e.target.checked;
+  syncLineGate();
   // 勾上就**先认线**（不再拿等分线顶上）：认线现在是 2~3 秒、且结果可复现，
   // 认不出来时 runModelGrid 里的兜底会按格距铺一套等分线再对缝。
   // 让“先勾后画”和“先画后勾”走同一条路，两种顺序结果就一致了。
@@ -4483,6 +4533,7 @@ S.roiNative = prefGet('roiNative', true);        // 默认开「选区原生」�
 $('#chkRoiNative').checked = S.roiNative;
 S.semi = prefGet('semi', true);                  // 半自动：记住"取消勾"
 $('#chkSemi').checked = S.semi;
+try { syncLineGate(); } catch (_) {}             // 逐线关着 → 列/行与 ＋/－ 按钮不可按
 S.detail = prefGet('detail', false);
 $('#chkDetail').checked = S.detail;
 S.showOverlay = prefGet('overlay', true);
